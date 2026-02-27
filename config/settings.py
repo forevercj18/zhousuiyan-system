@@ -7,11 +7,12 @@ import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = 'django-insecure-zhousuiyan-baby-party-props-rental-system-2024'
+# 优先使用环境变量，便于生产部署
+SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-zhousuiyan-baby-party-props-rental-system-2024')
 
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = [h.strip() for h in os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost').split(',') if h.strip()]
 
 # 自定义用户模型
 AUTH_USER_MODEL = 'core.User'

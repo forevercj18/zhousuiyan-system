@@ -36,6 +36,15 @@
 - Python 3.11+
 - pip
 
+### 环境变量（建议）
+可在项目根目录创建 `.env`（或直接设置系统环境变量）：
+
+```bash
+SECRET_KEY=replace-with-your-secret-key
+DEBUG=True
+ALLOWED_HOSTS=127.0.0.1,localhost
+```
+
 ### 安装步骤
 
 1. 克隆项目
@@ -81,6 +90,19 @@ python manage.py runserver
 - 前端：http://localhost:8000
 - 管理后台：http://localhost:8000/admin
 - 默认账号：admin / admin123
+
+### 一键启动（Windows）
+在项目根目录运行：
+
+```powershell
+.\start.bat
+```
+
+可仅做环境准备不启动服务：
+
+```powershell
+.\start.bat -NoRunServer
+```
 
 ## Docker部署
 
