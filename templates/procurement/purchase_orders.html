@@ -1,0 +1,96 @@
+﻿{% extends "base.html" %}
+
+{% block title %}采购单管理 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}采购单管理{% endblock %}
+
+{% block content %}
+<div class="purchase-orders-list">
+    <div class="page-header">
+        <div class="header-left">
+            <div class="filter-group">
+                <label>状态筛选：</label>
+                <select id="statusFilter" class="form-control" onchange="filterPurchaseOrders()">
+                    <option value="">全部</option>
+                    <option value="draft" {% if status_filter == 'draft' %}selected{% endif %}>待处理</option>
+                    <option value="ordered" {% if status_filter == 'ordered' %}selected{% endif %}>已下单</option>
+                    <option value="arrived" {% if status_filter == 'arrived' %}selected{% endif %}>已收货</option>
+                    <option value="cancelled" {% if status_filter == 'cancelled' %}selected{% endif %}>已取消</option>
+                </select>
+            </div>
+        </div>
+        <div class="header-right">
+            <a href="{% url 'purchase_order_create' %}" class="btn btn-primary">新建采购单</a>
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>采购单号</th>
+                    <th>渠道</th>
+                    <th>供应商</th>
+                    <th>下单日期</th>
+                    <th>到货日期</th>
+                    <th>状态</th>
+                    <th>采购金额</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for po in purchase_orders %}
+                <tr>
+                    <td>{{ po.po_no }}</td>
+                    <td>{{ po.get_channel_display }}</td>
+                    <td>{{ po.supplier }}</td>
+                    <td>{{ po.order_date }}</td>
+                    <td>{{ po.arrival_date|default:"-" }}</td>
+                    <td>
+                        <span class="badge badge-{{ po.status }}">
+                            {{ po.get_status_display }}
+                        </span>
+                    </td>
+                    <td>¥{{ po.total_amount }}</td>
+                    <td>
+                        <div class="action-buttons">
+                            <a href="{% url 'purchase_order_edit' po.id %}" class="btn btn-sm btn-primary">编辑</a>
+                            {% if po.status == 'draft' %}
+                            <button class="btn btn-sm btn-danger" onclick="deletePO({{ po.id }}, '{{ po.po_no }}')">删除</button>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="8" class="text-center">暂无采购单数据</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+function filterPurchaseOrders() {
+    const status = document.getElementById('statusFilter').value;
+    window.location.href = '{% url "purchase_orders_list" %}' + (status ? '?status=' + status : '');
+}
+
+function deletePO(poId, poNo) {
+    if (confirm(`确定要删除采购单 ${poNo} 吗？此操作不可恢复。`)) {
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = `/procurement/purchase-orders/${poId}/delete/`;
+
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'csrfmiddlewaretoken';
+        input.value = '{{ csrf_token }}';
+        form.appendChild(input);
+
+        document.body.appendChild(form);
+        form.submit();
+    }
+}
+</script>
+{% endblock %}

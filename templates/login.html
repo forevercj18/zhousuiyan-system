@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}登录 - 宝宝周岁宴道具租赁系统{% endblock %}
+
+{% block login_content %}
+<div class="login-container">
+    <div class="login-box">
+        <div class="login-header">
+            <img src="/static/images/logo.png" alt="Logo" class="login-logo">
+            <h1>宝宝周岁宴道具租赁系统</h1>
+            <p>Baby Party Props Rental System</p>
+        </div>
+
+        <form method="post" class="login-form">
+            {% csrf_token %}
+
+            {% if messages %}
+            <div class="messages">
+                {% for message in messages %}
+                <div class="alert alert-{{ message.tags }}">
+                    {{ message }}
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            <div class="form-group">
+                <label for="username">用户名</label>
+                <input type="text" id="username" name="username" class="form-control" required autofocus>
+            </div>
+
+            <div class="form-group">
+                <label for="password">密码</label>
+                <input type="password" id="password" name="password" class="form-control" required>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-block">登录</button>
+        </form>
+
+        <div class="login-footer">
+            <p>默认账号：admin / 密码：admin123</p>
+        </div>
+    </div>
+</div>
+{% endblock %}

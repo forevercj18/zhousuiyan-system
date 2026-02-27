@@ -1,0 +1,173 @@
+﻿{% extends "base.html" %}
+
+{% block title %}
+{% if mode == 'create' %}新建采购单{% else %}编辑采购单{% endif %} - 宝宝周岁宴道具租赁系统
+{% endblock %}
+
+{% block page_title %}
+{% if mode == 'create' %}新建采购单{% else %}编辑采购单{% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="purchase-order-form">
+    <form method="post" id="poForm">
+        {% csrf_token %}
+
+        <div class="form-section">
+            <h3>基本信息</h3>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="channel">采购渠道 <span class="required">*</span></label>
+                    <select id="channel" name="channel" class="form-control" required>
+                        <option value="online">网购平台</option>
+                        <option value="secondhand">闲鱼二手</option>
+                        <option value="offline">线下市场</option>
+                        <option value="other">其他</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="supplier">供应商 <span class="required">*</span></label>
+                    <input type="text" id="supplier" name="supplier" class="form-control" required>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="order_date">下单日期 <span class="required">*</span></label>
+                    <input type="date" id="order_date" name="order_date" class="form-control" required>
+                </div>
+                <div class="form-group">
+                    <label for="arrival_date">到货日期</label>
+                    <input type="date" id="arrival_date" name="arrival_date" class="form-control">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="link">采购链接</label>
+                <input type="url" id="link" name="link" class="form-control" placeholder="https://...">
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>采购明细</h3>
+            <div id="poItems">
+                <div class="po-item">
+                    <div class="form-row">
+                        <div class="form-group flex-2">
+                            <label>部件</label>
+                            <select class="form-control part-select" name="part_id[]" required>
+                                <option value="">请选择部件</option>
+                                {% for part in parts %}
+                                <option value="{{ part.id }}">{{ part.name }} {% if part.spec %}({{ part.spec }}){% endif %} - 库存: {{ part.current_stock }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>数量</label>
+                            <input type="number" class="form-control quantity-input" name="quantity[]" value="1" min="1" required>
+                        </div>
+                        <div class="form-group">
+                            <label>单价</label>
+                            <input type="number" class="form-control price-input" name="unit_price[]" step="0.01" min="0" value="0" required>
+                        </div>
+                        <div class="form-group">
+                            <label>小计</label>
+                            <input type="text" class="form-control subtotal-display" value="￥0.00" readonly>
+                        </div>
+                        <div class="form-group">
+                            <label>&nbsp;</label>
+                            <button type="button" class="btn btn-danger btn-remove-item">删除</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <button type="button" class="btn btn-secondary" id="addItemBtn">添加明细</button>
+        </div>
+
+        <div class="form-section">
+            <h3>费用信息</h3>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>采购总额</label>
+                    <input type="text" id="total_amount" class="form-control" readonly value="￥0.00">
+                </div>
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>备注信息</h3>
+            <div class="form-group">
+                <label for="notes">备注</label>
+                <textarea id="notes" name="notes" class="form-control" rows="4"></textarea>
+            </div>
+        </div>
+
+        <div class="form-actions">
+            <a href="{% url 'purchase_orders_list' %}" class="btn btn-secondary">返回</a>
+            <button type="submit" class="btn btn-primary">保存采购单</button>
+        </div>
+    </form>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const poItems = document.getElementById('poItems');
+
+    function calculateSubtotal(item) {
+        const quantity = parseFloat(item.querySelector('.quantity-input').value || 0);
+        const price = parseFloat(item.querySelector('.price-input').value || 0);
+        const subtotal = quantity * price;
+        item.querySelector('.subtotal-display').value = '￥' + subtotal.toFixed(2);
+        calculateTotal();
+    }
+
+    function calculateTotal() {
+        let total = 0;
+        document.querySelectorAll('.po-item').forEach(item => {
+            const quantity = parseFloat(item.querySelector('.quantity-input').value || 0);
+            const price = parseFloat(item.querySelector('.price-input').value || 0);
+            total += quantity * price;
+        });
+        document.getElementById('total_amount').value = '￥' + total.toFixed(2);
+    }
+
+    function attachItemEvents(item) {
+        item.querySelector('.btn-remove-item').addEventListener('click', function() {
+            if (poItems.children.length > 1) {
+                item.remove();
+                calculateTotal();
+            } else {
+                alert('至少保留一条明细');
+            }
+        });
+
+        item.querySelector('.quantity-input').addEventListener('input', function() {
+            calculateSubtotal(item);
+        });
+
+        item.querySelector('.price-input').addEventListener('input', function() {
+            calculateSubtotal(item);
+        });
+    }
+
+    document.getElementById('addItemBtn').addEventListener('click', function() {
+        const template = document.querySelector('.po-item').cloneNode(true);
+        template.querySelectorAll('input').forEach(input => {
+            if (input.type === 'number') {
+                input.value = input.classList.contains('quantity-input') ? '1' : '0';
+            } else {
+                input.value = '';
+            }
+        });
+        template.querySelector('select').selectedIndex = 0;
+        template.querySelector('.subtotal-display').value = '￥0.00';
+        poItems.appendChild(template);
+        attachItemEvents(template);
+    });
+
+    document.querySelectorAll('.po-item').forEach(attachItemEvents);
+    calculateTotal();
+});
+</script>
+{% endblock %}

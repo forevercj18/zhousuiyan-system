@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}订单详情 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}订单详情{% endblock %}
+
+{% block content %}
+<div class="order-detail">
+    <div class="page-header">
+        <div class="header-left">
+            <h3>{{ order.order_no }}</h3>
+        </div>
+        <div class="header-right">
+            <a href="{% url 'order_edit' order.id %}" class="btn btn-primary">编辑订单</a>
+            <a href="{% url 'orders_list' %}" class="btn btn-secondary">返回列表</a>
+        </div>
+    </div>
+
+    <div class="form-section">
+        <h3>客户信息</h3>
+        <p><strong>客户姓名：</strong>{{ order.customer_name }}</p>
+        <p><strong>联系电话：</strong>{{ order.customer_phone }}</p>
+        <p><strong>邮箱：</strong>{{ order.customer_email|default:"-" }}</p>
+        <p><strong>送货地址：</strong>{{ order.delivery_address }}</p>
+        <p><strong>回收地址：</strong>{{ order.return_address|default:"-" }}</p>
+    </div>
+
+    <div class="form-section">
+        <h3>订单信息</h3>
+        <p><strong>活动日期：</strong>{{ order.event_date }}</p>
+        <p><strong>租赁天数：</strong>{{ order.rental_days }} 天</p>
+        <p><strong>发货日期：</strong>{{ order.ship_date|default:"-" }}</p>
+        <p><strong>回收日期：</strong>{{ order.return_date|default:"-" }}</p>
+        <p><strong>状态：</strong>{{ order.get_status_display }}</p>
+    </div>
+
+    <div class="form-section">
+        <h3>订单明细</h3>
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>SKU</th>
+                    <th>数量</th>
+                    <th>租金单价</th>
+                    <th>押金单价</th>
+                    <th>小计</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in order.items.all %}
+                <tr>
+                    <td>{{ item.sku.name }}</td>
+                    <td>{{ item.quantity }}</td>
+                    <td>￥{{ item.rental_price }}</td>
+                    <td>￥{{ item.deposit }}</td>
+                    <td>￥{{ item.subtotal }}</td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="5" class="text-center">暂无明细</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="form-section">
+        <h3>金额信息</h3>
+        <p><strong>订单总额：</strong>￥{{ order.total_amount }}</p>
+        <p><strong>已付押金：</strong>￥{{ order.deposit_paid }}</p>
+        <p><strong>待收尾款：</strong>￥{{ order.balance }}</p>
+        <p><strong>备注：</strong>{{ order.notes|default:"-" }}</p>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,538 @@
+{% extends "base.html" %}
+
+{% block title %}用户管理 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}用户管理{% endblock %}
+
+{% block content %}
+<style>
+.user-management {
+    padding: 0;
+}
+
+.page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+}
+
+.page-header h3 {
+    font-size: 20px;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin: 0;
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 10px 24px;
+    border-radius: 8px;
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+    border: none;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+}
+
+.btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.user-table {
+    background: white;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.user-table table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.user-table thead {
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+}
+
+.user-table th {
+    padding: 16px;
+    text-align: left;
+    font-size: 13px;
+    font-weight: 600;
+    color: #495057;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.user-table td {
+    padding: 16px;
+    border-top: 1px solid #f0f0f0;
+    font-size: 14px;
+    color: #333;
+}
+
+.user-table tbody tr {
+    transition: all 0.2s ease;
+}
+
+.user-table tbody tr:hover {
+    background: #f8f9fa;
+}
+
+.role-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.role-admin {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+.role-manager {
+    background: #e3f2fd;
+    color: #1565c0;
+}
+
+.role-warehouse-manager {
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.role-warehouse-staff {
+    background: #fff3e0;
+    color: #f57c00;
+}
+
+.role-customer-service {
+    background: #fce4ec;
+    color: #c2185b;
+}
+
+.status-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.status-active {
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.status-inactive {
+    background: #ffebee;
+    color: #c62828;
+}
+
+.action-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.btn-sm {
+    padding: 6px 16px;
+    font-size: 13px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 0.2s ease;
+    text-decoration: none;
+    display: inline-block;
+}
+
+.btn-edit {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+.btn-edit:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+}
+
+.btn-delete {
+    background: linear-gradient(135deg, #ef5350 0%, #e53935 100%);
+    color: white;
+}
+
+.btn-delete:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+}
+
+.btn-disable {
+    background: #f5f5f5;
+    color: #666;
+    border: 1px solid #e0e0e0;
+}
+
+.btn-disable:hover {
+    background: #e0e0e0;
+}
+
+/* 模态框样式 */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    animation: fadeIn 0.3s ease;
+}
+
+.modal.active {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal-content {
+    background: white;
+    border-radius: 12px;
+    width: 90%;
+    max-width: 600px;
+    max-height: 90vh;
+    overflow-y: auto;
+    animation: slideUp 0.3s ease;
+}
+
+.modal-header {
+    padding: 20px 24px;
+    border-bottom: 1px solid #f0f0f0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.modal-header h4 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: #1a1a1a;
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 24px;
+    color: #999;
+    cursor: pointer;
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+}
+
+.modal-close:hover {
+    background: #f5f5f5;
+    color: #333;
+}
+
+.modal-body {
+    padding: 24px;
+}
+
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #333;
+}
+
+.form-group input,
+.form-group select {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: all 0.2s ease;
+}
+
+.form-group input:focus,
+.form-group select:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.modal-footer {
+    padding: 16px 24px;
+    border-top: 1px solid #f0f0f0;
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+}
+
+.btn-cancel {
+    background: white;
+    color: #666;
+    border: 1px solid #e0e0e0;
+    padding: 10px 24px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-cancel:hover {
+    background: #f5f5f5;
+}
+
+.btn-save {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    padding: 10px 24px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-save:hover {
+    opacity: 0.9;
+    transform: translateY(-1px);
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes slideUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.permission-list {
+    margin-top: 12px;
+    padding: 12px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    font-size: 13px;
+    color: #666;
+    line-height: 1.8;
+}
+
+.permission-list strong {
+    color: #333;
+}
+</style>
+
+<div class="user-management">
+    <div class="page-header">
+        <h3>用户管理</h3>
+        <button class="btn-primary" onclick="openAddUserModal()">+ 添加用户</button>
+    </div>
+
+    <div class="user-table">
+        <table>
+            <thead>
+                <tr>
+                    <th>用户名</th>
+                    <th>姓名</th>
+                    <th>角色</th>
+                    <th>邮箱</th>
+                    <th>手机号</th>
+                    <th>状态</th>
+                    <th>最后登录</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td><strong>{{ user.username }}</strong></td>
+                    <td>{{ user.full_name }}</td>
+                    <td>
+                        <span class="role-badge role-{{ user.role }}">
+                            {{ user.role_display }}
+                        </span>
+                    </td>
+                    <td>{{ user.email }}</td>
+                    <td>{{ user.phone }}</td>
+                    <td>
+                        {% if user.is_active %}
+                        <span class="status-badge status-active">启用</span>
+                        {% else %}
+                        <span class="status-badge status-inactive">禁用</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ user.last_login|default:"从未登录" }}</td>
+                    <td>
+                        <div class="action-buttons">
+                            <button class="btn-sm btn-edit" onclick="editUser({{ user.id }})">编辑</button>
+                            {% if user.is_active %}
+                            <button class="btn-sm btn-disable" onclick="toggleUserStatus({{ user.id }}, false)">禁用</button>
+                            {% else %}
+                            <button class="btn-sm btn-edit" onclick="toggleUserStatus({{ user.id }}, true)">启用</button>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="8" style="text-align: center; padding: 40px; color: #999;">
+                        暂无用户数据
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 添加/编辑用户模态框 -->
+<div class="modal" id="userModal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h4 id="modalTitle">添加用户</h4>
+            <button class="modal-close" onclick="closeUserModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="userForm">
+                <div class="form-group">
+                    <label>用户名 *</label>
+                    <input type="text" name="username" required placeholder="请输入用户名">
+                </div>
+                <div class="form-group">
+                    <label>姓名 *</label>
+                    <input type="text" name="full_name" required placeholder="请输入真实姓名">
+                </div>
+                <div class="form-group">
+                    <label>角色 *</label>
+                    <select name="role" required onchange="showRolePermissions(this.value)">
+                        <option value="">请选择角色</option>
+                        <option value="admin">超级管理员</option>
+                        <option value="manager">业务经理</option>
+                        <option value="warehouse-manager">仓库主管</option>
+                        <option value="warehouse-staff">仓库操作员</option>
+                        <option value="customer-service">客服</option>
+                    </select>
+                    <div id="rolePermissions" class="permission-list" style="display: none;"></div>
+                </div>
+                <div class="form-group">
+                    <label>邮箱</label>
+                    <input type="email" name="email" placeholder="请输入邮箱">
+                </div>
+                <div class="form-group">
+                    <label>手机号</label>
+                    <input type="tel" name="phone" placeholder="请输入手机号">
+                </div>
+                <div class="form-group">
+                    <label>密码 *</label>
+                    <input type="password" name="password" required placeholder="请输入密码（至少6位）">
+                </div>
+            </form>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-cancel" onclick="closeUserModal()">取消</button>
+            <button class="btn-save" onclick="saveUser()">保存</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// 角色权限说明
+const rolePermissions = {
+    'admin': '<strong>超级管理员</strong><br>• 查看所有数据<br>• 管理用户和角色<br>• 系统设置<br>• 操作日志',
+    'manager': '<strong>业务经理</strong><br>• 查看所有订单和统计<br>• 创建/编辑订单<br>• 查看财务数据<br>• 排期看板<br>• 转寄中心',
+    'warehouse-manager': '<strong>仓库主管</strong><br>• 订单处理中心<br>• 产品管理<br>• 采购管理<br>• 部件库存管理<br>• 出入库流水',
+    'warehouse-staff': '<strong>仓库操作员</strong><br>• 订单处理中心（标记状态）<br>• 查看SKU<br>• 部件出入库操作',
+    'customer-service': '<strong>客服</strong><br>• 查看订单列表<br>• 创建订单<br>• 编辑订单基本信息<br>• 查看排期看板'
+};
+
+function showRolePermissions(role) {
+    const permDiv = document.getElementById('rolePermissions');
+    if (role && rolePermissions[role]) {
+        permDiv.innerHTML = rolePermissions[role];
+        permDiv.style.display = 'block';
+    } else {
+        permDiv.style.display = 'none';
+    }
+}
+
+function openAddUserModal() {
+    document.getElementById('modalTitle').textContent = '添加用户';
+    document.getElementById('userForm').reset();
+    document.getElementById('rolePermissions').style.display = 'none';
+    document.getElementById('userModal').classList.add('active');
+}
+
+function closeUserModal() {
+    document.getElementById('userModal').classList.remove('active');
+}
+
+function editUser(userId) {
+    // 第一阶段：显示toast提示
+    showToast('编辑用户功能（模拟）');
+    // 第二阶段：加载用户数据并打开模态框
+}
+
+function saveUser() {
+    const form = document.getElementById('userForm');
+    if (form.checkValidity()) {
+        showToast('用户保存成功（模拟）');
+        closeUserModal();
+    } else {
+        form.reportValidity();
+    }
+}
+
+function toggleUserStatus(userId, enable) {
+    const action = enable ? '启用' : '禁用';
+    if (confirm(`确定要${action}该用户吗？`)) {
+        showToast(`用户${action}成功（模拟）`);
+        // 第二阶段：调用API更新状态
+    }
+}
+
+function showToast(message) {
+    // 简单的toast提示
+    const toast = document.createElement('div');
+    toast.textContent = message;
+    toast.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #333; color: white; padding: 12px 24px; border-radius: 6px; z-index: 9999;';
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2000);
+}
+
+// 点击模态框外部关闭
+document.getElementById('userModal').addEventListener('click', function(e) {
+    if (e.target === this) {
+        closeUserModal();
+    }
+});
+</script>
+{% endblock %}

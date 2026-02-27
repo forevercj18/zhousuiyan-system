@@ -1,0 +1,72 @@
+﻿{% extends "base.html" %}
+
+{% block title %}转寄中心 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}转寄中心{% endblock %}
+
+{% block content %}
+<div class="transfers-center">
+    <div class="form-section">
+        <h3>转寄候选</h3>
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>回收订单</th>
+                    <th>发货订单</th>
+                    <th>SKU</th>
+                    <th>间隔天数</th>
+                    <th>预计节省</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in candidates %}
+                <tr>
+                    <td>{{ item.order_from.order_no }}</td>
+                    <td>{{ item.order_to.order_no }}</td>
+                    <td>{{ item.sku.name }}</td>
+                    <td>{{ item.gap_days }}</td>
+                    <td>￥{{ item.cost_saved }}</td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="5" class="text-center">暂无可用转寄候选</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="form-section">
+        <h3>转寄任务</h3>
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>任务ID</th>
+                    <th>回收订单</th>
+                    <th>发货订单</th>
+                    <th>SKU</th>
+                    <th>数量</th>
+                    <th>间隔天数</th>
+                    <th>状态</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for task in tasks %}
+                <tr>
+                    <td>{{ task.id }}</td>
+                    <td>{{ task.order_from.order_no }}</td>
+                    <td>{{ task.order_to.order_no }}</td>
+                    <td>{{ task.sku.name }}</td>
+                    <td>{{ task.quantity }}</td>
+                    <td>{{ task.gap_days }}</td>
+                    <td>{{ task.get_status_display }}</td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="7" class="text-center">暂无转寄任务</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,265 @@
+﻿{% extends "base.html" %}
+
+{% block title %}
+{% if mode == 'create' %}新建订单
+{% elif mode == 'edit' %}编辑订单
+{% else %}订单详情
+{% endif %} - 宝宝周岁宴道具租赁系统
+{% endblock %}
+
+{% block page_title %}
+{% if mode == 'create' %}新建订单
+{% elif mode == 'edit' %}编辑订单
+{% else %}订单详情
+{% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="order-form">
+    <form method="post" id="orderForm">
+        {% csrf_token %}
+
+        <div class="form-section">
+            <h3>基本信息</h3>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="customer_name">客户姓名 <span class="required">*</span></label>
+                    <input type="text" id="customer_name" name="customer_name" class="form-control"
+                           value="{% if order %}{{ order.customer_name }}{% endif %}"
+                           {% if mode == 'view' %}readonly{% else %}required{% endif %}>
+                </div>
+                <div class="form-group">
+                    <label for="customer_phone">联系电话 <span class="required">*</span></label>
+                    <input type="tel" id="customer_phone" name="customer_phone" class="form-control"
+                           value="{% if order %}{{ order.customer_phone }}{% endif %}"
+                           {% if mode == 'view' %}readonly{% else %}required{% endif %}>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="event_date">预定日期 <span class="required">*</span></label>
+                    <input type="date" id="event_date" name="event_date" class="form-control"
+                           value="{% if order %}{{ order.event_date|date:'Y-m-d' }}{% endif %}"
+                           {% if mode == 'view' %}readonly{% else %}required{% endif %}>
+                    <small class="form-text text-muted">请选择活动举办的日期</small>
+                </div>
+                <div class="form-group">
+                    <label for="rental_days">租赁天数</label>
+                    <input type="number" id="rental_days" name="rental_days" class="form-control"
+                           value="{% if order %}{{ order.rental_days }}{% else %}1{% endif %}" min="1"
+                           {% if mode == 'view' %}readonly{% endif %}>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="delivery_address">送货地址 <span class="required">*</span></label>
+                <input type="text" id="delivery_address" name="delivery_address" class="form-control"
+                       value="{% if order %}{{ order.delivery_address }}{% endif %}"
+                       placeholder="请输入详细的送货地址"
+                       {% if mode == 'view' %}readonly{% else %}required{% endif %}>
+            </div>
+
+            <div class="form-group">
+                <label for="notes">订单备注</label>
+                <textarea id="notes" name="notes" class="form-control" rows="3"
+                          placeholder="请输入订单相关备注信息"
+                          {% if mode == 'view' %}readonly{% endif %}>{% if order %}{{ order.notes }}{% endif %}</textarea>
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>订单明细</h3>
+            <div id="orderItems">
+                {% if order %}
+                    {% for item in order.items.all %}
+                    <div class="order-item">
+                        <div class="form-row">
+                            <div class="form-group flex-2">
+                                <label>SKU套餐</label>
+                                <select class="form-control sku-select" name="sku_id[]"
+                                        {% if mode == 'view' %}disabled{% endif %}>
+                                    <option value="">请选择套餐</option>
+                                    {% for sku in skus %}
+                                    <option value="{{ sku.id }}"
+                                            data-price="{{ sku.rental_price }}"
+                                            data-deposit="{{ sku.deposit }}"
+                                            {% if sku.id == item.sku_id %}selected{% endif %}>
+                                        {{ sku.name }} - ¥{{ sku.rental_price }} (库存: {{ sku.stock }})
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>数量</label>
+                                <input type="number" class="form-control quantity-input" name="quantity[]"
+                                       value="{{ item.quantity }}" min="1"
+                                       {% if mode == 'view' %}readonly{% endif %}>
+                            </div>
+                            <div class="form-group">
+                                <label>租金</label>
+                                <input type="text" class="form-control price-display"
+                                       value="¥{{ item.rental_price }}" readonly>
+                            </div>
+                            {% if mode != 'view' %}
+                            <div class="form-group">
+                                <label>&nbsp;</label>
+                                <button type="button" class="btn btn-danger btn-remove-item">删除</button>
+                            </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                <div class="order-item">
+                    <div class="form-row">
+                        <div class="form-group flex-2">
+                            <label>SKU套餐</label>
+                            <select class="form-control sku-select" name="sku_id[]" required>
+                                <option value="">请选择套餐</option>
+                                {% for sku in skus %}
+                                <option value="{{ sku.id }}"
+                                        data-price="{{ sku.rental_price }}"
+                                        data-deposit="{{ sku.deposit }}">
+                                    {{ sku.name }} - ¥{{ sku.rental_price }} (库存: {{ sku.stock }})
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>数量</label>
+                            <input type="number" class="form-control quantity-input" name="quantity[]" value="1" min="1" required>
+                        </div>
+                        <div class="form-group">
+                            <label>租金</label>
+                            <input type="text" class="form-control price-display" value="¥0.00" readonly>
+                        </div>
+                        <div class="form-group">
+                            <label>&nbsp;</label>
+                            <button type="button" class="btn btn-danger btn-remove-item">删除</button>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+
+            {% if mode != 'view' %}
+            <button type="button" class="btn btn-secondary" id="addItemBtn">添加明细</button>
+            {% endif %}
+        </div>
+
+        <div class="form-section">
+            <h3>费用信息</h3>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>订单总额</label>
+                    <input type="text" id="total_amount" class="form-control" readonly
+                           value="{% if order %}¥{{ order.total_amount }}{% else %}¥0.00{% endif %}">
+                </div>
+                <div class="form-group">
+                    <label>押金金额</label>
+                    <input type="text" id="deposit_amount" class="form-control" readonly
+                           value="{% if order %}¥{{ order.deposit_paid }}{% else %}¥0.00{% endif %}">
+                </div>
+            </div>
+
+            {% if order and mode == 'view' %}
+            <div class="form-row">
+                <div class="form-group">
+                    <label>已付押金</label>
+                    <input type="text" class="form-control" readonly value="¥{{ order.deposit_paid }}">
+                </div>
+                <div class="form-group">
+                    <label>待收尾款</label>
+                    <input type="text" class="form-control" readonly value="¥{{ order.balance }}">
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="form-section">
+            <h3>备注信息</h3>
+            <div class="form-group">
+                <label for="notes">订单备注</label>
+                <textarea id="notes" name="notes" class="form-control" rows="4"
+                          {% if mode == 'view' %}readonly{% endif %}>{% if order %}{{ order.notes }}{% endif %}</textarea>
+            </div>
+        </div>
+
+        <div class="form-actions">
+            <a href="{% url 'orders_list' %}" class="btn btn-secondary">返回</a>
+            {% if mode != 'view' %}
+            <button type="submit" class="btn btn-primary">保存订单</button>
+            {% endif %}
+        </div>
+    </form>
+</div>
+
+<script>
+// SKU选择和价格计算
+document.addEventListener('DOMContentLoaded', function() {
+    const orderItems = document.getElementById('orderItems');
+
+    // 添加明细行
+    document.getElementById('addItemBtn')?.addEventListener('click', function() {
+        const template = document.querySelector('.order-item').cloneNode(true);
+        template.querySelectorAll('input').forEach(input => input.value = input.type === 'number' ? '1' : '');
+        template.querySelector('select').selectedIndex = 0;
+        orderItems.appendChild(template);
+        attachItemEvents(template);
+    });
+
+    // 删除明细行
+    function attachItemEvents(item) {
+        item.querySelector('.btn-remove-item')?.addEventListener('click', function() {
+            if (orderItems.children.length > 1) {
+                item.remove();
+                calculateTotal();
+            } else {
+                alert('至少保留一条明细');
+            }
+        });
+
+        item.querySelector('.sku-select')?.addEventListener('change', function() {
+            const option = this.options[this.selectedIndex];
+            const price = option.dataset.price || 0;
+            const quantity = item.querySelector('.quantity-input').value;
+            item.querySelector('.price-display').value = '¥' + (price * quantity).toFixed(2);
+            calculateTotal();
+        });
+
+        item.querySelector('.quantity-input')?.addEventListener('input', function() {
+            const select = item.querySelector('.sku-select');
+            const option = select.options[select.selectedIndex];
+            const price = option.dataset.price || 0;
+            item.querySelector('.price-display').value = '¥' + (price * this.value).toFixed(2);
+            calculateTotal();
+        });
+    }
+
+    // 计算总额
+    function calculateTotal() {
+        let total = 0;
+        let deposit = 0;
+
+        document.querySelectorAll('.order-item').forEach(item => {
+            const select = item.querySelector('.sku-select');
+            const option = select.options[select.selectedIndex];
+            const price = parseFloat(option.dataset.price || 0);
+            const depositAmount = parseFloat(option.dataset.deposit || 0);
+            const quantity = parseInt(item.querySelector('.quantity-input').value || 0);
+
+            total += price * quantity;
+            deposit += depositAmount * quantity;
+        });
+
+        document.getElementById('total_amount').value = '¥' + total.toFixed(2);
+        document.getElementById('deposit_amount').value = '¥' + deposit.toFixed(2);
+    }
+
+    // 初始化事件
+    document.querySelectorAll('.order-item').forEach(attachItemEvents);
+    calculateTotal();
+});
+</script>
+{% endblock %}

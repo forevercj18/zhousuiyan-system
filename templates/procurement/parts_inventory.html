@@ -1,0 +1,313 @@
+﻿{% extends "base.html" %}
+
+{% block title %}部件库存 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}部件库存{% endblock %}
+
+{% block content %}
+<div class="parts-inventory">
+    <div class="page-header">
+        <div class="header-left">
+            <div class="filter-group">
+                <label>类别筛选：</label>
+                <select id="categoryFilter" class="form-control" onchange="filterParts()">
+                    <option value="">全部</option>
+                    <option value="main" {% if category == 'main' %}selected{% endif %}>背景板</option>
+                    <option value="accessory" {% if category == 'accessory' %}selected{% endif %}>装饰品</option>
+                    <option value="consumable" {% if category == 'consumable' %}selected{% endif %}>气球</option>
+                    <option value="packaging" {% if category == 'packaging' %}selected{% endif %}>支架</option>
+                    <option value="other" {% if category == 'other' %}selected{% endif %}>其他</option>
+                </select>
+            </div>
+        </div>
+        <div class="header-right">
+            <button class="btn btn-success" onclick="showInboundModal()">入库</button>
+            <button class="btn btn-warning" onclick="showOutboundModal()">出库</button>
+            <button class="btn btn-primary" onclick="showCreateModal()">新建部件</button>
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>部件名称</th>
+                    <th>规格</th>
+                    <th>类别</th>
+                    <th>单位</th>
+                    <th>当前库存</th>
+                    <th>安全库存</th>
+                    <th>存放位置</th>
+                    <th>库存状态</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for part in parts %}
+                <tr class="{% if part.is_low_stock %}low-stock{% endif %}">
+                    <td>{{ part.id }}</td>
+                    <td>{{ part.name }}</td>
+                    <td>{{ part.spec|default:"-" }}</td>
+                    <td>{{ part.get_category_display }}</td>
+                    <td>{{ part.unit }}</td>
+                    <td class="{% if part.is_low_stock %}text-danger{% endif %}">
+                        {{ part.current_stock }}
+                    </td>
+                    <td>{{ part.safety_stock }}</td>
+                    <td>{{ part.location|default:"-" }}</td>
+                    <td>
+                        {% if part.is_low_stock %}
+                        <span class="badge badge-danger">库存不足</span>
+                        {% else %}
+                        <span class="badge badge-success">库存正常</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="action-buttons">
+                            <button class="btn btn-sm btn-primary" onclick="showEditModal({{ part.id }}, '{{ part.name }}', '{{ part.spec }}', '{{ part.category }}', '{{ part.unit }}', {{ part.safety_stock }}, '{{ part.location }}')">编辑</button>
+                            <button class="btn btn-sm btn-danger" onclick="deletePart({{ part.id }}, '{{ part.name }}')">删除</button>
+                        </div>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="10" class="text-center">暂无部件数据</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 新建部件模态框 -->
+<div id="createModal" class="modal">
+    <div class="modal-content">
+        <span class="close" onclick="closeModal('createModal')">&times;</span>
+        <h3>新建部件</h3>
+        <form method="POST" action="{% url 'part_create' %}">
+            {% csrf_token %}
+            <div class="form-group">
+                <label>部件名称 <span class="required">*</span></label>
+                <input type="text" name="name" class="form-control" required>
+            </div>
+            <div class="form-group">
+                <label>规格</label>
+                <input type="text" name="spec" class="form-control">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>类别 <span class="required">*</span></label>
+                    <select name="category" class="form-control" required>
+                        <option value="main">背景板</option>
+                        <option value="accessory">装饰品</option>
+                        <option value="consumable">气球</option>
+                        <option value="packaging">支架</option>
+                        <option value="other">其他</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>单位</label>
+                    <input type="text" name="unit" class="form-control" value="个">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>初始库存</label>
+                    <input type="number" name="current_stock" class="form-control" value="0" min="0">
+                </div>
+                <div class="form-group">
+                    <label>安全库存</label>
+                    <input type="number" name="safety_stock" class="form-control" value="0" min="0">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>存放位置</label>
+                <input type="text" name="location" class="form-control">
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('createModal')">取消</button>
+                <button type="submit" class="btn btn-primary">创建</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 编辑部件模态框 -->
+<div id="editModal" class="modal">
+    <div class="modal-content">
+        <span class="close" onclick="closeModal('editModal')">&times;</span>
+        <h3>编辑部件</h3>
+        <form method="POST" id="editForm">
+            {% csrf_token %}
+            <div class="form-group">
+                <label>部件名称 <span class="required">*</span></label>
+                <input type="text" name="name" id="edit_name" class="form-control" required>
+            </div>
+            <div class="form-group">
+                <label>规格</label>
+                <input type="text" name="spec" id="edit_spec" class="form-control">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>类别 <span class="required">*</span></label>
+                    <select name="category" id="edit_category" class="form-control" required>
+                        <option value="main">背景板</option>
+                        <option value="accessory">装饰品</option>
+                        <option value="consumable">气球</option>
+                        <option value="packaging">支架</option>
+                        <option value="other">其他</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>单位</label>
+                    <input type="text" name="unit" id="edit_unit" class="form-control">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>安全库存</label>
+                    <input type="number" name="safety_stock" id="edit_safety_stock" class="form-control" min="0">
+                </div>
+                <div class="form-group">
+                    <label>存放位置</label>
+                    <input type="text" name="location" id="edit_location" class="form-control">
+                </div>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('editModal')">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 入库模态框 -->
+<div id="inboundModal" class="modal">
+    <div class="modal-content">
+        <span class="close" onclick="closeModal('inboundModal')">&times;</span>
+        <h3>部件入库</h3>
+        <form method="POST" action="{% url 'part_inbound' %}">
+            {% csrf_token %}
+            <div class="form-group">
+                <label>选择部件 <span class="required">*</span></label>
+                <select name="part_id" class="form-control" required>
+                    <option value="">请选择部件</option>
+                    {% for part in parts %}
+                    <option value="{{ part.id }}">{{ part.name }} ({{ part.spec }})</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>入库数量 <span class="required">*</span></label>
+                <input type="number" name="quantity" class="form-control" min="1" required>
+            </div>
+            <div class="form-group">
+                <label>关联单据</label>
+                <input type="text" name="related_doc" class="form-control" placeholder="如：采购单号">
+            </div>
+            <div class="form-group">
+                <label>备注</label>
+                <textarea name="notes" class="form-control" rows="3"></textarea>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('inboundModal')">取消</button>
+                <button type="submit" class="btn btn-success">确认入库</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 出库模态框 -->
+<div id="outboundModal" class="modal">
+    <div class="modal-content">
+        <span class="close" onclick="closeModal('outboundModal')">&times;</span>
+        <h3>部件出库</h3>
+        <form method="POST" action="{% url 'part_outbound' %}">
+            {% csrf_token %}
+            <div class="form-group">
+                <label>选择部件 <span class="required">*</span></label>
+                <select name="part_id" class="form-control" required>
+                    <option value="">请选择部件</option>
+                    {% for part in parts %}
+                    <option value="{{ part.id }}">{{ part.name }} ({{ part.spec }}) - 库存: {{ part.current_stock }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>出库数量 <span class="required">*</span></label>
+                <input type="number" name="quantity" class="form-control" min="1" required>
+            </div>
+            <div class="form-group">
+                <label>关联单据</label>
+                <input type="text" name="related_doc" class="form-control" placeholder="如：订单号">
+            </div>
+            <div class="form-group">
+                <label>备注</label>
+                <textarea name="notes" class="form-control" rows="3"></textarea>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('outboundModal')">取消</button>
+                <button type="submit" class="btn btn-warning">确认出库</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+function filterParts() {
+    const category = document.getElementById('categoryFilter').value;
+    window.location.href = '{% url "parts_inventory_list" %}' + (category ? '?category=' + category : '');
+}
+
+function showCreateModal() {
+    document.getElementById('createModal').style.display = 'block';
+}
+
+function showEditModal(id, name, spec, category, unit, safetyStock, location) {
+    document.getElementById('editForm').action = `/procurement/parts/${id}/edit/`;
+    document.getElementById('edit_name').value = name;
+    document.getElementById('edit_spec').value = spec || '';
+    document.getElementById('edit_category').value = category;
+    document.getElementById('edit_unit').value = unit;
+    document.getElementById('edit_safety_stock').value = safetyStock;
+    document.getElementById('edit_location').value = location || '';
+    document.getElementById('editModal').style.display = 'block';
+}
+
+function showInboundModal() {
+    document.getElementById('inboundModal').style.display = 'block';
+}
+
+function showOutboundModal() {
+    document.getElementById('outboundModal').style.display = 'block';
+}
+
+function closeModal(modalId) {
+    document.getElementById(modalId).style.display = 'none';
+}
+
+function deletePart(partId, partName) {
+    if (confirm(`确定要删除部件 ${partName} 吗？`)) {
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = `/procurement/parts/${partId}/delete/`;
+
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'csrfmiddlewaretoken';
+        input.value = '{{ csrf_token }}';
+        form.appendChild(input);
+
+        document.body.appendChild(form);
+        form.submit();
+    }
+}
+
+// 点击模态框外部关闭
+window.onclick = function(event) {
+    if (event.target.classList.contains('modal')) {
+        event.target.style.display = 'none';
+    }
+}
+</script>
+{% endblock %}

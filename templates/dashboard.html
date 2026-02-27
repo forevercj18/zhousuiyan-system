@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{% block title %}工作台 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}工作台{% endblock %}
+
+{% block content %}
+<div class="dashboard">
+    <!-- 统计卡片 -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-icon" style="background: #ff9800;">📋</div>
+            <div class="stat-info">
+                <div class="stat-label">待处理订单</div>
+                <div class="stat-value">{{ stats.pending_orders }}</div>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-icon" style="background: #4caf50;">✅</div>
+            <div class="stat-info">
+                <div class="stat-label">已确认订单</div>
+                <div class="stat-value">{{ stats.confirmed_orders }}</div>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-icon" style="background: #2196f3;">🚚</div>
+            <div class="stat-info">
+                <div class="stat-label">已送达订单</div>
+                <div class="stat-value">{{ stats.delivered_orders }}</div>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-icon" style="background: #f44336;">⚠️</div>
+            <div class="stat-info">
+                <div class="stat-label">低库存部件</div>
+                <div class="stat-value">{{ stats.low_stock_parts }}</div>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-icon" style="background: #9c27b0;">💰</div>
+            <div class="stat-info">
+                <div class="stat-label">总营收</div>
+                <div class="stat-value">¥{{ stats.total_revenue }}</div>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-icon" style="background: #00bcd4;">💵</div>
+            <div class="stat-info">
+                <div class="stat-label">待收款</div>
+                <div class="stat-value">¥{{ stats.pending_revenue }}</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 快捷操作 -->
+    <div class="quick-actions">
+        <h3>快捷操作</h3>
+        <div class="action-buttons">
+            <a href="{% url 'order_create' %}" class="btn btn-primary">新建订单</a>
+            <a href="{% url 'workbench' %}" class="btn btn-secondary">订单处理</a>
+            <a href="{% url 'calendar' %}" class="btn btn-secondary">查看排期</a>
+            <a href="{% url 'purchase_order_create' %}" class="btn btn-secondary">创建采购单</a>
+        </div>
+    </div>
+
+    <!-- 最近订单 -->
+    <div class="recent-orders">
+        <h3>最近订单</h3>
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>订单号</th>
+                        <th>客户</th>
+                        <th>活动日期</th>
+                        <th>状态</th>
+                        <th>金额</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for order in recent_orders %}
+                    <tr>
+                        <td>{{ order.order_no }}</td>
+                        <td>{{ order.customer_name }}</td>
+                        <td>{{ order.event_date }}</td>
+                        <td>
+                            <span class="badge badge-{{ order.status }}">
+                                {% if order.status == 'pending' %}待处理
+                                {% elif order.status == 'confirmed' %}已确认
+                                {% elif order.status == 'delivered' %}已送达
+                                {% elif order.status == 'completed' %}已完成
+                                {% endif %}
+                            </span>
+                        </td>
+                        <td>¥{{ order.total_amount }}</td>
+                        <td>
+                            <a href="{% url 'order_detail' order.id %}" class="btn btn-sm">查看</a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 低库存预警 -->
+    {% if low_stock_parts %}
+    <div class="low-stock-alert">
+        <h3>低库存预警</h3>
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>部件编号</th>
+                        <th>部件名称</th>
+                        <th>类别</th>
+                        <th>当前库存</th>
+                        <th>最低库存</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for part in low_stock_parts %}
+                    <tr>
+                        <td>{{ part.code }}</td>
+                        <td>{{ part.name }}</td>
+                        <td>{{ part.category }}</td>
+                        <td class="text-danger">{{ part.available }}</td>
+                        <td>{{ part.min_stock }}</td>
+                        <td>
+                            <a href="{% url 'purchase_order_create' %}" class="btn btn-sm btn-warning">采购</a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

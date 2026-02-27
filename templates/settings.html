@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+
+{% block title %}系统设置 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}系统设置{% endblock %}
+
+{% block content %}
+<div class="settings">
+    <form method="post">
+        {% csrf_token %}
+
+        <div class="form-section">
+            <h3>基本设置</h3>
+            <div class="form-group">
+                <label for="company_name">公司名称</label>
+                <input type="text" id="company_name" name="company_name" class="form-control"
+                       value="宝宝周岁宴道具租赁公司">
+            </div>
+            <div class="form-group">
+                <label for="contact_phone">联系电话</label>
+                <input type="tel" id="contact_phone" name="contact_phone" class="form-control"
+                       value="400-888-8888">
+            </div>
+            <div class="form-group">
+                <label for="contact_email">联系邮箱</label>
+                <input type="email" id="contact_email" name="contact_email" class="form-control"
+                       value="contact@babyparty.com">
+            </div>
+            <div class="form-group">
+                <label for="address">公司地址</label>
+                <input type="text" id="address" name="address" class="form-control"
+                       value="上海市浦东新区世纪大道1号">
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>业务设置</h3>
+            <div class="form-group">
+                <label for="default_deposit_rate">默认押金比例 (%)</label>
+                <input type="number" id="default_deposit_rate" name="default_deposit_rate" class="form-control"
+                       value="30" min="0" max="100">
+                <small class="form-text">订单押金占租金的百分比</small>
+            </div>
+            <div class="form-group">
+                <label for="advance_days">提前预订天数</label>
+                <input type="number" id="advance_days" name="advance_days" class="form-control"
+                       value="3" min="1">
+                <small class="form-text">客户需要提前多少天预订</small>
+            </div>
+            <div class="form-group">
+                <label for="rental_days">默认租赁天数</label>
+                <input type="number" id="rental_days" name="rental_days" class="form-control"
+                       value="2" min="1">
+                <small class="form-text">默认租赁时长（天）</small>
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>库存设置</h3>
+            <div class="form-group">
+                <label for="low_stock_threshold">低库存预警比例 (%)</label>
+                <input type="number" id="low_stock_threshold" name="low_stock_threshold" class="form-control"
+                       value="20" min="0" max="100">
+                <small class="form-text">当可用库存低于最低库存的此百分比时预警</small>
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" name="auto_alert" checked>
+                    启用低库存自动提醒
+                </label>
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>通知设置</h3>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" name="email_notification" checked>
+                    启用邮件通知
+                </label>
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" name="sms_notification" checked>
+                    启用短信通知
+                </label>
+            </div>
+            <div class="form-group">
+                <label for="notification_email">通知邮箱</label>
+                <input type="email" id="notification_email" name="notification_email" class="form-control"
+                       value="admin@babyparty.com">
+            </div>
+        </div>
+
+        <div class="form-section">
+            <h3>系统信息</h3>
+            <div class="info-grid">
+                <div class="info-item">
+                    <label>系统版本：</label>
+                    <span>v1.0.0</span>
+                </div>
+                <div class="info-item">
+                    <label>数据库：</label>
+                    <span>SQLite</span>
+                </div>
+                <div class="info-item">
+                    <label>Python版本：</label>
+                    <span>3.11</span>
+                </div>
+                <div class="info-item">
+                    <label>Django版本：</label>
+                    <span>4.2.9</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary">保存设置</button>
+            <button type="button" class="btn btn-secondary" onclick="resetForm()">重置</button>
+        </div>
+    </form>
+</div>
+
+<script>
+function resetForm() {
+    if (confirm('确定要重置所有设置吗？')) {
+        location.reload();
+    }
+}
+</script>
+{% endblock %}

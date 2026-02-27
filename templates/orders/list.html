@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block title %}订单管理 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}订单管理{% endblock %}
+
+{% block content %}
+<div class="orders-list">
+    <div class="page-header">
+        <div class="header-left">
+            <div class="filter-group">
+                <label>状态筛选：</label>
+                <select id="statusFilter" class="form-control" onchange="filterOrders()">
+                    <option value="">全部</option>
+                    <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>待处理</option>
+                    <option value="confirmed" {% if status_filter == 'confirmed' %}selected{% endif %}>已确认</option>
+                    <option value="delivered" {% if status_filter == 'delivered' %}selected{% endif %}>已送达</option>
+                    <option value="completed" {% if status_filter == 'completed' %}selected{% endif %}>已完成</option>
+                    <option value="cancelled" {% if status_filter == 'cancelled' %}selected{% endif %}>已取消</option>
+                </select>
+            </div>
+        </div>
+        <div class="header-right">
+            <a href="{% url 'order_create' %}" class="btn btn-primary">新建订单</a>
+        </div>
+    </div>
+
+    <div class="table-container">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>订单号</th>
+                    <th>客户姓名</th>
+                    <th>联系电话</th>
+                    <th>预定日期</th>
+                    <th>送货地址</th>
+                    <th>状态</th>
+                    <th>订单金额</th>
+                    <th>已付押金</th>
+                    <th>待收尾款</th>
+                    <th>创建时间</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for order in orders %}
+                <tr>
+                    <td>{{ order.order_no }}</td>
+                    <td>{{ order.customer_name }}</td>
+                    <td>{{ order.customer_phone }}</td>
+                    <td>{{ order.event_date }}</td>
+                    <td class="text-truncate" title="{{ order.delivery_address }}">{{ order.delivery_address }}</td>
+                    <td>
+                        <span class="badge badge-{{ order.status }}">
+                            {% if order.status == 'pending' %}待处理
+                            {% elif order.status == 'confirmed' %}已确认
+                            {% elif order.status == 'delivered' %}已送达
+                            {% elif order.status == 'completed' %}已完成
+                            {% elif order.status == 'cancelled' %}已取消
+                            {% endif %}
+                        </span>
+                    </td>
+                    <td>¥{{ order.total_amount }}</td>
+                    <td>¥{{ order.deposit_paid }}</td>
+                    <td>¥{{ order.balance }}</td>
+                    <td>{{ order.created_at|date:"Y-m-d H:i" }}</td>
+                    <td>
+                        <div class="action-buttons">
+                            <a href="{% url 'order_detail' order.id %}" class="btn btn-sm">查看</a>
+                            <a href="{% url 'order_edit' order.id %}" class="btn btn-sm btn-primary">编辑</a>
+                            {% if order.status == 'pending' %}
+                            <button class="btn btn-sm btn-danger" onclick="deleteOrder({{ order.id }}, '{{ order.order_no }}')">删除</button>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="11" class="text-center">暂无订单数据</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+function filterOrders() {
+    const status = document.getElementById('statusFilter').value;
+    window.location.href = '{% url "orders_list" %}' + (status ? '?status=' + status : '');
+}
+
+function deleteOrder(orderId, orderNo) {
+    if (confirm(`确定要删除订单 ${orderNo} 吗？此操作不可恢复。`)) {
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = `/orders/${orderId}/delete/`;
+
+        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
+        if (csrfToken) {
+            form.appendChild(csrfToken.cloneNode());
+        } else {
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'csrfmiddlewaretoken';
+            input.value = '{{ csrf_token }}';
+            form.appendChild(input);
+        }
+
+        document.body.appendChild(form);
+        form.submit();
+    }
+}
+</script>
+{% endblock %}
