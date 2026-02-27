@@ -15,6 +15,7 @@
                     <th>SKU</th>
                     <th>间隔天数</th>
                     <th>预计节省</th>
+                    <th>操作</th>
                 </tr>
             </thead>
             <tbody>
@@ -25,10 +26,19 @@
                     <td>{{ item.sku.name }}</td>
                     <td>{{ item.gap_days }}</td>
                     <td>￥{{ item.cost_saved }}</td>
+                    <td>
+                        <form method="post" action="{% url 'transfer_create' %}">
+                            {% csrf_token %}
+                            <input type="hidden" name="order_from_id" value="{{ item.order_from.id }}">
+                            <input type="hidden" name="order_to_id" value="{{ item.order_to.id }}">
+                            <input type="hidden" name="sku_id" value="{{ item.sku.id }}">
+                            <button type="submit" class="btn btn-sm btn-primary">创建任务</button>
+                        </form>
+                    </td>
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="5" class="text-center">暂无可用转寄候选</td>
+                    <td colspan="6" class="text-center">暂无可用转寄候选</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -47,6 +57,7 @@
                     <th>数量</th>
                     <th>间隔天数</th>
                     <th>状态</th>
+                    <th>操作</th>
                 </tr>
             </thead>
             <tbody>
@@ -59,10 +70,24 @@
                     <td>{{ task.quantity }}</td>
                     <td>{{ task.gap_days }}</td>
                     <td>{{ task.get_status_display }}</td>
+                    <td>
+                        {% if task.status == 'pending' %}
+                        <form method="post" action="{% url 'transfer_complete' task.id %}" style="display:inline;">
+                            {% csrf_token %}
+                            <button type="submit" class="btn btn-sm btn-success">完成</button>
+                        </form>
+                        <form method="post" action="{% url 'transfer_cancel' task.id %}" style="display:inline;">
+                            {% csrf_token %}
+                            <button type="submit" class="btn btn-sm btn-danger">取消</button>
+                        </form>
+                        {% else %}
+                        -
+                        {% endif %}
+                    </td>
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="7" class="text-center">暂无转寄任务</td>
+                    <td colspan="8" class="text-center">暂无转寄任务</td>
                 </tr>
                 {% endfor %}
             </tbody>

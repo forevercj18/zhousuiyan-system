@@ -138,7 +138,13 @@ class Order(models.Model):
         # 如果没有订单号，自动生成
         if not self.order_no:
             from django.utils import timezone
-            self.order_no = f"ORD{timezone.now().strftime('%Y%m%d%H%M%S')}"
+            base = timezone.now().strftime('%Y%m%d%H%M%S%f')
+            self.order_no = f"ORD{base}"
+            # 极端并发下兜底，确保唯一
+            suffix = 1
+            while Order.objects.filter(order_no=self.order_no).exists():
+                self.order_no = f"ORD{base}{suffix}"
+                suffix += 1
 
         # 计算发货日期和回收日期（如果没有设置）
         if not self.ship_date and self.event_date:
@@ -267,7 +273,12 @@ class PurchaseOrder(models.Model):
         """保存时自动生成采购单号"""
         if not self.po_no:
             from django.utils import timezone
-            self.po_no = f"PO{timezone.now().strftime('%Y%m%d%H%M%S')}"
+            base = timezone.now().strftime('%Y%m%d%H%M%S%f')
+            self.po_no = f"PO{base}"
+            suffix = 1
+            while PurchaseOrder.objects.filter(po_no=self.po_no).exists():
+                self.po_no = f"PO{base}{suffix}"
+                suffix += 1
         super().save(*args, **kwargs)
 
 

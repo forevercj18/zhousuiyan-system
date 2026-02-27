@@ -11,10 +11,10 @@ from django.db import models
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from .models import Order, OrderItem, SKU, Part, PurchaseOrder, PurchaseOrderItem, PartsMovement, AuditLog, User, SystemSettings
+from .models import Order, OrderItem, SKU, Part, PurchaseOrder, PurchaseOrderItem, PartsMovement, AuditLog, User, SystemSettings, Transfer
 from .services import OrderService, ProcurementService, PartsService
 from .permissions import require_permission, filter_queryset_by_permission
-from .utils import get_calendar_data, find_transfer_candidates
+from .utils import get_calendar_data, find_transfer_candidates, create_transfer_task
 
 
 def login_view(request):
@@ -88,11 +88,13 @@ def workbench(request):
     pending_orders = orders.filter(status='pending').order_by('-created_at')
     confirmed_orders = orders.filter(status='confirmed').order_by('ship_date')
     delivered_orders = orders.filter(status='delivered').order_by('return_date')
+    returned_orders = orders.filter(status='returned').order_by('return_date')
 
     context = {
         'pending_orders': pending_orders,
         'confirmed_orders': confirmed_orders,
         'delivered_orders': delivered_orders,
+        'returned_orders': returned_orders,
     }
     return render(request, 'workbench.html', context)
 
@@ -314,7 +316,6 @@ def transfers_list(request):
     candidates = find_transfer_candidates()
 
     # 获取转寄任务
-    from .models import Transfer
     tasks = Transfer.objects.select_related(
         'order_from', 'order_to', 'sku'
     ).order_by('-created_at')
@@ -324,6 +325,73 @@ def transfers_list(request):
         'tasks': tasks,
     }
     return render(request, 'transfers.html', context)
+
+
+@login_required
+@require_permission('transfers', 'create')
+def transfer_create(request):
+    """创建转寄任务"""
+    if request.method == 'POST':
+        try:
+            order_from_id = int(request.POST.get('order_from_id'))
+            order_to_id = int(request.POST.get('order_to_id'))
+            sku_id = int(request.POST.get('sku_id'))
+            create_transfer_task(order_from_id, order_to_id, sku_id, request.user)
+            messages.success(request, '转寄任务创建成功')
+        except Exception as e:
+            messages.error(request, f'转寄任务创建失败：{str(e)}')
+    return redirect('transfers_list')
+
+
+@login_required
+@require_permission('transfers', 'update')
+def transfer_complete(request, transfer_id):
+    """完成转寄任务"""
+    if request.method == 'POST':
+        try:
+            transfer = get_object_or_404(Transfer, id=transfer_id)
+            if transfer.status != 'pending':
+                raise ValueError('仅待执行任务可完成')
+            transfer.status = 'completed'
+            transfer.save(update_fields=['status', 'updated_at'])
+            AuditLog.objects.create(
+                user=request.user,
+                action='status_change',
+                module='转寄',
+                target=f'任务#{transfer.id}',
+                details='标记转寄任务完成',
+                ip_address=None
+            )
+            messages.success(request, '转寄任务已完成')
+        except Exception as e:
+            messages.error(request, f'操作失败：{str(e)}')
+    return redirect('transfers_list')
+
+
+@login_required
+@require_permission('transfers', 'update')
+def transfer_cancel(request, transfer_id):
+    """取消转寄任务"""
+    if request.method == 'POST':
+        try:
+            transfer = get_object_or_404(Transfer, id=transfer_id)
+            if transfer.status != 'pending':
+                raise ValueError('仅待执行任务可取消')
+            transfer.status = 'cancelled'
+            transfer.notes = (transfer.notes + '\n' if transfer.notes else '') + '手动取消'
+            transfer.save(update_fields=['status', 'notes', 'updated_at'])
+            AuditLog.objects.create(
+                user=request.user,
+                action='status_change',
+                module='转寄',
+                target=f'任务#{transfer.id}',
+                details='取消转寄任务',
+                ip_address=None
+            )
+            messages.success(request, '转寄任务已取消')
+        except Exception as e:
+            messages.error(request, f'操作失败：{str(e)}')
+    return redirect('transfers_list')
 
 
 @login_required
@@ -504,6 +572,45 @@ def purchase_order_delete(request, po_id):
         messages.success(request, f'采购单 {po_no} 已删除')
         return redirect('purchase_orders_list')
 
+    return redirect('purchase_orders_list')
+
+
+@login_required
+@require_permission('procurement', 'update')
+def purchase_order_mark_ordered(request, po_id):
+    """采购单：标记已下单"""
+    if request.method == 'POST':
+        try:
+            ProcurementService.mark_as_ordered(po_id, request.user)
+            messages.success(request, '采购单已标记为已下单')
+        except Exception as e:
+            messages.error(request, f'操作失败：{str(e)}')
+    return redirect('purchase_orders_list')
+
+
+@login_required
+@require_permission('procurement', 'update')
+def purchase_order_mark_arrived(request, po_id):
+    """采购单：标记已到货"""
+    if request.method == 'POST':
+        try:
+            ProcurementService.mark_as_arrived(po_id, request.user)
+            messages.success(request, '采购单已标记为已到货')
+        except Exception as e:
+            messages.error(request, f'操作失败：{str(e)}')
+    return redirect('purchase_orders_list')
+
+
+@login_required
+@require_permission('procurement', 'update')
+def purchase_order_mark_stocked(request, po_id):
+    """采购单：标记已入库"""
+    if request.method == 'POST':
+        try:
+            ProcurementService.mark_as_stocked(po_id, request.user)
+            messages.success(request, '采购单已入库，部件库存已更新')
+        except Exception as e:
+            messages.error(request, f'操作失败：{str(e)}')
     return redirect('purchase_orders_list')
 
 
@@ -711,6 +818,39 @@ def order_mark_delivered(request, order_id):
 
 @login_required
 @require_permission('orders', 'update')
+def order_mark_confirmed(request, order_id):
+    """工作台：确认订单"""
+    if request.method == 'POST':
+        try:
+            deposit_paid = Decimal(request.POST.get('deposit_paid', '0') or '0')
+            OrderService.confirm_order(order_id, deposit_paid, request.user)
+            messages.success(request, '订单已确认')
+        except ValueError as e:
+            messages.error(request, str(e))
+        except Exception as e:
+            messages.error(request, f'操作失败：{str(e)}')
+    return redirect('workbench')
+
+
+@login_required
+@require_permission('orders', 'update')
+def order_mark_returned(request, order_id):
+    """工作台：标记归还"""
+    if request.method == 'POST':
+        try:
+            return_tracking = request.POST.get('return_tracking', '')
+            balance_paid = Decimal(request.POST.get('balance_paid', '0') or '0')
+            OrderService.mark_as_returned(order_id, return_tracking, balance_paid, request.user)
+            messages.success(request, '订单已标记归还')
+        except ValueError as e:
+            messages.error(request, str(e))
+        except Exception as e:
+            messages.error(request, f'操作失败：{str(e)}')
+    return redirect('workbench')
+
+
+@login_required
+@require_permission('orders', 'update')
 def order_mark_completed(request, order_id):
     """工作台：标记订单完成（自动执行归还再完成）"""
     if request.method == 'POST':
@@ -725,6 +865,22 @@ def order_mark_completed(request, order_id):
         except Exception as e:
             messages.error(request, f'操作失败：{str(e)}')
     return redirect('workbench')
+
+
+@login_required
+@require_permission('orders', 'update')
+def order_cancel(request, order_id):
+    """取消订单"""
+    if request.method == 'POST':
+        try:
+            reason = request.POST.get('reason', '手动取消')
+            OrderService.cancel_order(order_id, reason, request.user)
+            messages.success(request, '订单已取消')
+        except ValueError as e:
+            messages.error(request, str(e))
+        except Exception as e:
+            messages.error(request, f'操作失败：{str(e)}')
+    return redirect('orders_list')
 
 
 # ==================== API接口（用于前端AJAX调用） ====================

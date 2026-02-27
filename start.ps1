@@ -6,6 +6,14 @@ Param(
 $ErrorActionPreference = "Stop"
 $env:PYTHONIOENCODING = "utf-8"
 
+# Development defaults for local run
+if (-not $env:DEBUG) {
+    $env:DEBUG = "True"
+}
+if (-not $env:ALLOWED_HOSTS) {
+    $env:ALLOWED_HOSTS = "127.0.0.1,localhost"
+}
+
 function Write-Step($msg) {
     Write-Host "[STEP] $msg" -ForegroundColor Cyan
 }
@@ -14,10 +22,16 @@ function Write-Ok($msg) {
     Write-Host "[OK] $msg" -ForegroundColor Green
 }
 
-function Invoke-Checked([string]$file, [string[]]$args) {
-    & $file @args
+function Invoke-Checked {
+    Param(
+        [Parameter(Mandatory = $true)]
+        [string]$File,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+    & $File @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Command failed: $file $($args -join ' ') (exit=$LASTEXITCODE)"
+        throw "Command failed: $File $($Arguments -join ' ') (exit=$LASTEXITCODE)"
     }
 }
 
@@ -34,15 +48,15 @@ if (!(Test-Path $venvPython)) {
 Write-Ok "Virtual environment ready"
 
 Write-Step "Install dependencies"
-Invoke-Checked $venvPython @("-m", "pip", "install", "-r", "requirements.txt")
+Invoke-Checked -File $venvPython -Arguments @("-m", "pip", "install", "-r", "requirements.txt")
 Write-Ok "Dependencies installed"
 
 Write-Step "Run migrations"
-Invoke-Checked $venvPython @("manage.py", "migrate")
+Invoke-Checked -File $venvPython -Arguments @("manage.py", "migrate")
 Write-Ok "Migrations done"
 
 Write-Step "Init demo data"
-Invoke-Checked $venvPython @("scripts/init_data.py")
+Invoke-Checked -File $venvPython -Arguments @("scripts/init_data.py")
 Write-Ok "Init data done"
 
 if ($NoRunServer) {
@@ -51,4 +65,4 @@ if ($NoRunServer) {
 }
 
 Write-Step "Start dev server at http://127.0.0.1:$Port"
-Invoke-Checked $venvPython @("manage.py", "runserver", "0.0.0.0:$Port")
+Invoke-Checked -File $venvPython -Arguments @("manage.py", "runserver", "0.0.0.0:$Port")

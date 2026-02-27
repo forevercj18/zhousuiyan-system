@@ -1,6 +1,6 @@
 // 工作台相关功能
 
-function postAction(url) {
+function postAction(url, payload = {}) {
     const form = document.createElement('form');
     form.method = 'POST';
     form.action = url;
@@ -12,8 +12,24 @@ function postAction(url) {
     input.value = csrfToken ? csrfToken.value : '';
     form.appendChild(input);
 
+    Object.entries(payload).forEach(([key, value]) => {
+        const field = document.createElement('input');
+        field.type = 'hidden';
+        field.name = key;
+        field.value = value;
+        form.appendChild(field);
+    });
+
     document.body.appendChild(form);
     form.submit();
+}
+
+function markAsConfirmed(orderId, totalAmount) {
+    const text = window.prompt(`请输入已收押金金额（订单总额: ${totalAmount}）`, '0');
+    if (text === null) {
+        return;
+    }
+    postAction(`/orders/${orderId}/confirm/`, { deposit_paid: text });
 }
 
 // 标记订单为已送达
@@ -21,7 +37,23 @@ function markAsDelivered(orderId) {
     if (!utils.confirm('确认标记此订单为已送达？')) {
         return;
     }
-    postAction(`/orders/${orderId}/mark-delivered/`);
+    const shipTracking = window.prompt('请输入发货单号（可留空）', '') || '';
+    postAction(`/orders/${orderId}/mark-delivered/`, { ship_tracking: shipTracking });
+}
+
+function markAsReturned(orderId, balance) {
+    if (!utils.confirm('确认标记此订单为已归还？')) {
+        return;
+    }
+    const returnTracking = window.prompt('请输入回收单号（可留空）', '') || '';
+    const balancePaid = window.prompt(`请输入已收尾款金额（当前待收: ${balance}）`, '0');
+    if (balancePaid === null) {
+        return;
+    }
+    postAction(`/orders/${orderId}/mark-returned/`, {
+        return_tracking: returnTracking,
+        balance_paid: balancePaid
+    });
 }
 
 // 标记订单为已完成

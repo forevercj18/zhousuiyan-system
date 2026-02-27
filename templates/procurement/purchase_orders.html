@@ -55,7 +55,21 @@
                         <div class="action-buttons">
                             <a href="{% url 'purchase_order_edit' po.id %}" class="btn btn-sm btn-primary">编辑</a>
                             {% if po.status == 'draft' %}
+                            <form method="post" action="{% url 'purchase_order_mark_ordered' po.id %}" style="display:inline;">
+                                {% csrf_token %}
+                                <button class="btn btn-sm btn-success" type="submit">标记下单</button>
+                            </form>
                             <button class="btn btn-sm btn-danger" onclick="deletePO({{ po.id }}, '{{ po.po_no }}')">删除</button>
+                            {% elif po.status == 'ordered' %}
+                            <form method="post" action="{% url 'purchase_order_mark_arrived' po.id %}" style="display:inline;">
+                                {% csrf_token %}
+                                <button class="btn btn-sm btn-success" type="submit">标记到货</button>
+                            </form>
+                            {% elif po.status == 'arrived' %}
+                            <form method="post" action="{% url 'purchase_order_mark_stocked' po.id %}" style="display:inline;">
+                                {% csrf_token %}
+                                <button class="btn btn-sm btn-success" type="submit">确认入库</button>
+                            </form>
                             {% endif %}
                         </div>
                     </td>

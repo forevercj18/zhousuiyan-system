@@ -70,5 +70,47 @@
         <p><strong>待收尾款：</strong>￥{{ order.balance }}</p>
         <p><strong>备注：</strong>{{ order.notes|default:"-" }}</p>
     </div>
+
+    <div class="form-section">
+        <h3>状态操作</h3>
+        {% if order.status == 'pending' %}
+        <form method="post" action="{% url 'order_mark_confirmed' order.id %}">
+            {% csrf_token %}
+            <label>已收押金：</label>
+            <input type="number" name="deposit_paid" step="0.01" min="0" value="0">
+            <button type="submit" class="btn btn-primary">确认订单</button>
+        </form>
+        {% elif order.status == 'confirmed' %}
+        <form method="post" action="{% url 'order_mark_delivered' order.id %}">
+            {% csrf_token %}
+            <label>发货单号：</label>
+            <input type="text" name="ship_tracking">
+            <button type="submit" class="btn btn-primary">标记送达</button>
+        </form>
+        {% elif order.status == 'delivered' %}
+        <form method="post" action="{% url 'order_mark_returned' order.id %}">
+            {% csrf_token %}
+            <label>回收单号：</label>
+            <input type="text" name="return_tracking">
+            <label>已收尾款：</label>
+            <input type="number" name="balance_paid" step="0.01" min="0" value="0">
+            <button type="submit" class="btn btn-primary">标记归还</button>
+        </form>
+        {% elif order.status == 'returned' %}
+        <form method="post" action="{% url 'order_mark_completed' order.id %}">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-primary">标记完成</button>
+        </form>
+        {% endif %}
+
+        {% if order.status != 'completed' and order.status != 'cancelled' %}
+        <form method="post" action="{% url 'order_cancel' order.id %}" style="margin-top: 12px;">
+            {% csrf_token %}
+            <label>取消原因：</label>
+            <input type="text" name="reason" value="手动取消">
+            <button type="submit" class="btn btn-danger">取消订单</button>
+        </form>
+        {% endif %}
+    </div>
 </div>
 {% endblock %}

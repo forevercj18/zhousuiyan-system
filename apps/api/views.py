@@ -1,12 +1,17 @@
 """API视图模块 - RESTful API接口（真实数据库）"""
+from decimal import Decimal
+
 from django.db.models import F
+from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.core.models import Order, SKU, Part
+from apps.core.models import Order, SKU, Part, PurchaseOrder, Transfer
 from apps.core.permissions import filter_queryset_by_permission
-from .serializers import OrderSerializer, SKUSerializer, PartSerializer
+from apps.core.services import OrderService, ProcurementService
+from apps.core.utils import create_transfer_task
+from .serializers import OrderSerializer, SKUSerializer, PartSerializer, PurchaseOrderSerializer, TransferSerializer
 
 
 @api_view(['GET'])
@@ -71,3 +76,110 @@ def api_dashboard_stats(request):
         'success': True,
         'data': stats
     })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def api_order_confirm(request, order_id):
+    order = get_object_or_404(Order, id=order_id)
+    deposit_paid = Decimal(str(request.data.get('deposit_paid', '0') or '0'))
+    try:
+        order = OrderService.confirm_order(order.id, deposit_paid, request.user)
+        return Response({'success': True, 'data': OrderSerializer(order).data})
+    except Exception as e:
+        return Response({'success': False, 'message': str(e)}, status=400)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def api_order_mark_delivered(request, order_id):
+    order = get_object_or_404(Order, id=order_id)
+    try:
+        order = OrderService.mark_as_delivered(order.id, request.data.get('ship_tracking', ''), request.user)
+        return Response({'success': True, 'data': OrderSerializer(order).data})
+    except Exception as e:
+        return Response({'success': False, 'message': str(e)}, status=400)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def api_order_mark_returned(request, order_id):
+    order = get_object_or_404(Order, id=order_id)
+    balance_paid = Decimal(str(request.data.get('balance_paid', '0') or '0'))
+    try:
+        order = OrderService.mark_as_returned(order.id, request.data.get('return_tracking', ''), balance_paid, request.user)
+        return Response({'success': True, 'data': OrderSerializer(order).data})
+    except Exception as e:
+        return Response({'success': False, 'message': str(e)}, status=400)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def api_order_complete(request, order_id):
+    order = get_object_or_404(Order, id=order_id)
+    try:
+        order = OrderService.complete_order(order.id, request.user)
+        return Response({'success': True, 'data': OrderSerializer(order).data})
+    except Exception as e:
+        return Response({'success': False, 'message': str(e)}, status=400)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def api_purchase_orders(request):
+    queryset = PurchaseOrder.objects.select_related('created_by').prefetch_related('items').order_by('-created_at')
+    serializer = PurchaseOrderSerializer(queryset, many=True)
+    return Response({'success': True, 'data': serializer.data})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def api_purchase_order_mark_ordered(request, po_id):
+    try:
+        po = ProcurementService.mark_as_ordered(po_id, request.user)
+        return Response({'success': True, 'data': PurchaseOrderSerializer(po).data})
+    except Exception as e:
+        return Response({'success': False, 'message': str(e)}, status=400)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def api_purchase_order_mark_arrived(request, po_id):
+    try:
+        po = ProcurementService.mark_as_arrived(po_id, request.user)
+        return Response({'success': True, 'data': PurchaseOrderSerializer(po).data})
+    except Exception as e:
+        return Response({'success': False, 'message': str(e)}, status=400)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def api_purchase_order_mark_stocked(request, po_id):
+    try:
+        po = ProcurementService.mark_as_stocked(po_id, request.user)
+        return Response({'success': True, 'data': PurchaseOrderSerializer(po).data})
+    except Exception as e:
+        return Response({'success': False, 'message': str(e)}, status=400)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def api_transfers(request):
+    queryset = Transfer.objects.select_related('order_from', 'order_to', 'sku').order_by('-created_at')
+    serializer = TransferSerializer(queryset, many=True)
+    return Response({'success': True, 'data': serializer.data})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def api_transfer_create(request):
+    try:
+        transfer = create_transfer_task(
+            int(request.data['order_from_id']),
+            int(request.data['order_to_id']),
+            int(request.data['sku_id']),
+            request.user
+        )
+        return Response({'success': True, 'data': TransferSerializer(transfer).data})
+    except Exception as e:
+        return Response({'success': False, 'message': str(e)}, status=400)

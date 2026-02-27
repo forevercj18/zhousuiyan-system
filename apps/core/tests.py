@@ -15,6 +15,7 @@ from .models import (
     PurchaseOrderItem,
     SKU,
     SystemSettings,
+    Transfer,
 )
 from .services import OrderService, PartsService, ProcurementService
 
@@ -177,6 +178,47 @@ class CoreViewsFlowTestCase(TestCase):
             safety_stock=2,
             is_active=True,
         )
+        self.sku = SKU.objects.create(
+            code='SKU-FLOW-1',
+            name='流程套餐',
+            category='主题套餐',
+            rental_price=Decimal('200.00'),
+            deposit=Decimal('80.00'),
+            stock=5,
+            is_active=True,
+        )
+
+    def test_order_full_status_flow(self):
+        order = Order.objects.create(
+            customer_name='全流程客户',
+            customer_phone='13511111111',
+            delivery_address='全流程地址',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='pending',
+            total_amount=Decimal('280.00'),
+            balance=Decimal('280.00'),
+            created_by=self.user,
+        )
+
+        self.client.post(reverse('order_mark_confirmed', kwargs={'order_id': order.id}), {'deposit_paid': '80'})
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'confirmed')
+
+        self.client.post(reverse('order_mark_delivered', kwargs={'order_id': order.id}), {'ship_tracking': 'SHIP-1'})
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'delivered')
+
+        self.client.post(
+            reverse('order_mark_returned', kwargs={'order_id': order.id}),
+            {'return_tracking': 'RET-1', 'balance_paid': '200'}
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'returned')
+
+        self.client.post(reverse('order_mark_completed', kwargs={'order_id': order.id}))
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
 
     def test_workbench_mark_delivered(self):
         order = Order.objects.create(
@@ -238,3 +280,74 @@ class CoreViewsFlowTestCase(TestCase):
         po = PurchaseOrder.objects.first()
         self.assertEqual(po.items.count(), 1)
         self.assertEqual(po.total_amount, Decimal('25.0'))
+
+    def test_purchase_order_status_flow(self):
+        po = PurchaseOrder.objects.create(
+            channel='online',
+            supplier='状态流采购单',
+            order_date=date.today(),
+            status='draft',
+            created_by=self.user,
+        )
+        PurchaseOrderItem.objects.create(
+            purchase_order=po,
+            part=self.part,
+            part_name=self.part.name,
+            spec=self.part.spec,
+            unit=self.part.unit,
+            quantity=1,
+            unit_price=Decimal('8.00'),
+            subtotal=Decimal('8.00'),
+        )
+
+        self.client.post(reverse('purchase_order_mark_ordered', kwargs={'po_id': po.id}))
+        po.refresh_from_db()
+        self.assertEqual(po.status, 'ordered')
+
+        self.client.post(reverse('purchase_order_mark_arrived', kwargs={'po_id': po.id}))
+        po.refresh_from_db()
+        self.assertEqual(po.status, 'arrived')
+
+        before_stock = self.part.current_stock
+        self.client.post(reverse('purchase_order_mark_stocked', kwargs={'po_id': po.id}))
+        po.refresh_from_db()
+        self.part.refresh_from_db()
+        self.assertEqual(po.status, 'stocked')
+        self.assertEqual(self.part.current_stock, before_stock + 1)
+
+    def test_transfer_create_and_complete_flow(self):
+        order_from = Order.objects.create(
+            customer_name='转寄回收',
+            customer_phone='13611111111',
+            delivery_address='A地址',
+            event_date=date.today() + timedelta(days=1),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+            ship_date=date.today(),
+            return_date=date.today() + timedelta(days=2),
+        )
+        order_to = Order.objects.create(
+            customer_name='转寄发货',
+            customer_phone='13622222222',
+            delivery_address='B地址',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+            ship_date=date.today() + timedelta(days=2),
+            return_date=date.today() + timedelta(days=5),
+        )
+        OrderItem.objects.create(order=order_from, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('280.00'))
+        OrderItem.objects.create(order=order_to, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('280.00'))
+
+        self.client.post(
+            reverse('transfer_create'),
+            {'order_from_id': order_from.id, 'order_to_id': order_to.id, 'sku_id': self.sku.id}
+        )
+        transfer = Transfer.objects.get(order_from=order_from, order_to=order_to, sku=self.sku)
+        self.assertEqual(transfer.status, 'pending')
+
+        self.client.post(reverse('transfer_complete', kwargs={'transfer_id': transfer.id}))
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'completed')
