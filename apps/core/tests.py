@@ -16,8 +16,10 @@ from .models import (
     SKU,
     SystemSettings,
     Transfer,
+    TransferAllocation,
 )
 from .services import OrderService, PartsService, ProcurementService
+from .utils import get_transfer_match_candidates, build_transfer_allocation_plan
 
 
 User = get_user_model()
@@ -77,7 +79,7 @@ class CoreServicesTestCase(TestCase):
 
         self.assertEqual(order.status, 'pending')
         self.assertEqual(order.items.count(), 1)
-        self.assertEqual(order.total_amount, Decimal('150.00'))
+        self.assertEqual(order.total_amount, Decimal('100.00'))
         self.assertTrue(AuditLog.objects.filter(target=order.order_no, action='create').exists())
 
     def test_create_order_raises_when_inventory_insufficient(self):
@@ -97,7 +99,7 @@ class CoreServicesTestCase(TestCase):
             quantity=2,
             rental_price=self.sku.rental_price,
             deposit=self.sku.deposit,
-            subtotal=Decimal('300.00'),
+            subtotal=Decimal('200.00'),
         )
 
         with self.assertRaises(ValueError):
@@ -112,6 +114,136 @@ class CoreServicesTestCase(TestCase):
                 },
                 user=self.user,
             )
+
+    def test_transfer_candidate_sorting_by_event_date_then_distance(self):
+        sku = SKU.objects.create(
+            code='SKU-TX-1',
+            name='转寄套餐1',
+            category='主题套餐',
+            rental_price=Decimal('80.00'),
+            deposit=Decimal('20.00'),
+            stock=10,
+            is_active=True,
+        )
+        # 来源A：日期更早，应优先
+        source_a = Order.objects.create(
+            customer_name='来源A',
+            customer_phone='13000000001',
+            delivery_address='上海市浦东新区世纪大道100号',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source_a, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('80.00'))
+
+        # 来源B：日期更晚，地址更近，也要排在A之后
+        source_b = Order.objects.create(
+            customer_name='来源B',
+            customer_phone='13000000002',
+            delivery_address='上海市浦东新区世纪大道101号',
+            event_date=date.today() + timedelta(days=1),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source_b, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('80.00'))
+
+        target_date = date.today() + timedelta(days=8)
+        candidates = get_transfer_match_candidates('上海市浦东新区世纪大道101号', target_date, sku.id)
+        self.assertGreaterEqual(len(candidates), 2)
+        self.assertEqual(candidates[0]['source_order'].id, source_a.id)
+        self.assertEqual(candidates[1]['source_order'].id, source_b.id)
+
+    def test_transfer_lock_prevents_duplicate_within_plus_minus_5_days(self):
+        sku = SKU.objects.create(
+            code='SKU-TX-2',
+            name='转寄套餐2',
+            category='主题套餐',
+            rental_price=Decimal('90.00'),
+            deposit=Decimal('30.00'),
+            stock=0,  # 强制只能走转寄，便于验证锁机制
+            is_active=True,
+        )
+        source = Order.objects.create(
+            customer_name='来源单',
+            customer_phone='13100000000',
+            delivery_address='广州市天河区体育西路1号',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('90.00'))
+
+        first_target_date = date.today() + timedelta(days=8)
+        first = OrderService.create_order(
+            data={
+                'customer_name': '目标单1',
+                'customer_phone': '13200000001',
+                'delivery_address': '广州市天河区体育西路2号',
+                'event_date': first_target_date,
+                'rental_days': 1,
+                'items': [{'sku_id': sku.id, 'quantity': 1}],
+            },
+            user=self.user,
+        )
+        self.assertTrue(TransferAllocation.objects.filter(target_order=first, status='locked').exists())
+
+        # 第二单目标日期在 +/-5 天窗口内，且仓库库存为0，应被阻止（无法重复挂同来源）
+        with self.assertRaises(ValueError):
+            OrderService.create_order(
+                data={
+                    'customer_name': '目标单2',
+                    'customer_phone': '13200000002',
+                    'delivery_address': '广州市天河区体育西路3号',
+                    'event_date': first_target_date + timedelta(days=2),
+                    'rental_days': 1,
+                    'items': [{'sku_id': sku.id, 'quantity': 1}],
+                },
+                user=self.user,
+            )
+
+    def test_transfer_preferred_source_order_is_prioritized(self):
+        sku = SKU.objects.create(
+            code='SKU-TX-3',
+            name='转寄套餐3',
+            category='主题套餐',
+            rental_price=Decimal('120.00'),
+            deposit=Decimal('30.00'),
+            stock=0,
+            is_active=True,
+        )
+        source_a = Order.objects.create(
+            customer_name='来源A',
+            customer_phone='13300000001',
+            delivery_address='深圳市南山区科技园A',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        source_b = Order.objects.create(
+            customer_name='来源B',
+            customer_phone='13300000002',
+            delivery_address='深圳市南山区科技园B',
+            event_date=date.today() + timedelta(days=1),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source_a, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('120.00'))
+        OrderItem.objects.create(order=source_b, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('120.00'))
+
+        plan = build_transfer_allocation_plan(
+            delivery_address='深圳市南山区科技园C',
+            target_event_date=date.today() + timedelta(days=8),
+            sku_id=sku.id,
+            quantity=1,
+            preferred_source_order_id=source_b.id,
+        )
+        self.assertEqual(len(plan['allocations']), 1)
+        self.assertEqual(plan['allocations'][0]['source_order_id'], source_b.id)
 
     def test_parts_inbound_and_outbound_updates_stock(self):
         PartsService.inbound(self.part.id, 3, 'DOC-IN-1', '测试入库', self.user)
@@ -238,6 +370,28 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(resp.status_code, 302)
         order.refresh_from_db()
         self.assertEqual(order.status, 'delivered')
+
+    def test_workbench_confirm_auto_deliver(self):
+        order = Order.objects.create(
+            customer_name='自动发货客户',
+            customer_phone='13500000002',
+            delivery_address='地址3',
+            event_date=date.today() + timedelta(days=2),
+            rental_days=1,
+            status='pending',
+            total_amount=Decimal('200.00'),
+            balance=Decimal('200.00'),
+            created_by=self.user,
+        )
+
+        resp = self.client.post(
+            reverse('order_mark_confirmed', kwargs={'order_id': order.id}),
+            {'deposit_paid': '80', 'ship_tracking': 'YT778899', 'auto_deliver': '1'}
+        )
+        self.assertEqual(resp.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'delivered')
+        self.assertEqual(order.ship_tracking, 'YT778899')
 
     def test_workbench_mark_completed_from_delivered(self):
         order = Order.objects.create(

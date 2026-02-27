@@ -1,5 +1,6 @@
 Param(
     [switch]$NoRunServer,
+    [switch]$Acceptance,
     [int]$Port = 8000
 )
 
@@ -58,6 +59,12 @@ Write-Ok "Migrations done"
 Write-Step "Init demo data"
 Invoke-Checked -File $venvPython -Arguments @("scripts/init_data.py")
 Write-Ok "Init data done"
+
+if ($Acceptance) {
+    Write-Step "Generate acceptance report"
+    Invoke-Checked -File $venvPython -Arguments @("scripts/generate_acceptance_report.py")
+    Write-Ok "Acceptance report generated in docs/"
+}
 
 if ($NoRunServer) {
     Write-Ok "Skip runserver because NoRunServer is set"

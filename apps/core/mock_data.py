@@ -175,7 +175,7 @@ ORDERS = [
         'items': [
             {'sku_id': 4, 'sku_name': '恐龙主题套餐', 'quantity': 1, 'rental_price': Decimal('1300.00')}
         ],
-        'notes': '已送达，等待活动结束回收'
+        'notes': '已发货，等待活动结束回收'
     },
     {
         'id': 5,
@@ -344,7 +344,7 @@ def get_dashboard_stats():
 # 审计日志数据
 AUDIT_LOGS = [
     {'id': 1, 'timestamp': '2024-02-27 10:30:00', 'user': 'admin', 'action': '创建订单', 'target': 'ORD20240201001', 'details': '创建森林主题套餐订单'},
-    {'id': 2, 'timestamp': '2024-02-27 11:15:00', 'user': 'admin', 'action': '确认订单', 'target': 'ORD20240201001', 'details': '订单已确认，收取押金500元'},
+    {'id': 2, 'timestamp': '2024-02-27 11:15:00', 'user': 'admin', 'action': '确认并待发货', 'target': 'ORD20240201001', 'details': '订单已进入待发货，收取押金500元'},
     {'id': 3, 'timestamp': '2024-02-27 14:20:00', 'user': 'admin', 'action': '创建采购单', 'target': 'PO20240210001', 'details': '采购气球及支架'},
     {'id': 4, 'timestamp': '2024-02-27 15:45:00', 'user': 'admin', 'action': '出库', 'target': 'OUT20240215001', 'details': '订单ORD20240215004出库'},
     {'id': 5, 'timestamp': '2024-02-27 16:30:00', 'user': 'admin', 'action': '入库', 'target': 'IN20240220001', 'details': '订单ORD20240220005归还入库'},

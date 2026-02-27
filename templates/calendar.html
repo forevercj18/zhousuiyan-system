@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}日历排期 - 宝宝周岁宴道具租赁系统{% endblock %}
 {% block page_title %}日历排期{% endblock %}
@@ -29,11 +29,11 @@
         <div class="legend-items">
             <div class="legend-item">
                 <span class="legend-color" style="background: #4CAF50;"></span>
-                <span>已确认</span>
+                <span>待发货</span>
             </div>
             <div class="legend-item">
                 <span class="legend-color" style="background: #2196F3;"></span>
-                <span>已送达</span>
+                <span>已发货</span>
             </div>
             <div class="legend-item">
                 <span class="legend-color" style="background: #FF9800;"></span>
@@ -142,7 +142,7 @@ function renderEventsList() {
             <div class="event-title">${e.title}</div>
             <div class="event-status">
                 <span class="badge badge-${e.status}">
-                    ${e.status === 'confirmed' ? '已确认' : '已送达'}
+                    ${e.status === 'confirmed' ? '待发货' : '已发货'}
                 </span>
             </div>
             <button class="btn btn-sm" onclick="showEventDetails(${e.id})">查看</button>
@@ -159,11 +159,11 @@ function showEventDetails(eventId) {
 
     details.innerHTML = `
         <p><strong>订单号：</strong>${event.order_no}</p>
-        <p><strong>活动日期：</strong>${event.start}</p>
+        <p><strong>预定日期：</strong>${event.start}</p>
         <p><strong>客户信息：</strong>${event.title}</p>
         <p><strong>状态：</strong>
             <span class="badge badge-${event.status}">
-                ${event.status === 'confirmed' ? '已确认' : '已送达'}
+                ${event.status === 'confirmed' ? '待发货' : '已发货'}
             </span>
         </p>
         <div style="margin-top: 20px;">
@@ -205,3 +205,4 @@ renderCalendar();
 {% block extra_js %}
 <script src="/static/js/calendar.js"></script>
 {% endblock %}
+

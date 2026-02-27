@@ -135,12 +135,14 @@
 .table-container {
     background: #fff;
     border-radius: 4px;
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
 .data-table {
     width: 100%;
+    min-width: 900px;
     border-collapse: collapse;
 }
 
@@ -360,6 +362,41 @@
     font-weight: 500;
     color: #666;
     min-width: 100px;
+}
+
+@media (max-width: 1024px) {
+    .form-row {
+        flex-wrap: wrap;
+    }
+
+    .form-row .form-group,
+    .form-row .form-group.flex-2 {
+        flex: 1 1 100%;
+    }
+
+    .action-buttons {
+        flex-wrap: wrap;
+    }
+}
+
+@media (max-width: 768px) {
+    .detail-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .filter-group {
+        flex-wrap: wrap;
+    }
+
+    .filter-group .form-control {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .btn,
+    .btn-sm {
+        white-space: normal;
+    }
 }
 
 .detail-actions {

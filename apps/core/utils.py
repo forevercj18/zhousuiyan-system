@@ -4,8 +4,9 @@
 """
 from datetime import timedelta
 from decimal import Decimal
+from difflib import SequenceMatcher
 from django.db.models import Sum, Q
-from .models import SystemSettings, Order, OrderItem, SKU, Transfer
+from .models import SystemSettings, Order, OrderItem, SKU, Transfer, TransferAllocation
 
 
 def get_system_settings():
@@ -27,7 +28,7 @@ def get_system_settings():
     return settings
 
 
-def check_sku_availability(sku_id, event_date, quantity=1, exclude_order_id=None):
+def check_sku_availability(sku_id, event_date, quantity=1, exclude_order_id=None, rental_days=1):
     """
     检查SKU在指定日期的可用性
 
@@ -57,40 +58,134 @@ def check_sku_availability(sku_id, event_date, quantity=1, exclude_order_id=None
             'message': 'SKU不存在或已禁用'
         }
 
-    # 获取系统设置
-    settings = get_system_settings()
-    ship_lead_days = settings['ship_lead_days']
-    return_offset_days = settings['return_offset_days']
-    buffer_days = settings['buffer_days']
-
-    # 计算占用期间（发货日到回收日 + 缓冲天数）
-    occupy_start = event_date - timedelta(days=ship_lead_days)
-    occupy_end = event_date + timedelta(days=return_offset_days + buffer_days)
-
-    # 查询该期间内有冲突的订单
-    query = Q(
-        status__in=['confirmed', 'delivered', 'in_use'],
-        event_date__gte=occupy_start,
-        event_date__lte=occupy_end
-    )
+    # 仓库实时可用库存：仅按“当前未回仓”的占用计算，不按预定日期做时间复用
+    query = Q(status__in=['pending', 'confirmed', 'delivered', 'in_use'])
 
     if exclude_order_id:
         query &= ~Q(id=exclude_order_id)
 
-    # 统计已占用数量
-    occupied = OrderItem.objects.filter(
-        order__in=Order.objects.filter(query),
+    active_orders = Order.objects.filter(query)
+    # 仓库占用 = 订单明细数量 - 已锁定/已消耗转寄数量
+    occupied_raw = OrderItem.objects.filter(
+        order__in=active_orders,
         sku_id=sku_id
     ).aggregate(total=Sum('quantity'))['total'] or 0
+    transfer_allocated = TransferAllocation.objects.filter(
+        target_order__in=active_orders,
+        sku_id=sku_id,
+        status__in=['locked', 'consumed']
+    ).aggregate(total=Sum('quantity'))['total'] or 0
+    occupied = max(occupied_raw - transfer_allocated, 0)
 
-    available_count = sku.stock - occupied
+    raw_available_count = sku.stock - occupied
+    available_count = max(raw_available_count, 0)
+    overbooked_count = max(-raw_available_count, 0)
 
     return {
-        'available': available_count >= quantity,
+        'available': raw_available_count >= quantity,
         'current_stock': sku.stock,
         'occupied': occupied,
         'available_count': available_count,
-        'message': f'可用数量：{available_count}/{sku.stock}' if available_count >= quantity else f'库存不足，仅剩{available_count}套'
+        'overbooked_count': overbooked_count,
+        'message': (
+            f'仓库可用：{available_count}/{sku.stock}（占用：{occupied}）'
+            if raw_available_count >= quantity
+            else (
+                f'仓库库存不足，仅剩{available_count}套（占用：{occupied}）'
+                if overbooked_count == 0
+                else f'仓库库存不足，当前超占{overbooked_count}套（占用：{occupied}）'
+            )
+        )
+    }
+
+
+def _address_distance_score(source_address, target_address):
+    """地址相似度转换为距离分值，数值越小越近。"""
+    left = (source_address or '').strip().lower()
+    right = (target_address or '').strip().lower()
+    if not left or not right:
+        return Decimal('999.0000')
+    ratio = SequenceMatcher(None, left, right).ratio()
+    return Decimal(str(round((1 - ratio) * 100, 4)))
+
+
+def get_transfer_match_candidates(delivery_address, target_event_date, sku_id):
+    """
+    获取创建订单时的转寄候选（不分配数量）
+    规则：
+    1) 来源订单已发货；2) 同SKU；3) 来源预定日期至少早6天；
+    4) 排序：来源预定日期 ASC -> 地址距离分值 ASC -> 来源单号 ASC
+    """
+    min_source_date = target_event_date - timedelta(days=6)
+    lock_start = target_event_date - timedelta(days=5)
+    lock_end = target_event_date + timedelta(days=5)
+
+    source_orders = Order.objects.filter(
+        status='delivered',
+        event_date__lte=min_source_date,
+        items__sku_id=sku_id
+    ).distinct().prefetch_related('items__sku')
+
+    candidates = []
+    for order in source_orders:
+        source_qty = OrderItem.objects.filter(order=order, sku_id=sku_id).aggregate(total=Sum('quantity'))['total'] or 0
+        reserved_qty = TransferAllocation.objects.filter(
+            source_order=order,
+            sku_id=sku_id,
+            status__in=['locked', 'consumed'],
+            target_event_date__gte=lock_start,
+            target_event_date__lte=lock_end
+        ).aggregate(total=Sum('quantity'))['total'] or 0
+        available_qty = max(source_qty - reserved_qty, 0)
+        if available_qty <= 0:
+            continue
+
+        distance_score = _address_distance_score(order.delivery_address, delivery_address)
+        candidates.append({
+            'source_order': order,
+            'available_qty': available_qty,
+            'distance_score': distance_score,
+            'lock_window_start': lock_start,
+            'lock_window_end': lock_end,
+        })
+
+    candidates.sort(key=lambda item: (item['source_order'].event_date, item['distance_score'], item['source_order'].order_no))
+    return candidates
+
+
+def build_transfer_allocation_plan(delivery_address, target_event_date, sku_id, quantity, preferred_source_order_id=None):
+    """根据候选生成分配方案：优先转寄，不足部分走仓库。"""
+    candidates = get_transfer_match_candidates(delivery_address, target_event_date, sku_id)
+    if preferred_source_order_id:
+        preferred = [c for c in candidates if c['source_order'].id == preferred_source_order_id]
+        others = [c for c in candidates if c['source_order'].id != preferred_source_order_id]
+        candidates = preferred + others
+
+    remaining = quantity
+    allocations = []
+    for c in candidates:
+        if remaining <= 0:
+            break
+        alloc_qty = min(remaining, c['available_qty'])
+        if alloc_qty <= 0:
+            continue
+        allocations.append({
+            'source_order_id': c['source_order'].id,
+            'source_order_no': c['source_order'].order_no,
+            'source_event_date': c['source_order'].event_date,
+            'sku_id': sku_id,
+            'quantity': alloc_qty,
+            'target_event_date': target_event_date,
+            'window_start': c['lock_window_start'],
+            'window_end': c['lock_window_end'],
+            'distance_score': c['distance_score'],
+        })
+        remaining -= alloc_qty
+
+    return {
+        'allocations': allocations,
+        'warehouse_needed': max(remaining, 0),
+        'candidates': candidates,
     }
 
 
@@ -254,8 +349,7 @@ def get_calendar_data(year, month):
         for d in dates:
             # 查询该日期的订单
             orders = Order.objects.filter(
-                status__in=['confirmed', 'delivered', 'in_use'],
-                event_date=d,
+                status__in=['pending', 'confirmed', 'delivered', 'in_use'],
                 items__sku=sku
             ).distinct()
 
@@ -330,7 +424,8 @@ def calculate_order_amount(order_items):
         total_deposit += sku.deposit * quantity
         total_rental += sku.rental_price * quantity
 
-    total_amount = total_deposit + total_rental
+    # 订单总额仅统计租金，押金单独管理
+    total_amount = total_rental
 
     return {
         'total_amount': total_amount,

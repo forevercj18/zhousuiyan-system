@@ -8,13 +8,22 @@ from django.contrib import messages
 from django.http import JsonResponse
 from django.db.models import Q, Count, Sum, F
 from django.db import models
+from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from .models import Order, OrderItem, SKU, Part, PurchaseOrder, PurchaseOrderItem, PartsMovement, AuditLog, User, SystemSettings, Transfer
+from .models import (
+    Order, OrderItem, SKU, Part, PurchaseOrder, PurchaseOrderItem, PartsMovement,
+    AuditLog, User, SystemSettings, Transfer, TransferAllocation
+)
 from .services import OrderService, ProcurementService, PartsService
 from .permissions import require_permission, filter_queryset_by_permission
-from .utils import get_calendar_data, find_transfer_candidates, create_transfer_task
+from .utils import (
+    get_calendar_data,
+    find_transfer_candidates,
+    create_transfer_task,
+    build_transfer_allocation_plan,
+)
 
 
 def login_view(request):
@@ -46,18 +55,40 @@ def logout_view(request):
 @require_permission('dashboard', 'view')
 def dashboard(request):
     """工作台首页"""
+    total_stock = SKU.objects.filter(is_active=True).aggregate(total=Sum('stock'))['total'] or 0
+    occupied_raw = OrderItem.objects.filter(
+        order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
+        sku__is_active=True
+    ).aggregate(total=Sum('quantity'))['total'] or 0
+    transfer_allocated = TransferAllocation.objects.filter(
+        target_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
+        sku__is_active=True,
+        status__in=['locked', 'consumed']
+    ).aggregate(total=Sum('quantity'))['total'] or 0
+    occupied_stock = max(occupied_raw - transfer_allocated, 0)
+    warehouse_available_stock = max(total_stock - occupied_stock, 0)
+    transfer_available_count = len(find_transfer_candidates())
+    total_revenue = Order.objects.filter(status='completed').aggregate(total=Sum('total_amount'))['total'] or Decimal('0.00')
+    pending_revenue = Order.objects.exclude(status__in=['completed', 'cancelled']).aggregate(total=Sum('balance'))['total'] or Decimal('0.00')
+
     # 统计数据
     stats = {
         'pending_orders': Order.objects.filter(status='pending').count(),
-        'confirmed_orders': Order.objects.filter(status='confirmed').count(),
         'delivered_orders': Order.objects.filter(status='delivered').count(),
+        'warehouse_available_stock': warehouse_available_stock,
+        'transfer_available_count': transfer_available_count,
         'total_orders': Order.objects.count(),
         'total_skus': SKU.objects.filter(is_active=True).count(),
         'low_stock_parts': Part.objects.filter(current_stock__lt=models.F('safety_stock')).count(),
+        'total_revenue': total_revenue,
+        'pending_revenue': pending_revenue,
     }
 
     # 最近订单
-    recent_orders = Order.objects.select_related('created_by').prefetch_related('items__sku').order_by('-created_at')[:5]
+    recent_orders = Order.objects.select_related('created_by').prefetch_related(
+        'items__sku',
+        'transfer_allocations_target__source_order',
+    ).order_by('-created_at')[:5]
 
     # 库存不足的部件
     low_stock_parts = Part.objects.filter(
@@ -79,20 +110,21 @@ def workbench(request):
     """工作台 - 订单处理中心"""
     # 根据权限过滤订单
     orders = filter_queryset_by_permission(
-        Order.objects.select_related('created_by').prefetch_related('items__sku'),
+        Order.objects.select_related('created_by').prefetch_related(
+            'items__sku',
+            'transfer_allocations_target__source_order',
+        ),
         request.user,
         'Order'
     )
 
     # 按状态分组
-    pending_orders = orders.filter(status='pending').order_by('-created_at')
-    confirmed_orders = orders.filter(status='confirmed').order_by('ship_date')
+    pending_orders = orders.filter(status__in=['pending', 'confirmed']).order_by('-created_at')
     delivered_orders = orders.filter(status='delivered').order_by('return_date')
     returned_orders = orders.filter(status='returned').order_by('return_date')
 
     context = {
         'pending_orders': pending_orders,
-        'confirmed_orders': confirmed_orders,
         'delivered_orders': delivered_orders,
         'returned_orders': returned_orders,
     }
@@ -105,7 +137,10 @@ def orders_list(request):
     """订单列表"""
     # 根据权限过滤订单
     orders = filter_queryset_by_permission(
-        Order.objects.select_related('created_by').prefetch_related('items__sku'),
+        Order.objects.select_related('created_by').prefetch_related(
+            'items__sku',
+            'transfer_allocations_target__source_order',
+        ),
         request.user,
         'Order'
     )
@@ -143,6 +178,7 @@ def order_create(request):
             # 获取订单明细
             sku_ids = request.POST.getlist('sku_id[]')
             quantities = request.POST.getlist('quantity[]')
+            transfer_source_order_ids = request.POST.getlist('transfer_source_order_id[]')
 
             # 验证至少有一个明细
             if not sku_ids or not sku_ids[0]:
@@ -152,11 +188,15 @@ def order_create(request):
 
             # 构建订单明细列表
             items = []
-            for sku_id, quantity in zip(sku_ids, quantities):
+            for idx, (sku_id, quantity) in enumerate(zip(sku_ids, quantities)):
                 if sku_id:  # 跳过空的明细行
+                    source_order_id = ''
+                    if idx < len(transfer_source_order_ids):
+                        source_order_id = (transfer_source_order_ids[idx] or '').strip()
                     items.append({
                         'sku_id': int(sku_id),
-                        'quantity': int(quantity) if quantity else 1
+                        'quantity': int(quantity) if quantity else 1,
+                        'transfer_source_order_id': int(source_order_id) if source_order_id else None,
                     })
 
             # 构建订单数据
@@ -238,8 +278,22 @@ def order_detail(request, order_id):
         id=order_id
     )
 
+    allocations_qs = order.transfer_allocations_target.select_related('source_order', 'sku').order_by('sku_id', 'source_order__event_date', 'source_order__order_no')
+    transfer_allocations_by_sku = defaultdict(list)
+    for alloc in allocations_qs:
+        transfer_allocations_by_sku[alloc.sku_id].append(alloc)
+    item_rows = []
+    for item in order.items.all():
+        item_rows.append({
+            'item': item,
+            'allocations': transfer_allocations_by_sku.get(item.sku_id, []),
+        })
+
     context = {
         'order': order,
+        'transfer_allocations_by_sku': dict(transfer_allocations_by_sku),
+        'target_transfer_allocations': list(allocations_qs),
+        'item_rows': item_rows,
     }
     return render(request, 'orders/detail.html', context)
 
@@ -804,11 +858,11 @@ def users_list(request):
 @login_required
 @require_permission('orders', 'update')
 def order_mark_delivered(request, order_id):
-    """工作台：标记订单送达"""
+    """工作台：标记订单发货"""
     if request.method == 'POST':
         try:
             OrderService.mark_as_delivered(order_id, request.POST.get('ship_tracking', ''), request.user)
-            messages.success(request, '订单已标记为已送达')
+            messages.success(request, '订单已标记为已发货')
         except ValueError as e:
             messages.error(request, str(e))
         except Exception as e:
@@ -819,12 +873,22 @@ def order_mark_delivered(request, order_id):
 @login_required
 @require_permission('orders', 'update')
 def order_mark_confirmed(request, order_id):
-    """工作台：确认订单"""
+    """工作台：确认订单并进入待发货"""
     if request.method == 'POST':
         try:
             deposit_paid = Decimal(request.POST.get('deposit_paid', '0') or '0')
+            auto_deliver = request.POST.get('auto_deliver') == '1'
+            ship_tracking = (request.POST.get('ship_tracking', '') or '').strip()
+            if auto_deliver and not ship_tracking:
+                raise ValueError('快递单号不能为空')
+
             OrderService.confirm_order(order_id, deposit_paid, request.user)
-            messages.success(request, '订单已确认')
+
+            if auto_deliver:
+                OrderService.mark_as_delivered(order_id, ship_tracking, request.user)
+                messages.success(request, '订单已录入运单并标记为已发货')
+            else:
+                messages.success(request, '订单已确认并进入待发货')
         except ValueError as e:
             messages.error(request, str(e))
         except Exception as e:
@@ -912,13 +976,60 @@ def api_check_availability(request):
     sku_id = request.GET.get('sku_id')
     event_date = request.GET.get('event_date')
     quantity = int(request.GET.get('quantity', 1))
+    rental_days = int(request.GET.get('rental_days', 1))
 
     try:
         event_date = datetime.strptime(event_date, '%Y-%m-%d').date()
-        result = check_sku_availability(sku_id, event_date, quantity)
+        result = check_sku_availability(sku_id, event_date, quantity, rental_days=rental_days)
         return JsonResponse({
             'success': True,
             'data': result
+        })
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)})
+
+
+@login_required
+def api_transfer_match(request):
+    """API: 创建订单阶段转寄匹配建议"""
+    try:
+        sku_id = int(request.GET.get('sku_id'))
+        event_date = datetime.strptime(request.GET.get('event_date'), '%Y-%m-%d').date()
+        quantity = int(request.GET.get('quantity', 1))
+        delivery_address = request.GET.get('delivery_address', '')
+        preferred_source_order_id_raw = (request.GET.get('preferred_source_order_id') or '').strip()
+        preferred_source_order_id = int(preferred_source_order_id_raw) if preferred_source_order_id_raw else None
+
+        plan = build_transfer_allocation_plan(
+            delivery_address=delivery_address,
+            target_event_date=event_date,
+            sku_id=sku_id,
+            quantity=quantity,
+            preferred_source_order_id=preferred_source_order_id,
+        )
+
+        candidates = []
+        for c in plan['candidates']:
+            candidates.append({
+                'source_order_id': c['source_order'].id,
+                'source_order_no': c['source_order'].order_no,
+                'source_event_date': c['source_order'].event_date.strftime('%Y-%m-%d'),
+                'available_qty': c['available_qty'],
+                'distance_score': str(c['distance_score']),
+            })
+
+        return JsonResponse({
+            'success': True,
+            'data': {
+                'warehouse_needed': plan['warehouse_needed'],
+                'allocations': [
+                    {
+                        **a,
+                        'source_event_date': a['source_event_date'].strftime('%Y-%m-%d') if a.get('source_event_date') else None,
+                    } for a in plan['allocations']
+                ],
+                'candidates': candidates,
+            }
         })
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)})

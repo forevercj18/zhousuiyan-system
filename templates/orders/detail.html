@@ -1,39 +1,224 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}订单详情 - 宝宝周岁宴道具租赁系统{% endblock %}
 {% block page_title %}订单详情{% endblock %}
 
 {% block content %}
-<div class="order-detail">
-    <div class="page-header">
-        <div class="header-left">
-            <h3>{{ order.order_no }}</h3>
+<style>
+.order-detail-page {
+    max-width: 1280px;
+}
+
+.order-hero {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    color: #fff;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.2);
+}
+
+.order-hero-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.order-no {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+}
+
+.order-hero-sub {
+    margin-top: 8px;
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 13px;
+}
+
+.status-chip {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.status-pending { background: #fff7e6; color: #ad6800; }
+.status-confirmed { background: #f6ffed; color: #237804; }
+.status-delivered { background: #e6f7ff; color: #0050b3; }
+.status-returned { background: #fff0f6; color: #9e1068; }
+.status-completed { background: #f0f5ff; color: #1d39c4; }
+.status-cancelled { background: #fff1f0; color: #a8071a; }
+
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin: 18px 0;
+}
+
+.summary-card {
+    background: #fff;
+    border: 1px solid #f0f0f0;
+    border-radius: 10px;
+    padding: 14px;
+}
+
+.summary-label {
+    color: #666;
+    font-size: 12px;
+    margin-bottom: 6px;
+}
+
+.summary-value {
+    font-size: 22px;
+    font-weight: 700;
+}
+
+.summary-value.total { color: #1677ff; }
+.summary-value.deposit { color: #13a73f; }
+.summary-value.balance { color: #d48806; }
+
+.detail-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+
+.panel {
+    background: #fff;
+    border: 1px solid #f0f0f0;
+    border-radius: 10px;
+    padding: 16px;
+}
+
+.panel h3 {
+    font-size: 16px;
+    margin-bottom: 12px;
+}
+
+.info-list {
+    display: grid;
+    gap: 10px;
+}
+
+.info-item {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    gap: 8px;
+    align-items: start;
+    font-size: 14px;
+}
+
+.info-item .k {
+    color: #666;
+}
+
+.action-panel form {
+    background: #fafafa;
+    border: 1px solid #f0f0f0;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+}
+
+.action-row {
+    display: flex;
+    gap: 10px;
+    align-items: end;
+    flex-wrap: wrap;
+}
+
+.action-row .form-group {
+    min-width: 180px;
+    margin-bottom: 0;
+}
+
+.order-table-wrap {
+    margin-top: 16px;
+}
+
+.order-table-wrap .data-table td,
+.order-table-wrap .data-table th {
+    padding-top: 10px;
+    padding-bottom: 10px;
+}
+
+.top-actions {
+    display: flex;
+    gap: 8px;
+}
+
+@media (max-width: 980px) {
+    .summary-grid,
+    .detail-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .info-item {
+        grid-template-columns: 1fr;
+        gap: 4px;
+    }
+}
+</style>
+
+<div class="order-detail-page">
+    <div class="order-hero">
+        <div class="order-hero-top">
+            <div>
+                <div class="order-no">{{ order.order_no }}</div>
+                <div class="order-hero-sub">创建时间：{{ order.created_at|date:"Y-m-d H:i" }} · 创建人：{{ order.created_by|default:"-" }}</div>
+            </div>
+            <div>
+                <span class="status-chip status-{{ order.status }}">{{ order.get_status_display }}</span>
+            </div>
         </div>
-        <div class="header-right">
-            <a href="{% url 'order_edit' order.id %}" class="btn btn-primary">编辑订单</a>
-            <a href="{% url 'orders_list' %}" class="btn btn-secondary">返回列表</a>
+    </div>
+
+    <div class="summary-grid">
+        <div class="summary-card">
+            <div class="summary-label">订单总额</div>
+            <div class="summary-value total">￥{{ order.total_amount }}</div>
+        </div>
+        <div class="summary-card">
+            <div class="summary-label">已付押金</div>
+            <div class="summary-value deposit">￥{{ order.deposit_paid }}</div>
+        </div>
+        <div class="summary-card">
+            <div class="summary-label">待收尾款</div>
+            <div class="summary-value balance">￥{{ order.balance }}</div>
         </div>
     </div>
 
-    <div class="form-section">
-        <h3>客户信息</h3>
-        <p><strong>客户姓名：</strong>{{ order.customer_name }}</p>
-        <p><strong>联系电话：</strong>{{ order.customer_phone }}</p>
-        <p><strong>邮箱：</strong>{{ order.customer_email|default:"-" }}</p>
-        <p><strong>送货地址：</strong>{{ order.delivery_address }}</p>
-        <p><strong>回收地址：</strong>{{ order.return_address|default:"-" }}</p>
+    <div class="detail-grid">
+        <div class="panel">
+            <h3>客户信息</h3>
+            <div class="info-list">
+                <div class="info-item"><div class="k">客户姓名</div><div>{{ order.customer_name }}</div></div>
+                <div class="info-item"><div class="k">联系电话</div><div>{{ order.customer_phone }}</div></div>
+                <div class="info-item"><div class="k">邮箱</div><div>{{ order.customer_email|default:"-" }}</div></div>
+                <div class="info-item"><div class="k">送货地址</div><div>{{ order.delivery_address }}</div></div>
+                <div class="info-item"><div class="k">回收地址</div><div>{{ order.return_address|default:"-" }}</div></div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3>履约信息</h3>
+            <div class="info-list">
+                <div class="info-item"><div class="k">预定日期</div><div>{{ order.event_date }}</div></div>
+                <div class="info-item"><div class="k">租赁天数</div><div>{{ order.rental_days }} 天</div></div>
+                <div class="info-item"><div class="k">发货日期</div><div>{{ order.ship_date|default:"-" }}</div></div>
+                <div class="info-item"><div class="k">回收日期</div><div>{{ order.return_date|default:"-" }}</div></div>
+                <div class="info-item"><div class="k">发货单号</div><div>{{ order.ship_tracking|default:"-" }}</div></div>
+                <div class="info-item"><div class="k">回收单号</div><div>{{ order.return_tracking|default:"-" }}</div></div>
+            </div>
+        </div>
     </div>
 
-    <div class="form-section">
-        <h3>订单信息</h3>
-        <p><strong>活动日期：</strong>{{ order.event_date }}</p>
-        <p><strong>租赁天数：</strong>{{ order.rental_days }} 天</p>
-        <p><strong>发货日期：</strong>{{ order.ship_date|default:"-" }}</p>
-        <p><strong>回收日期：</strong>{{ order.return_date|default:"-" }}</p>
-        <p><strong>状态：</strong>{{ order.get_status_display }}</p>
-    </div>
-
-    <div class="form-section">
+    <div class="panel order-table-wrap">
         <h3>订单明细</h3>
         <table class="data-table">
             <thead>
@@ -43,58 +228,75 @@
                     <th>租金单价</th>
                     <th>押金单价</th>
                     <th>小计</th>
+                    <th>转寄挂靠</th>
                 </tr>
             </thead>
             <tbody>
-                {% for item in order.items.all %}
+                {% for row in item_rows %}
                 <tr>
-                    <td>{{ item.sku.name }}</td>
-                    <td>{{ item.quantity }}</td>
-                    <td>￥{{ item.rental_price }}</td>
-                    <td>￥{{ item.deposit }}</td>
-                    <td>￥{{ item.subtotal }}</td>
+                    <td>{{ row.item.sku.name }}</td>
+                    <td>{{ row.item.quantity }}</td>
+                    <td>￥{{ row.item.rental_price }}</td>
+                    <td>￥{{ row.item.deposit }}</td>
+                    <td>￥{{ row.item.subtotal }}</td>
+                    <td>
+                        {% if row.allocations %}
+                            {% for alloc in row.allocations %}
+                            <div>{{ alloc.source_order.order_no }}（{{ alloc.quantity }}套）</div>
+                            {% endfor %}
+                        {% else %}
+                            <span class="text-muted">仓库发货</span>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="5" class="text-center">暂无明细</td>
+                    <td colspan="6" class="text-center">暂无明细</td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
     </div>
 
-    <div class="form-section">
-        <h3>金额信息</h3>
-        <p><strong>订单总额：</strong>￥{{ order.total_amount }}</p>
-        <p><strong>已付押金：</strong>￥{{ order.deposit_paid }}</p>
-        <p><strong>待收尾款：</strong>￥{{ order.balance }}</p>
-        <p><strong>备注：</strong>{{ order.notes|default:"-" }}</p>
-    </div>
-
-    <div class="form-section">
+    <div class="panel action-panel" style="margin-top: 16px;">
         <h3>状态操作</h3>
+
         {% if order.status == 'pending' %}
         <form method="post" action="{% url 'order_mark_confirmed' order.id %}">
             {% csrf_token %}
-            <label>已收押金：</label>
-            <input type="number" name="deposit_paid" step="0.01" min="0" value="0">
-            <button type="submit" class="btn btn-primary">确认订单</button>
+            <div class="action-row">
+                <div class="form-group">
+                    <label class="form-label">已收押金</label>
+                    <input class="form-control" type="number" name="deposit_paid" step="0.01" min="0" value="0">
+                </div>
+                <button type="submit" class="btn btn-primary">确认并进入待发货</button>
+            </div>
         </form>
         {% elif order.status == 'confirmed' %}
         <form method="post" action="{% url 'order_mark_delivered' order.id %}">
             {% csrf_token %}
-            <label>发货单号：</label>
-            <input type="text" name="ship_tracking">
-            <button type="submit" class="btn btn-primary">标记送达</button>
+            <div class="action-row">
+                <div class="form-group">
+                    <label class="form-label">发货单号</label>
+                    <input class="form-control" type="text" name="ship_tracking" placeholder="可选">
+                </div>
+                <button type="submit" class="btn btn-primary">标记发货</button>
+            </div>
         </form>
         {% elif order.status == 'delivered' %}
         <form method="post" action="{% url 'order_mark_returned' order.id %}">
             {% csrf_token %}
-            <label>回收单号：</label>
-            <input type="text" name="return_tracking">
-            <label>已收尾款：</label>
-            <input type="number" name="balance_paid" step="0.01" min="0" value="0">
-            <button type="submit" class="btn btn-primary">标记归还</button>
+            <div class="action-row">
+                <div class="form-group">
+                    <label class="form-label">回收单号</label>
+                    <input class="form-control" type="text" name="return_tracking" placeholder="可选">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">已收尾款</label>
+                    <input class="form-control" type="number" name="balance_paid" step="0.01" min="0" value="0">
+                </div>
+                <button type="submit" class="btn btn-primary">标记归还</button>
+            </div>
         </form>
         {% elif order.status == 'returned' %}
         <form method="post" action="{% url 'order_mark_completed' order.id %}">
@@ -104,13 +306,23 @@
         {% endif %}
 
         {% if order.status != 'completed' and order.status != 'cancelled' %}
-        <form method="post" action="{% url 'order_cancel' order.id %}" style="margin-top: 12px;">
+        <form method="post" action="{% url 'order_cancel' order.id %}">
             {% csrf_token %}
-            <label>取消原因：</label>
-            <input type="text" name="reason" value="手动取消">
-            <button type="submit" class="btn btn-danger">取消订单</button>
+            <div class="action-row">
+                <div class="form-group" style="flex: 1; min-width: 260px;">
+                    <label class="form-label">取消原因</label>
+                    <input class="form-control" type="text" name="reason" value="手动取消">
+                </div>
+                <button type="submit" class="btn btn-danger">取消订单</button>
+            </div>
         </form>
         {% endif %}
     </div>
+
+    <div class="top-actions" style="margin-top: 16px; justify-content: flex-end;">
+        <a href="{% url 'order_edit' order.id %}" class="btn btn-primary">编辑订单</a>
+        <a href="{% url 'orders_list' %}" class="btn btn-secondary">返回列表</a>
+    </div>
 </div>
 {% endblock %}
+

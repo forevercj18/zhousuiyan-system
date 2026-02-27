@@ -1,6 +1,7 @@
 /* 工作台 */
 .dashboard {
-    max-width: 1400px;
+    width: 100%;
+    max-width: none;
 }
 
 .stats-grid {
@@ -80,7 +81,8 @@
 
 /* 订单处理看板 */
 .workbench {
-    max-width: 1600px;
+    width: 100%;
+    max-width: none;
 }
 
 .workbench-header {
@@ -180,7 +182,8 @@
 .purchase-orders-list,
 .parts-inventory,
 .parts-movements {
-    max-width: 1600px;
+    width: 100%;
+    max-width: none;
 }
 
 .page-header {
@@ -206,7 +209,8 @@
 /* 订单表单 */
 .order-form,
 .purchase-order-form {
-    max-width: 1200px;
+    width: 100%;
+    max-width: none;
     background: #fff;
     border-radius: 8px;
     padding: 24px;
@@ -245,7 +249,8 @@
 
 /* 日历 */
 .calendar-view {
-    max-width: 1400px;
+    width: 100%;
+    max-width: none;
 }
 
 .calendar-header {
@@ -394,7 +399,8 @@
 
 /* SKU管理 */
 .skus-list {
-    max-width: 1400px;
+    width: 100%;
+    max-width: none;
 }
 
 .skus-grid {
@@ -496,7 +502,8 @@
 
 /* 设置页面 */
 .settings {
-    max-width: 800px;
+    width: 100%;
+    max-width: none;
     background: #fff;
     border-radius: 8px;
     padding: 24px;
@@ -505,5 +512,60 @@
 
 /* 审计日志 */
 .audit-logs {
-    max-width: 1400px;
+    width: 100%;
+    max-width: none;
+}
+
+@media (max-width: 1200px) {
+    .stats-grid {
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 16px;
+    }
+
+    .stat-card {
+        padding: 16px;
+    }
+}
+
+@media (max-width: 992px) {
+    .kanban-board {
+        grid-template-columns: 1fr;
+    }
+
+    .order-form,
+    .purchase-order-form,
+    .quick-actions,
+    .recent-orders,
+    .low-stock-alert,
+    .calendar-container,
+    .calendar-legend,
+    .events-list {
+        padding: 16px;
+    }
+
+    .event-item {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+}
+
+@media (max-width: 768px) {
+    .stats-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .workbench-header,
+    .page-header {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .header-left,
+    .header-right {
+        width: 100%;
+    }
+
+    .calendar-header {
+        gap: 8px;
+    }
 }

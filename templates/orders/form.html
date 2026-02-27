@@ -82,12 +82,21 @@
                                     <option value="">请选择套餐</option>
                                     {% for sku in skus %}
                                     <option value="{{ sku.id }}"
+                                            data-name="{{ sku.name }}"
+                                            data-stock="{{ sku.stock }}"
                                             data-price="{{ sku.rental_price }}"
                                             data-deposit="{{ sku.deposit }}"
                                             {% if sku.id == item.sku_id %}selected{% endif %}>
                                         {{ sku.name }} - ¥{{ sku.rental_price }} (库存: {{ sku.stock }})
                                     </option>
                                     {% endfor %}
+                                </select>
+                            </div>
+                            <div class="form-group flex-2">
+                                <label>转寄来源单（可选）</label>
+                                <select class="form-control transfer-source-select" name="transfer_source_order_id[]"
+                                        {% if mode == 'view' %}disabled{% endif %}>
+                                    <option value="">自动匹配最优来源单</option>
                                 </select>
                             </div>
                             <div class="form-group">
@@ -119,11 +128,19 @@
                                 <option value="">请选择套餐</option>
                                 {% for sku in skus %}
                                 <option value="{{ sku.id }}"
+                                        data-name="{{ sku.name }}"
+                                        data-stock="{{ sku.stock }}"
                                         data-price="{{ sku.rental_price }}"
                                         data-deposit="{{ sku.deposit }}">
                                     {{ sku.name }} - ¥{{ sku.rental_price }} (库存: {{ sku.stock }})
                                 </option>
                                 {% endfor %}
+                            </select>
+                        </div>
+                        <div class="form-group flex-2">
+                            <label>转寄来源单（可选）</label>
+                            <select class="form-control transfer-source-select" name="transfer_source_order_id[]">
+                                <option value="">自动匹配最优来源单</option>
                             </select>
                         </div>
                         <div class="form-group">
@@ -205,6 +222,10 @@ document.addEventListener('DOMContentLoaded', function() {
         const template = document.querySelector('.order-item').cloneNode(true);
         template.querySelectorAll('input').forEach(input => input.value = input.type === 'number' ? '1' : '');
         template.querySelector('select').selectedIndex = 0;
+        const transferSelect = template.querySelector('.transfer-source-select');
+        if (transferSelect) {
+            transferSelect.innerHTML = '<option value="">自动匹配最优来源单</option>';
+        }
         orderItems.appendChild(template);
         attachItemEvents(template);
     });
@@ -260,6 +281,292 @@ document.addEventListener('DOMContentLoaded', function() {
     // 初始化事件
     document.querySelectorAll('.order-item').forEach(attachItemEvents);
     calculateTotal();
+});
+</script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const orderForm = document.getElementById('orderForm');
+    const eventDateInput = document.getElementById('event_date');
+    const rentalDaysInput = document.getElementById('rental_days');
+    const deliveryAddressInput = document.getElementById('delivery_address');
+    const checkUrl = "{% url 'api_check_availability' %}";
+    const transferUrl = "{% url 'api_transfer_match' %}";
+    const availabilityCache = new Map();
+    const transferCache = new Map();
+    let submitting = false;
+
+    async function getAvailability(skuId, quantity) {
+        const eventDate = eventDateInput?.value;
+        const rentalDays = rentalDaysInput?.value || '1';
+        if (!skuId || !eventDate) {
+            return null;
+        }
+        const cacheKey = `${skuId}|${eventDate}|${rentalDays}|${quantity}`;
+        if (availabilityCache.has(cacheKey)) {
+            return availabilityCache.get(cacheKey);
+        }
+        const params = new URLSearchParams({
+            sku_id: skuId,
+            event_date: eventDate,
+            rental_days: rentalDays,
+            quantity: String(quantity || 1)
+        });
+        const resp = await fetch(`${checkUrl}?${params.toString()}`, { credentials: 'same-origin' });
+        const payload = await resp.json();
+        if (!payload.success) {
+            return null;
+        }
+        availabilityCache.set(cacheKey, payload.data || null);
+        return payload.data || null;
+    }
+
+    async function getTransferMatch(skuId, quantity, preferredSourceOrderId) {
+        const eventDate = eventDateInput?.value;
+        const deliveryAddress = (deliveryAddressInput?.value || '').trim();
+        if (!skuId || !eventDate || !deliveryAddress) {
+            return null;
+        }
+        const cacheKey = `${skuId}|${eventDate}|${deliveryAddress}|${quantity}|${preferredSourceOrderId || ''}`;
+        if (transferCache.has(cacheKey)) {
+            return transferCache.get(cacheKey);
+        }
+        const params = new URLSearchParams({
+            sku_id: skuId,
+            event_date: eventDate,
+            quantity: String(quantity || 1),
+            delivery_address: deliveryAddress
+        });
+        if (preferredSourceOrderId) {
+            params.set('preferred_source_order_id', String(preferredSourceOrderId));
+        }
+        const resp = await fetch(`${transferUrl}?${params.toString()}`, { credentials: 'same-origin' });
+        const payload = await resp.json();
+        if (!payload.success) {
+            return null;
+        }
+        transferCache.set(cacheKey, payload.data || null);
+        return payload.data || null;
+    }
+
+    async function refreshSelectOptions(item) {
+        const skuSelect = item.querySelector('.sku-select');
+        const selectedValue = skuSelect?.value;
+        if (!skuSelect) {
+            return;
+        }
+        const eventDate = eventDateInput?.value;
+        if (!eventDate) {
+            Array.from(skuSelect.options).forEach((opt) => {
+                if (!opt.value) return;
+                const name = opt.dataset.name || opt.textContent.split(' - ')[0];
+                const price = opt.dataset.price || '0';
+                const stock = opt.dataset.stock || '0';
+                opt.textContent = `${name} - ￥${price} (库存: ${stock})`;
+                opt.disabled = false;
+            });
+            return;
+        }
+
+        for (const opt of Array.from(skuSelect.options)) {
+            if (!opt.value) continue;
+            const name = opt.dataset.name || opt.textContent.split(' - ')[0];
+            const price = opt.dataset.price || '0';
+            const stock = opt.dataset.stock || '0';
+            const data = await getAvailability(opt.value, 1);
+            if (data && typeof data.available_count !== 'undefined') {
+                const availableCount = data.available_count;
+                opt.textContent = `${name} - ￥${price} (可用: ${availableCount}/${stock})`;
+                opt.disabled = availableCount <= 0 && opt.value !== selectedValue;
+            } else {
+                opt.textContent = `${name} - ￥${price} (可用: --/${stock})`;
+                opt.disabled = false;
+            }
+        }
+    }
+
+    function ensureAvailabilityHint(item) {
+        let hint = item.querySelector('.availability-hint');
+        if (!hint) {
+            hint = document.createElement('small');
+            hint.className = 'form-text availability-hint';
+            hint.style.display = 'block';
+            hint.style.marginTop = '6px';
+            item.querySelector('.form-row')?.appendChild(hint);
+        }
+        return hint;
+    }
+
+    function setHint(item, message, level) {
+        const hint = ensureAvailabilityHint(item);
+        hint.textContent = message || '';
+        if (level === 'ok') hint.style.color = '#1b8f3a';
+        else if (level === 'error') hint.style.color = '#d93025';
+        else hint.style.color = '#666';
+    }
+
+    function updateTransferSelect(item, transferData) {
+        const transferSelect = item.querySelector('.transfer-source-select');
+        if (!transferSelect) {
+            return;
+        }
+        const previousValue = transferSelect.value;
+        transferSelect.innerHTML = '<option value="">自动匹配最优来源单</option>';
+        const candidates = (transferData && transferData.candidates) ? transferData.candidates : [];
+        candidates.forEach((candidate, idx) => {
+            const option = document.createElement('option');
+            option.value = String(candidate.source_order_id);
+            option.textContent = `${candidate.source_order_no}｜预定:${candidate.source_event_date}｜可转:${candidate.available_qty}`;
+            if (idx === 0) {
+                option.textContent += '（推荐）';
+            }
+            transferSelect.appendChild(option);
+        });
+        if (previousValue && transferSelect.querySelector(`option[value="${previousValue}"]`)) {
+            transferSelect.value = previousValue;
+        }
+    }
+
+    async function checkItemAvailability(item) {
+        const skuSelect = item.querySelector('.sku-select');
+        const quantityInput = item.querySelector('.quantity-input');
+        const skuId = skuSelect?.value;
+        const eventDate = eventDateInput?.value;
+        const quantity = quantityInput?.value || '1';
+        const deliveryAddress = (deliveryAddressInput?.value || '').trim();
+        const transferSelect = item.querySelector('.transfer-source-select');
+        const preferredSourceOrderId = (transferSelect?.value || '').trim();
+
+        if (!skuId || !eventDate) {
+            item.dataset.availabilityOk = '1';
+            setHint(item, '选择SKU和预定日期后将显示可用库存', 'muted');
+            updateTransferSelect(item, null);
+            return true;
+        }
+
+        setHint(item, '正在计算仓库库存与转寄方案...', 'muted');
+        try {
+            const [availabilityData, transferData] = await Promise.all([
+                getAvailability(skuId, quantity),
+                getTransferMatch(skuId, quantity, preferredSourceOrderId)
+            ]);
+
+            if (!availabilityData) {
+                item.dataset.availabilityOk = '0';
+                setHint(item, '库存检查失败', 'error');
+                return false;
+            }
+
+            const requestedQty = parseInt(quantity, 10) || 1;
+            const warehouseAvailable = Number(availabilityData.available_count || 0);
+            let ok = !!availabilityData.available;
+            let hintMsg = availabilityData.message || '库存检查完成';
+
+            if (transferData) {
+                updateTransferSelect(item, transferData);
+                const warehouseNeeded = Number(transferData.warehouse_needed || 0);
+                const transferQty = Math.max(requestedQty - warehouseNeeded, 0);
+                const candidateNos = (transferData.allocations || [])
+                    .slice(0, 2)
+                    .map(a => a.source_order_no)
+                    .filter(Boolean);
+
+                ok = warehouseNeeded <= warehouseAvailable;
+                if (transferQty > 0 && warehouseNeeded > 0) {
+                    hintMsg = `建议：转寄 ${transferQty} 套 + 仓库 ${warehouseNeeded} 套`;
+                } else if (transferQty > 0) {
+                    hintMsg = `建议：本单可全部转寄 ${transferQty} 套`;
+                } else {
+                    hintMsg = `建议：暂无可转寄，仓库发货 ${requestedQty} 套`;
+                }
+                if (candidateNos.length) {
+                    hintMsg += `（来源：${candidateNos.join('、')}）`;
+                }
+                if (!ok) {
+                    hintMsg += `；仓库还缺 ${warehouseNeeded - warehouseAvailable} 套`;
+                }
+            } else if (!deliveryAddress) {
+                hintMsg = `${hintMsg}；填写送货地址后可启用转寄推荐`;
+                updateTransferSelect(item, null);
+            } else {
+                updateTransferSelect(item, null);
+            }
+
+            item.dataset.availabilityOk = ok ? '1' : '0';
+            setHint(item, hintMsg, ok ? 'ok' : 'error');
+            return ok;
+        } catch (e) {
+            item.dataset.availabilityOk = '0';
+            setHint(item, '库存检查异常，请稍后重试', 'error');
+            return false;
+        }
+    }
+
+    async function checkAllItemsAvailability() {
+        const items = Array.from(document.querySelectorAll('.order-item'));
+        await Promise.all(items.map(refreshSelectOptions));
+        const results = await Promise.all(items.map(checkItemAvailability));
+        return results.every(Boolean);
+    }
+
+    document.querySelectorAll('.order-item').forEach((item) => {
+        ensureAvailabilityHint(item);
+        refreshSelectOptions(item);
+        item.querySelector('.sku-select')?.addEventListener('change', () => checkItemAvailability(item));
+        item.querySelector('.quantity-input')?.addEventListener('input', () => checkItemAvailability(item));
+    });
+
+    const orderItems = document.getElementById('orderItems');
+    document.getElementById('addItemBtn')?.addEventListener('click', function() {
+        setTimeout(() => {
+            const items = Array.from(document.querySelectorAll('.order-item'));
+            const lastItem = items[items.length - 1];
+            if (lastItem) {
+                ensureAvailabilityHint(lastItem);
+                refreshSelectOptions(lastItem);
+                checkItemAvailability(lastItem);
+            }
+        }, 0);
+    });
+
+    orderItems?.addEventListener('change', function(e) {
+        if (e.target && e.target.classList.contains('sku-select')) {
+            checkItemAvailability(e.target.closest('.order-item'));
+        }
+        if (e.target && e.target.classList.contains('transfer-source-select')) {
+            checkItemAvailability(e.target.closest('.order-item'));
+        }
+    });
+    orderItems?.addEventListener('input', function(e) {
+        if (e.target && e.target.classList.contains('quantity-input')) {
+            checkItemAvailability(e.target.closest('.order-item'));
+        }
+    });
+
+    eventDateInput?.addEventListener('change', checkAllItemsAvailability);
+    rentalDaysInput?.addEventListener('input', () => {
+        availabilityCache.clear();
+        transferCache.clear();
+        checkAllItemsAvailability();
+    });
+    deliveryAddressInput?.addEventListener('input', () => {
+        transferCache.clear();
+        checkAllItemsAvailability();
+    });
+
+    orderForm?.addEventListener('submit', async function(e) {
+        if (submitting) return;
+        if (!eventDateInput?.value) return;
+        e.preventDefault();
+        const allOk = await checkAllItemsAvailability();
+        if (!allOk) {
+            alert('存在库存不足的明细，请调整SKU或数量后再保存。');
+            return;
+        }
+        submitting = true;
+        orderForm.submit();
+    });
+
+    checkAllItemsAvailability();
 });
 </script>
 {% endblock %}

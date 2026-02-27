@@ -104,6 +104,25 @@ python manage.py runserver
 .\start.bat -NoRunServer
 ```
 
+可在启动流程中自动生成验收报告：
+
+```powershell
+.\start.bat -Acceptance -NoRunServer
+```
+
+### 自动生成验收报告
+运行以下命令会自动执行 `check + test` 并在 `docs/` 下生成验收报告：
+
+```powershell
+.\.venv\Scripts\python scripts\generate_acceptance_report.py
+```
+
+可自定义输出文件：
+
+```powershell
+.\.venv\Scripts\python scripts\generate_acceptance_report.py --output docs\ACCEPTANCE_REPORT_CUSTOM.md
+```
+
 ## Docker部署
 
 ### 使用Docker Compose

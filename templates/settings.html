@@ -35,6 +35,30 @@
         <div class="form-section">
             <h3>业务设置</h3>
             <div class="form-group">
+                <label for="ship_lead_days">预计提前发货天数</label>
+                <input type="number" id="ship_lead_days" name="ship_lead_days" class="form-control"
+                       value="{{ settings.ship_lead_days|default:'2' }}" min="0">
+                <small class="form-text">用于推算发货日期，并作为库存锁定起始日</small>
+            </div>
+            <div class="form-group">
+                <label for="return_offset_days">预计回收天数</label>
+                <input type="number" id="return_offset_days" name="return_offset_days" class="form-control"
+                       value="{{ settings.return_offset_days|default:'1' }}" min="0">
+                <small class="form-text">活动结束后额外回收天数，用于推算库存释放日</small>
+            </div>
+            <div class="form-group">
+                <label for="buffer_days">库存缓冲天数</label>
+                <input type="number" id="buffer_days" name="buffer_days" class="form-control"
+                       value="{{ settings.buffer_days|default:'1' }}" min="0">
+                <small class="form-text">用于转寄和排期缓冲，不影响回收日字段本身</small>
+            </div>
+            <div class="form-group">
+                <label for="max_transfer_gap_days">最大转寄间隔天数</label>
+                <input type="number" id="max_transfer_gap_days" name="max_transfer_gap_days" class="form-control"
+                       value="{{ settings.max_transfer_gap_days|default:'3' }}" min="0">
+                <small class="form-text">回收日至下一单发货日允许的最大间隔</small>
+            </div>
+            <div class="form-group">
                 <label for="default_deposit_rate">默认押金比例 (%)</label>
                 <input type="number" id="default_deposit_rate" name="default_deposit_rate" class="form-control"
                        value="30" min="0" max="100">

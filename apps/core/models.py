@@ -1,4 +1,4 @@
-"""
+﻿"""
 核心业务模型
 包含：用户扩展、订单、SKU、部件、采购、转寄、设置、日志等
 """
@@ -62,11 +62,10 @@ class SKU(models.Model):
         return f"{self.code} - {self.name}"
 
     def get_available_count(self, date):
-        """获取指定日期的可用数量"""
-        # 查询该日期被占用的数量
+        """获取仓库实时可用数量（date 参数保留兼容）"""
+        # 查询当前未回仓的占用数量
         occupied = OrderItem.objects.filter(
-            order__status__in=['confirmed', 'delivered', 'in_use'],
-            order__event_date=date,
+            order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
             sku=self
         ).aggregate(total=models.Sum('quantity'))['total'] or 0
 
@@ -77,8 +76,8 @@ class Order(models.Model):
     """订单模型"""
     STATUS_CHOICES = [
         ('pending', '待处理'),
-        ('confirmed', '已确认'),
-        ('delivered', '已送达'),
+        ('confirmed', '待发货'),
+        ('delivered', '已发货'),
         ('in_use', '使用中'),
         ('returned', '已归还'),
         ('completed', '已完成'),
@@ -95,7 +94,7 @@ class Order(models.Model):
     return_address = models.TextField('回收地址', blank=True)
 
     # 日期信息
-    event_date = models.DateField('活动日期')
+    event_date = models.DateField('预定日期')
     rental_days = models.IntegerField('租赁天数', default=1, validators=[MinValueValidator(1)])
     ship_date = models.DateField('发货日期', null=True, blank=True)
     return_date = models.DateField('回收日期', null=True, blank=True)
@@ -179,7 +178,8 @@ class OrderItem(models.Model):
 
     def save(self, *args, **kwargs):
         """保存时自动计算小计"""
-        self.subtotal = (self.rental_price + self.deposit) * self.quantity
+        # 订单明细小计仅统计租金，押金单独管理
+        self.subtotal = self.rental_price * self.quantity
         super().save(*args, **kwargs)
 
 
@@ -393,6 +393,42 @@ class Transfer(models.Model):
         return f"{self.order_from.order_no} -> {self.order_to.order_no}"
 
 
+class TransferAllocation(models.Model):
+    """订单创建阶段的转寄分配锁"""
+    STATUS_CHOICES = [
+        ('locked', '已锁定'),
+        ('released', '已释放'),
+        ('consumed', '已消耗'),
+    ]
+
+    source_order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='transfer_allocations_source', verbose_name='来源订单')
+    target_order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='transfer_allocations_target', verbose_name='目标订单')
+    sku = models.ForeignKey(SKU, on_delete=models.PROTECT, verbose_name='SKU')
+    quantity = models.IntegerField('分配数量', default=1, validators=[MinValueValidator(1)])
+    target_event_date = models.DateField('目标预定日期')
+    window_start = models.DateField('锁窗口开始')
+    window_end = models.DateField('锁窗口结束')
+    distance_score = models.DecimalField('地址距离分值', max_digits=8, decimal_places=4, default=Decimal('0.0000'))
+    status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='locked')
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, verbose_name='创建人')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'transfer_allocations'
+        verbose_name = '转寄分配锁'
+        verbose_name_plural = '转寄分配锁'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['source_order', 'sku', 'status']),
+            models.Index(fields=['target_order', 'status']),
+            models.Index(fields=['target_event_date']),
+        ]
+
+    def __str__(self):
+        return f"{self.source_order.order_no} -> {self.target_order.order_no} ({self.quantity})"
+
+
 class SystemSettings(models.Model):
     """系统设置模型"""
     key = models.CharField('设置键', max_length=100, unique=True)
@@ -441,3 +477,4 @@ class AuditLog(models.Model):
 
     def __str__(self):
         return f"{self.user} - {self.get_action_display()} - {self.target}"
+

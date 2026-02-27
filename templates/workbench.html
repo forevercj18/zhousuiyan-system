@@ -1,4 +1,4 @@
-﻿{% extends "base.html" %}
+{% extends "base.html" %}
 
 {% block title %}订单处理 - 宝宝周岁宴道具租赁系统{% endblock %}
 {% block page_title %}订单处理中心{% endblock %}
@@ -266,12 +266,8 @@
             待处理
             <span class="badge">{{ pending_orders|length }}</span>
         </button>
-        <button class="tab-item" data-tab="confirmed">
-            已确认
-            <span class="badge">{{ confirmed_orders|length }}</span>
-        </button>
         <button class="tab-item" data-tab="delivered">
-            已送达
+            已发货
             <span class="badge">{{ delivered_orders|length }}</span>
         </button>
         <button class="tab-item" data-tab="returned">
@@ -289,9 +285,10 @@
                         <th>订单号</th>
                         <th>客户姓名</th>
                         <th>联系电话</th>
-                        <th>活动日期</th>
+                        <th>预定日期</th>
                         <th>套餐</th>
                         <th>订单金额</th>
+                        <th>转寄挂靠</th>
                         <th>状态</th>
                         <th>操作</th>
                     </tr>
@@ -305,17 +302,38 @@
                         <td>{{ order.event_date }}</td>
                         <td>{{ order.items.all.0.sku.name }}</td>
                         <td><span class="amount">¥{{ order.total_amount }}</span></td>
-                        <td><span class="status-badge status-pending">待处理</span></td>
+                        <td>
+                            {% with allocs=order.transfer_allocations_target.all %}
+                                {% if allocs %}
+                                    {% for alloc in allocs %}
+                                    <div>{{ alloc.source_order.order_no }}（{{ alloc.quantity }}套）</div>
+                                    {% endfor %}
+                                {% else %}
+                                    <span class="text-muted">仓库发货</span>
+                                {% endif %}
+                            {% endwith %}
+                        </td>
+                        <td>
+                            {% if order.status == 'confirmed' %}
+                            <span class="status-badge status-confirmed">待发货</span>
+                            {% else %}
+                            <span class="status-badge status-pending">待处理</span>
+                            {% endif %}
+                        </td>
                         <td>
                             <div class="action-buttons">
                                 <a href="{% url 'order_detail' order.id %}" class="btn-sm btn-view">查看</a>
-                                <button class="btn-sm btn-action" onclick="markAsConfirmed({{ order.id }}, '{{ order.total_amount }}')">确认订单</button>
+                                {% if order.status == 'confirmed' %}
+                                <button class="btn-sm btn-success" onclick="markAsDelivered({{ order.id }})">录入运单并发货</button>
+                                {% else %}
+                                <button class="btn-sm btn-action" onclick="markAsConfirmed({{ order.id }}, '{{ order.total_amount }}')">录入运单并发货</button>
+                                {% endif %}
                             </div>
                         </td>
                     </tr>
                     {% empty %}
                     <tr>
-                        <td colspan="8">
+                        <td colspan="9">
                             <div class="empty-state">
                                 <div class="empty-state-icon">📋</div>
                                 暂无待处理订单
@@ -328,8 +346,8 @@
         </div>
     </div>
 
-    <!-- 已确认Tab -->
-    <div class="tab-content" id="tab-confirmed">
+    <!-- 待发货Tab（隐藏兼容区） -->
+    <div class="tab-content" id="tab-confirmed" style="display:none;">
         <div class="order-table">
             <table>
                 <thead>
@@ -337,15 +355,16 @@
                         <th>订单号</th>
                         <th>客户姓名</th>
                         <th>联系电话</th>
-                        <th>活动日期</th>
+                        <th>预定日期</th>
                         <th>已付押金</th>
                         <th>待收尾款</th>
+                        <th>转寄挂靠</th>
                         <th>状态</th>
                         <th>操作</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {% for order in confirmed_orders %}
+                    {% for order in pending_orders %}
                     <tr>
                         <td><span class="order-no">{{ order.order_no }}</span></td>
                         <td>{{ order.customer_name }}</td>
@@ -353,20 +372,31 @@
                         <td>{{ order.event_date }}</td>
                         <td><span class="amount amount-success">¥{{ order.deposit_paid }}</span></td>
                         <td><span class="amount amount-warning">¥{{ order.balance }}</span></td>
-                        <td><span class="status-badge status-confirmed">已确认</span></td>
+                        <td>
+                            {% with allocs=order.transfer_allocations_target.all %}
+                                {% if allocs %}
+                                    {% for alloc in allocs %}
+                                    <div>{{ alloc.source_order.order_no }}（{{ alloc.quantity }}套）</div>
+                                    {% endfor %}
+                                {% else %}
+                                    <span class="text-muted">仓库发货</span>
+                                {% endif %}
+                            {% endwith %}
+                        </td>
+                        <td><span class="status-badge status-confirmed">待发货</span></td>
                         <td>
                             <div class="action-buttons">
                                 <a href="{% url 'order_detail' order.id %}" class="btn-sm btn-view">查看</a>
-                                <button class="btn-sm btn-success" onclick="markAsDelivered({{ order.id }})">标记送达</button>
+                                <button class="btn-sm btn-success" onclick="markAsDelivered({{ order.id }})">标记发货</button>
                             </div>
                         </td>
                     </tr>
                     {% empty %}
                     <tr>
-                        <td colspan="8">
+                        <td colspan="9">
                             <div class="empty-state">
                                 <div class="empty-state-icon">✅</div>
-                                暂无已确认订单
+                                暂无待发货订单
                             </div>
                         </td>
                     </tr>
@@ -376,7 +406,7 @@
         </div>
     </div>
 
-    <!-- 已送达Tab -->
+    <!-- 已发货Tab -->
     <div class="tab-content" id="tab-delivered">
         <div class="order-table">
             <table>
@@ -385,8 +415,9 @@
                         <th>订单号</th>
                         <th>客户姓名</th>
                         <th>联系电话</th>
-                        <th>活动日期</th>
+                        <th>预定日期</th>
                         <th>待收尾款</th>
+                        <th>转寄挂靠</th>
                         <th>状态</th>
                         <th>操作</th>
                     </tr>
@@ -399,7 +430,18 @@
                         <td>{{ order.customer_phone }}</td>
                         <td>{{ order.event_date }}</td>
                         <td><span class="amount amount-warning">¥{{ order.balance }}</span></td>
-                        <td><span class="status-badge status-delivered">已送达</span></td>
+                        <td>
+                            {% with allocs=order.transfer_allocations_target.all %}
+                                {% if allocs %}
+                                    {% for alloc in allocs %}
+                                    <div>{{ alloc.source_order.order_no }}（{{ alloc.quantity }}套）</div>
+                                    {% endfor %}
+                                {% else %}
+                                    <span class="text-muted">仓库发货</span>
+                                {% endif %}
+                            {% endwith %}
+                        </td>
+                        <td><span class="status-badge status-delivered">已发货</span></td>
                         <td>
                             <div class="action-buttons">
                                 <a href="{% url 'order_detail' order.id %}" class="btn-sm btn-view">查看</a>
@@ -409,10 +451,10 @@
                     </tr>
                     {% empty %}
                     <tr>
-                        <td colspan="7">
+                        <td colspan="8">
                             <div class="empty-state">
                                 <div class="empty-state-icon">🚚</div>
-                                暂无已送达订单
+                                暂无已发货订单
                             </div>
                         </td>
                     </tr>
@@ -431,9 +473,10 @@
                         <th>订单号</th>
                         <th>客户姓名</th>
                         <th>联系电话</th>
-                        <th>活动日期</th>
+                        <th>预定日期</th>
                         <th>待收尾款</th>
-                        <th>状态</th>
+                                                <th>转寄挂靠</th>
+<th>状态</th>
                         <th>操作</th>
                     </tr>
                 </thead>
@@ -445,6 +488,17 @@
                         <td>{{ order.customer_phone }}</td>
                         <td>{{ order.event_date }}</td>
                         <td><span class="amount amount-warning">￥{{ order.balance }}</span></td>
+                        <td>
+                            {% with allocs=order.transfer_allocations_target.all %}
+                                {% if allocs %}
+                                    {% for alloc in allocs %}
+                                    <div>{{ alloc.source_order.order_no }}（{{ alloc.quantity }}套）</div>
+                                    {% endfor %}
+                                {% else %}
+                                    <span class="text-muted">仓库发货</span>
+                                {% endif %}
+                            {% endwith %}
+                        </td>
                         <td><span class="status-badge status-confirmed">已归还</span></td>
                         <td>
                             <div class="action-buttons">
@@ -455,7 +509,7 @@
                     </tr>
                     {% empty %}
                     <tr>
-                        <td colspan="7">
+                        <td colspan="8">
                             <div class="empty-state">
                                 <div class="empty-state-icon">??</div>
                                 暂无已归还订单
@@ -468,6 +522,10 @@
         </div>
     </div>
 </div>
+
+<form style="display:none;" aria-hidden="true">
+    {% csrf_token %}
+</form>
 
 <script>
 // Tab切换功能
@@ -487,5 +545,7 @@ document.querySelectorAll('.tab-item').forEach(tab => {
 {% endblock %}
 
 {% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 <script src="/static/js/workbench.js"></script>
 {% endblock %}
+

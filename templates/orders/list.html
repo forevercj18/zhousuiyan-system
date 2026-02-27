@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}订单管理 - 宝宝周岁宴道具租赁系统{% endblock %}
 {% block page_title %}订单管理{% endblock %}
@@ -12,8 +12,8 @@
                 <select id="statusFilter" class="form-control" onchange="filterOrders()">
                     <option value="">全部</option>
                     <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>待处理</option>
-                    <option value="confirmed" {% if status_filter == 'confirmed' %}selected{% endif %}>已确认</option>
-                    <option value="delivered" {% if status_filter == 'delivered' %}selected{% endif %}>已送达</option>
+                    <option value="confirmed" {% if status_filter == 'confirmed' %}selected{% endif %}>待发货</option>
+                    <option value="delivered" {% if status_filter == 'delivered' %}selected{% endif %}>已发货</option>
                     <option value="completed" {% if status_filter == 'completed' %}selected{% endif %}>已完成</option>
                     <option value="cancelled" {% if status_filter == 'cancelled' %}selected{% endif %}>已取消</option>
                 </select>
@@ -34,6 +34,7 @@
                     <th>预定日期</th>
                     <th>送货地址</th>
                     <th>状态</th>
+                    <th>转寄挂靠</th>
                     <th>订单金额</th>
                     <th>已付押金</th>
                     <th>待收尾款</th>
@@ -52,16 +53,27 @@
                     <td>
                         <span class="badge badge-{{ order.status }}">
                             {% if order.status == 'pending' %}待处理
-                            {% elif order.status == 'confirmed' %}已确认
-                            {% elif order.status == 'delivered' %}已送达
+                            {% elif order.status == 'confirmed' %}待发货
+                            {% elif order.status == 'delivered' %}已发货
                             {% elif order.status == 'completed' %}已完成
                             {% elif order.status == 'cancelled' %}已取消
                             {% endif %}
                         </span>
                     </td>
-                    <td>¥{{ order.total_amount }}</td>
-                    <td>¥{{ order.deposit_paid }}</td>
-                    <td>¥{{ order.balance }}</td>
+                    <td>
+                        {% with allocs=order.transfer_allocations_target.all %}
+                            {% if allocs %}
+                                {% for alloc in allocs %}
+                                <div>{{ alloc.source_order.order_no }}（{{ alloc.quantity }}套）</div>
+                                {% endfor %}
+                            {% else %}
+                                <span class="text-muted">仓库发货</span>
+                            {% endif %}
+                        {% endwith %}
+                    </td>
+                    <td>￥{{ order.total_amount }}</td>
+                    <td>￥{{ order.deposit_paid }}</td>
+                    <td>￥{{ order.balance }}</td>
                     <td>{{ order.created_at|date:"Y-m-d H:i" }}</td>
                     <td>
                         <div class="action-buttons">
@@ -75,7 +87,7 @@
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="11" class="text-center">暂无订单数据</td>
+                    <td colspan="12" class="text-center">暂无订单数据</td>
                 </tr>
                 {% endfor %}
             </tbody>

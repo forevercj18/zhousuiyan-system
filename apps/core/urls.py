@@ -29,7 +29,7 @@ urlpatterns = [
     # 日历排期
     path('calendar/', views.calendar_view, name='calendar'),
 
-    # 出入库流水
+    # 转寄中心
     path('transfers/', views.transfers_list, name='transfers_list'),
     path('transfers/create/', views.transfer_create, name='transfer_create'),
     path('transfers/<int:transfer_id>/complete/', views.transfer_complete, name='transfer_complete'),
@@ -67,4 +67,5 @@ urlpatterns = [
     # API接口
     path('api/sku/<int:sku_id>/', views.api_get_sku_details, name='api_get_sku_details'),
     path('api/check-availability/', views.api_check_availability, name='api_check_availability'),
+    path('api/transfer-match/', views.api_transfer_match, name='api_transfer_match'),
 ]

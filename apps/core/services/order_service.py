@@ -1,12 +1,17 @@
-"""
+﻿"""
 订单业务逻辑服务
 处理订单创建、更新、状态流转等核心业务
 """
 from django.db import transaction
 from django.utils import timezone
 from decimal import Decimal
-from ..models import Order, OrderItem, SKU, AuditLog
-from ..utils import check_sku_availability, calculate_order_dates, calculate_order_amount
+from ..models import Order, OrderItem, SKU, AuditLog, TransferAllocation
+from ..utils import (
+    check_sku_availability,
+    calculate_order_dates,
+    calculate_order_amount,
+    build_transfer_allocation_plan,
+)
 
 
 class OrderService:
@@ -41,16 +46,29 @@ class OrderService:
         Raises:
             ValueError: 库存不足或数据验证失败
         """
-        # 1. 验证库存
+        # 1. 先构建转寄分配方案，再验证仓库库存
+        transfer_plans = []
         for item in data['items']:
-            result = check_sku_availability(
+            plan = build_transfer_allocation_plan(
+                delivery_address=data['delivery_address'],
+                target_event_date=data['event_date'],
                 sku_id=item['sku_id'],
-                event_date=data['event_date'],
-                quantity=item['quantity']
+                quantity=item['quantity'],
+                preferred_source_order_id=item.get('transfer_source_order_id'),
             )
-            if not result['available']:
-                sku = SKU.objects.get(id=item['sku_id'])
-                raise ValueError(f"SKU {sku.name} 库存不足：{result['message']}")
+            transfer_plans.append(plan)
+
+            warehouse_needed = plan['warehouse_needed']
+            if warehouse_needed > 0:
+                result = check_sku_availability(
+                    sku_id=item['sku_id'],
+                    event_date=data['event_date'],
+                    quantity=warehouse_needed,
+                    rental_days=data.get('rental_days', 1)
+                )
+                if not result['available']:
+                    sku = SKU.objects.get(id=item['sku_id'])
+                    raise ValueError(f"SKU {sku.name} 库存不足：{result['message']}")
 
         # 2. 计算日期
         dates = calculate_order_dates(data['event_date'], data.get('rental_days', 1))
@@ -86,8 +104,26 @@ class OrderService:
                 quantity=item_data['quantity'],
                 rental_price=sku.rental_price,
                 deposit=sku.deposit,
-                subtotal=(sku.rental_price + sku.deposit) * item_data['quantity']
+                # 小计仅统计租金，押金单独记录
+                subtotal=sku.rental_price * item_data['quantity']
             )
+
+        # 5.1 创建转寄分配锁（创建即锁定）
+        for index, item_data in enumerate(data['items']):
+            plan = transfer_plans[index] if index < len(transfer_plans) else {}
+            for alloc in plan.get('allocations', []):
+                TransferAllocation.objects.create(
+                    source_order_id=alloc['source_order_id'],
+                    target_order=order,
+                    sku_id=alloc['sku_id'],
+                    quantity=alloc['quantity'],
+                    target_event_date=alloc['target_event_date'],
+                    window_start=alloc['window_start'],
+                    window_end=alloc['window_end'],
+                    distance_score=alloc['distance_score'],
+                    status='locked',
+                    created_by=user,
+                )
 
         # 6. 记录日志
         AuditLog.objects.create(
@@ -95,7 +131,7 @@ class OrderService:
             action='create',
             module='订单',
             target=order.order_no,
-            details=f"创建订单：{order.customer_name}，活动日期：{order.event_date}",
+            details=f"创建订单：{order.customer_name}，预定日期：{order.event_date}",
             ip_address=None
         )
 
@@ -158,7 +194,7 @@ class OrderService:
     @transaction.atomic
     def confirm_order(order_id, deposit_paid, user):
         """
-        确认订单（收取押金）
+        确认订单（收取押金并进入待发货）
 
         Args:
             order_id: 订单ID
@@ -175,7 +211,8 @@ class OrderService:
 
         order.status = 'confirmed'
         order.deposit_paid = Decimal(str(deposit_paid))
-        order.balance = order.total_amount - order.deposit_paid
+        # 押金不冲抵租金尾款
+        order.balance = order.total_amount
         order.save()
 
         # 记录日志
@@ -194,7 +231,7 @@ class OrderService:
     @transaction.atomic
     def mark_as_delivered(order_id, ship_tracking, user):
         """
-        标记已送达
+        标记已发货
 
         Args:
             order_id: 订单ID
@@ -207,7 +244,7 @@ class OrderService:
         order = Order.objects.get(id=order_id)
 
         if order.status != 'confirmed':
-            raise ValueError(f"订单状态为 {order.get_status_display()}，无法标记送达")
+            raise ValueError(f"订单状态为 {order.get_status_display()}，无法标记发货")
 
         order.status = 'delivered'
         order.ship_tracking = ship_tracking
@@ -219,7 +256,7 @@ class OrderService:
             action='status_change',
             module='订单',
             target=order.order_no,
-            details=f"标记已送达，发货单号：{ship_tracking}",
+            details=f"标记已发货，发货单号：{ship_tracking}",
             ip_address=None
         )
 
@@ -322,6 +359,12 @@ class OrderService:
         order.notes = f"{order.notes}\n取消原因：{reason}" if order.notes else f"取消原因：{reason}"
         order.save()
 
+        # 释放该目标订单占用的转寄锁
+        TransferAllocation.objects.filter(
+            target_order=order,
+            status='locked'
+        ).update(status='released')
+
         # 记录日志
         AuditLog.objects.create(
             user=user,
@@ -333,3 +376,4 @@ class OrderService:
         )
 
         return order
+
