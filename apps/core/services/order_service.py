@@ -11,6 +11,7 @@ from ..utils import (
     calculate_order_dates,
     calculate_order_amount,
     build_transfer_allocation_plan,
+    sync_transfer_tasks_for_target_order,
 )
 
 
@@ -49,13 +50,20 @@ class OrderService:
         # 1. 先构建转寄分配方案，再验证仓库库存
         transfer_plans = []
         for item in data['items']:
-            plan = build_transfer_allocation_plan(
-                delivery_address=data['delivery_address'],
-                target_event_date=data['event_date'],
-                sku_id=item['sku_id'],
-                quantity=item['quantity'],
-                preferred_source_order_id=item.get('transfer_source_order_id'),
-            )
+            if item.get('force_warehouse'):
+                plan = {
+                    'allocations': [],
+                    'warehouse_needed': item['quantity'],
+                    'candidates': [],
+                }
+            else:
+                plan = build_transfer_allocation_plan(
+                    delivery_address=data['delivery_address'],
+                    target_event_date=data['event_date'],
+                    sku_id=item['sku_id'],
+                    quantity=item['quantity'],
+                    preferred_source_order_id=item.get('transfer_source_order_id'),
+                )
             transfer_plans.append(plan)
 
             warehouse_needed = plan['warehouse_needed']
@@ -124,6 +132,7 @@ class OrderService:
                     status='locked',
                     created_by=user,
                 )
+        sync_transfer_tasks_for_target_order(order, user)
 
         # 6. 记录日志
         AuditLog.objects.create(
@@ -157,26 +166,99 @@ class OrderService:
         if order.status not in ['pending', 'confirmed']:
             raise ValueError(f"订单状态为 {order.get_status_display()}，无法编辑")
 
+        items = data.get('items')
+        if not items:
+            raise ValueError('请至少保留一条订单明细')
+
+        # 1) 先基于新数据做转寄/仓库复核
+        event_date = data.get('event_date', order.event_date)
+        rental_days = data.get('rental_days', order.rental_days)
+        delivery_address = data.get('delivery_address', order.delivery_address)
+        transfer_plans = []
+        for item in items:
+            if item.get('force_warehouse'):
+                plan = {
+                    'allocations': [],
+                    'warehouse_needed': item['quantity'],
+                    'candidates': [],
+                }
+            else:
+                plan = build_transfer_allocation_plan(
+                    delivery_address=delivery_address,
+                    target_event_date=event_date,
+                    sku_id=item['sku_id'],
+                    quantity=item['quantity'],
+                    preferred_source_order_id=item.get('transfer_source_order_id'),
+                    exclude_target_order_id=order.id,
+                )
+            transfer_plans.append(plan)
+            warehouse_needed = plan['warehouse_needed']
+            if warehouse_needed > 0:
+                result = check_sku_availability(
+                    sku_id=item['sku_id'],
+                    event_date=event_date,
+                    quantity=warehouse_needed,
+                    exclude_order_id=order.id,
+                    rental_days=rental_days
+                )
+                if not result['available']:
+                    sku = SKU.objects.get(id=item['sku_id'])
+                    raise ValueError(f"SKU {sku.name} 库存不足：{result['message']}")
+
+        # 2) 计算日期/金额
+        dates = calculate_order_dates(event_date, rental_days)
+        amount_info = calculate_order_amount(items)
+
         # 更新基本信息
         order.customer_name = data.get('customer_name', order.customer_name)
         order.customer_phone = data.get('customer_phone', order.customer_phone)
         order.customer_email = data.get('customer_email', order.customer_email)
-        order.delivery_address = data.get('delivery_address', order.delivery_address)
+        order.delivery_address = delivery_address
         order.return_address = data.get('return_address', order.return_address)
         order.notes = data.get('notes', order.notes)
-
-        # 如果修改了日期，重新计算
-        if 'event_date' in data or 'rental_days' in data:
-            event_date = data.get('event_date', order.event_date)
-            rental_days = data.get('rental_days', order.rental_days)
-
-            dates = calculate_order_dates(event_date, rental_days)
-            order.event_date = event_date
-            order.rental_days = rental_days
-            order.ship_date = dates['ship_date']
-            order.return_date = dates['return_date']
+        order.event_date = event_date
+        order.rental_days = rental_days
+        order.ship_date = dates['ship_date']
+        order.return_date = dates['return_date']
+        order.total_amount = amount_info['total_amount']
+        # 押金不冲抵租金尾款，编辑后按新租金重置尾款
+        order.balance = amount_info['total_amount']
 
         order.save()
+
+        # 3) 明细重建
+        order.items.all().delete()
+        for item_data in items:
+            sku = SKU.objects.get(id=item_data['sku_id'])
+            OrderItem.objects.create(
+                order=order,
+                sku=sku,
+                quantity=item_data['quantity'],
+                rental_price=sku.rental_price,
+                deposit=sku.deposit,
+                subtotal=sku.rental_price * item_data['quantity']
+            )
+
+        # 4) 释放旧转寄锁并按新方案重建
+        TransferAllocation.objects.filter(
+            target_order=order,
+            status='locked'
+        ).update(status='released')
+        for plan in transfer_plans:
+            for alloc in plan.get('allocations', []):
+                TransferAllocation.objects.create(
+                    source_order_id=alloc['source_order_id'],
+                    target_order=order,
+                    sku_id=alloc['sku_id'],
+                    quantity=alloc['quantity'],
+                    target_event_date=alloc['target_event_date'],
+                    window_start=alloc['window_start'],
+                    window_end=alloc['window_end'],
+                    distance_score=alloc['distance_score'],
+                    status='locked',
+                    created_by=user,
+                )
+        sync_transfer_tasks_for_target_order(order, user)
 
         # 记录日志
         AuditLog.objects.create(
@@ -249,6 +331,12 @@ class OrderService:
         order.status = 'delivered'
         order.ship_tracking = ship_tracking
         order.save()
+
+        # 目标订单发货后，转寄锁进入已消耗状态
+        TransferAllocation.objects.filter(
+            target_order=order,
+            status='locked'
+        ).update(status='consumed')
 
         # 记录日志
         AuditLog.objects.create(

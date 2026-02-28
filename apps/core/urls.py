@@ -19,6 +19,7 @@ urlpatterns = [
     path('orders/create/', views.order_create, name='order_create'),
     path('orders/<int:order_id>/edit/', views.order_edit, name='order_edit'),
     path('orders/<int:order_id>/delete/', views.order_delete, name='order_delete'),
+    path('orders/bulk-delete/', views.orders_bulk_delete, name='orders_bulk_delete'),
     path('orders/<int:order_id>/confirm/', views.order_mark_confirmed, name='order_mark_confirmed'),
     path('orders/<int:order_id>/mark-delivered/', views.order_mark_delivered, name='order_mark_delivered'),
     path('orders/<int:order_id>/mark-returned/', views.order_mark_returned, name='order_mark_returned'),
@@ -31,6 +32,8 @@ urlpatterns = [
 
     # 转寄中心
     path('transfers/', views.transfers_list, name='transfers_list'),
+    path('transfers/recommend/', views.transfer_recommend, name='transfer_recommend'),
+    path('transfers/generate-tasks/', views.transfer_generate_tasks, name='transfer_generate_tasks'),
     path('transfers/create/', views.transfer_create, name='transfer_create'),
     path('transfers/<int:transfer_id>/complete/', views.transfer_complete, name='transfer_complete'),
     path('transfers/<int:transfer_id>/cancel/', views.transfer_cancel, name='transfer_cancel'),
@@ -40,12 +43,14 @@ urlpatterns = [
     path('skus/create/', views.sku_create, name='sku_create'),
     path('skus/<int:sku_id>/edit/', views.sku_edit, name='sku_edit'),
     path('skus/<int:sku_id>/delete/', views.sku_delete, name='sku_delete'),
+    path('skus/bulk-delete/', views.skus_bulk_delete, name='skus_bulk_delete'),
 
     # 采购管理
     path('procurement/purchase-orders/', views.purchase_orders_list, name='purchase_orders_list'),
     path('procurement/purchase-orders/create/', views.purchase_order_create, name='purchase_order_create'),
     path('procurement/purchase-orders/<int:po_id>/edit/', views.purchase_order_edit, name='purchase_order_edit'),
     path('procurement/purchase-orders/<int:po_id>/delete/', views.purchase_order_delete, name='purchase_order_delete'),
+    path('procurement/purchase-orders/bulk-delete/', views.purchase_orders_bulk_delete, name='purchase_orders_bulk_delete'),
     path('procurement/purchase-orders/<int:po_id>/mark-ordered/', views.purchase_order_mark_ordered, name='purchase_order_mark_ordered'),
     path('procurement/purchase-orders/<int:po_id>/mark-arrived/', views.purchase_order_mark_arrived, name='purchase_order_mark_arrived'),
     path('procurement/purchase-orders/<int:po_id>/mark-stocked/', views.purchase_order_mark_stocked, name='purchase_order_mark_stocked'),
@@ -53,6 +58,7 @@ urlpatterns = [
     path('procurement/parts/create/', views.part_create, name='part_create'),
     path('procurement/parts/<int:part_id>/edit/', views.part_edit, name='part_edit'),
     path('procurement/parts/<int:part_id>/delete/', views.part_delete, name='part_delete'),
+    path('procurement/parts/bulk-delete/', views.parts_bulk_delete, name='parts_bulk_delete'),
     path('procurement/parts/inbound/', views.part_inbound, name='part_inbound'),
     path('procurement/parts/outbound/', views.part_outbound, name='part_outbound'),
     path('procurement/parts-movements/', views.parts_movements_list, name='parts_movements_list'),

@@ -5,93 +5,275 @@
 
 {% block content %}
 <div class="transfers-center">
+    <div class="page-header">
+        <div class="header-left">
+            <div class="filter-group">
+                <label>关键词：</label>
+                <input id="keywordInput" type="text" class="form-control" placeholder="订单号/SKU"
+                       value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterTransfers();}">
+            </div>
+            <button class="btn btn-secondary" type="button" onclick="filterTransfers()">查询</button>
+            <a class="btn btn-sm" href="{% url 'transfers_list' %}">重置</a>
+            <button class="btn btn-sm btn-primary" type="button" onclick="recommendSelected()">重新推荐（多选）</button>
+            <button class="btn btn-sm btn-success" type="button" onclick="generateTasksSelected()">生成转寄任务（多选）</button>
+        </div>
+    </div>
+
     <div class="form-section">
         <h3>转寄候选</h3>
-        <table class="data-table">
-            <thead>
-                <tr>
-                    <th>回收订单</th>
-                    <th>发货订单</th>
-                    <th>SKU</th>
-                    <th>间隔天数</th>
-                    <th>预计节省</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for item in candidates %}
-                <tr>
-                    <td>{{ item.order_from.order_no }}</td>
-                    <td>{{ item.order_to.order_no }}</td>
-                    <td>{{ item.sku.name }}</td>
-                    <td>{{ item.gap_days }}</td>
-                    <td>￥{{ item.cost_saved }}</td>
-                    <td>
-                        <form method="post" action="{% url 'transfer_create' %}">
-                            {% csrf_token %}
-                            <input type="hidden" name="order_from_id" value="{{ item.order_from.id }}">
-                            <input type="hidden" name="order_to_id" value="{{ item.order_to.id }}">
-                            <input type="hidden" name="sku_id" value="{{ item.sku.id }}">
-                            <button type="submit" class="btn btn-sm btn-primary">创建任务</button>
-                        </form>
-                    </td>
-                </tr>
-                {% empty %}
-                <tr>
-                    <td colspan="6" class="text-center">暂无可用转寄候选</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th><input type="checkbox" id="selectAllCandidates" onchange="toggleAllCandidates(this)"></th>
+                        <th>订单信息（未发货）</th>
+                        <th>当前挂靠</th>
+                        <th>推荐来源</th>
+                        <th>款式</th>
+                        <th>推荐寄出日期</th>
+                        <th>状态</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in candidates %}
+                    <tr>
+                        <td>
+                            {% if item.can_recommend %}
+                            <input type="checkbox" class="candidate-select" value="{{ item.row_key }}">
+                            {% else %}
+                            <input type="checkbox" disabled title="已生成待执行任务，不可重推">
+                            {% endif %}
+                        </td>
+                        <td>
+                            {{ item.order.customer_name }} / {{ item.order.customer_phone }}<br>
+                            <small>{{ item.order.delivery_address }}</small><br>
+                            <small>{{ item.order.order_no }} · 预定{{ item.order.event_date|date:"Y-m-d" }}</small>
+                        </td>
+                        <td>
+                            {{ item.current_source_text }}<br>
+                            <small>{{ item.current_sender.name }} / {{ item.current_sender.phone }}</small><br>
+                            <small>{{ item.current_sender.address }}</small><br>
+                            {% if item.current_source_type == 'transfer' and item.current_event_date %}
+                            <small>来源预定：{{ item.current_event_date|date:"Y-m-d" }}</small>
+                            <br>
+                            {% endif %}
+                            <small>距离：{{ item.current_distance_desc }}</small>
+                        </td>
+                        <td>
+                            {{ item.recommended_source_text }}<br>
+                            <small>{{ item.recommended_sender.name }} / {{ item.recommended_sender.phone }}</small><br>
+                            <small>{{ item.recommended_sender.address }}</small><br>
+                            {% if item.recommended_source_type == 'transfer' and item.recommended_event_date %}
+                            <small>来源预定：{{ item.recommended_event_date|date:"Y-m-d" }}</small>
+                            <br>
+                            {% endif %}
+                            <small>距离：{{ item.recommended_distance_desc }}</small>
+                        </td>
+                        <td>{{ item.item.sku.name }} x {{ item.item.quantity }}</td>
+                        <td>
+                            {% if item.recommended_ship_date %}
+                            {{ item.recommended_ship_date|date:"Y-m-d" }}
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if item.has_pending_task %}
+                            <span class="badge badge-info">已生成任务</span>
+                            {% elif item.current_source_type == 'warehouse' %}
+                            <span class="badge badge-warning">仓库挂靠</span>
+                            {% else %}
+                            <span class="badge badge-success">转寄挂靠</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <form method="post" action="{% url 'transfer_recommend' %}" style="display:inline;">
+                                {% csrf_token %}
+                                <input type="hidden" name="rows[]" value="{{ item.row_key }}">
+                                <button type="submit" class="btn btn-sm btn-primary" {% if not item.can_recommend %}disabled{% endif %}>重新推荐</button>
+                            </form>
+                            <form method="post" action="{% url 'transfer_generate_tasks' %}" style="display:inline;">
+                                {% csrf_token %}
+                                <input type="hidden" name="rows[]" value="{{ item.row_key }}">
+                                <button type="submit" class="btn btn-sm btn-success" {% if not item.can_generate_task %}disabled{% endif %}>生成任务</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="8" class="text-center">暂无可用转寄候选</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if candidates_page and candidates_page.paginator.num_pages > 1 %}
+        <div class="pagination">
+            {% if candidates_page.has_previous %}
+            <a class="btn btn-sm" href="?{% if candidate_pagination_query %}{{ candidate_pagination_query }}&{% endif %}candidate_page={{ candidates_page.previous_page_number }}">上一页</a>
+            {% else %}
+            <button class="btn btn-sm" disabled>上一页</button>
+            {% endif %}
+            <span class="page-info">候选：第 {{ candidates_page.number }} 页，共 {{ candidates_page.paginator.num_pages }} 页（共 {{ candidates_page.paginator.count }} 条）</span>
+            {% if candidates_page.has_next %}
+            <a class="btn btn-sm" href="?{% if candidate_pagination_query %}{{ candidate_pagination_query }}&{% endif %}candidate_page={{ candidates_page.next_page_number }}">下一页</a>
+            {% else %}
+            <button class="btn btn-sm" disabled>下一页</button>
+            {% endif %}
+        </div>
+        {% endif %}
     </div>
 
     <div class="form-section">
         <h3>转寄任务</h3>
-        <table class="data-table">
-            <thead>
-                <tr>
-                    <th>任务ID</th>
-                    <th>回收订单</th>
-                    <th>发货订单</th>
-                    <th>SKU</th>
-                    <th>数量</th>
-                    <th>间隔天数</th>
-                    <th>状态</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for task in tasks %}
-                <tr>
-                    <td>{{ task.id }}</td>
-                    <td>{{ task.order_from.order_no }}</td>
-                    <td>{{ task.order_to.order_no }}</td>
-                    <td>{{ task.sku.name }}</td>
-                    <td>{{ task.quantity }}</td>
-                    <td>{{ task.gap_days }}</td>
-                    <td>{{ task.get_status_display }}</td>
-                    <td>
-                        {% if task.status == 'pending' %}
-                        <form method="post" action="{% url 'transfer_complete' task.id %}" style="display:inline;">
-                            {% csrf_token %}
-                            <button type="submit" class="btn btn-sm btn-success">完成</button>
-                        </form>
-                        <form method="post" action="{% url 'transfer_cancel' task.id %}" style="display:inline;">
-                            {% csrf_token %}
-                            <button type="submit" class="btn btn-sm btn-danger">取消</button>
-                        </form>
-                        {% else %}
-                        -
-                        {% endif %}
-                    </td>
-                </tr>
-                {% empty %}
-                <tr>
-                    <td colspan="8" class="text-center">暂无转寄任务</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+        <div class="page-header" style="padding: 8px 0 12px 0;">
+            <div class="header-left">
+                <a class="btn btn-sm {% if status_filter == 'pending' %}btn-primary{% else %}btn-secondary{% endif %}"
+                   href="?{% if task_tab_query %}{{ task_tab_query }}&{% endif %}status=pending">待操作</a>
+                <a class="btn btn-sm {% if status_filter == 'completed' %}btn-primary{% else %}btn-secondary{% endif %}"
+                   href="?{% if task_tab_query %}{{ task_tab_query }}&{% endif %}status=completed">已完成</a>
+                <a class="btn btn-sm {% if status_filter == 'cancelled' %}btn-primary{% else %}btn-secondary{% endif %}"
+                   href="?{% if task_tab_query %}{{ task_tab_query }}&{% endif %}status=cancelled">已取消</a>
+            </div>
+        </div>
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>任务ID</th>
+                        <th>寄件人信息（来源单）</th>
+                        <th>收件人信息（新单）</th>
+                        <th>款式</th>
+                        <th>寄出日期</th>
+                        <th>数量</th>
+                        <th>状态</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for task in tasks %}
+                    <tr>
+                        <td>{{ task.id }}</td>
+                        <td>
+                            {{ task.order_from.customer_name }} / {{ task.order_from.customer_phone }}<br>
+                            <small>{{ task.order_from.delivery_address }}</small><br>
+                            <small>{{ task.order_from.order_no }}</small>
+                        </td>
+                        <td>
+                            {{ task.order_to.customer_name }} / {{ task.order_to.customer_phone }}<br>
+                            <small>{{ task.order_to.delivery_address }}</small><br>
+                            <small>{{ task.order_to.order_no }}</small>
+                        </td>
+                        <td>{{ task.style_display }}</td>
+                        <td>{{ task.transfer_ship_date|date:"Y-m-d" }}</td>
+                        <td>{{ task.quantity }}</td>
+                        <td>{{ task.get_status_display }}</td>
+                        <td>
+                            {% if task.status == 'pending' %}
+                            <form method="post" action="{% url 'transfer_complete' task.id %}" style="display:inline;">
+                                {% csrf_token %}
+                                <button type="submit" class="btn btn-sm btn-success">完成</button>
+                            </form>
+                            <form method="post" action="{% url 'transfer_cancel' task.id %}" style="display:inline;">
+                                {% csrf_token %}
+                                <button type="submit" class="btn btn-sm btn-danger">取消</button>
+                            </form>
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="8" class="text-center">暂无转寄任务</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if tasks_page and tasks_page.paginator.num_pages > 1 %}
+        <div class="pagination">
+            {% if tasks_page.has_previous %}
+            <a class="btn btn-sm" href="?{% if task_pagination_query %}{{ task_pagination_query }}&{% endif %}task_page={{ tasks_page.previous_page_number }}">上一页</a>
+            {% else %}
+            <button class="btn btn-sm" disabled>上一页</button>
+            {% endif %}
+            <span class="page-info">任务：第 {{ tasks_page.number }} 页，共 {{ tasks_page.paginator.num_pages }} 页（共 {{ tasks_page.paginator.count }} 条）</span>
+            {% if tasks_page.has_next %}
+            <a class="btn btn-sm" href="?{% if task_pagination_query %}{{ task_pagination_query }}&{% endif %}task_page={{ tasks_page.next_page_number }}">下一页</a>
+            {% else %}
+            <button class="btn btn-sm" disabled>下一页</button>
+            {% endif %}
+        </div>
+        {% endif %}
     </div>
 </div>
+<script>
+function filterTransfers() {
+    const keyword = (document.getElementById('keywordInput')?.value || '').trim();
+    const params = new URLSearchParams();
+    params.set('status', '{{ status_filter|default:"pending" }}');
+    if (keyword) params.set('keyword', keyword);
+    const q = params.toString();
+    window.location.href = '{% url "transfers_list" %}' + (q ? ('?' + q) : '');
+}
+
+function toggleAllCandidates(checkbox) {
+    document.querySelectorAll('.candidate-select').forEach((item) => {
+        item.checked = checkbox.checked;
+    });
+}
+
+function submitPost(url, fields) {
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = url;
+    const csrf = document.createElement('input');
+    csrf.type = 'hidden';
+    csrf.name = 'csrfmiddlewaretoken';
+    csrf.value = '{{ csrf_token }}';
+    form.appendChild(csrf);
+    Object.keys(fields || {}).forEach((key) => {
+        const value = fields[key];
+        if (Array.isArray(value)) {
+            value.forEach((v) => {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = key;
+                input.value = v;
+                form.appendChild(input);
+            });
+            return;
+        }
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = key;
+        input.value = value;
+        form.appendChild(input);
+    });
+    document.body.appendChild(form);
+    form.submit();
+}
+
+function recommendSelected() {
+    const selected = Array.from(document.querySelectorAll('.candidate-select:checked')).map((el) => el.value);
+    if (!selected.length) {
+        alert('请先勾选要重新推荐的候选项');
+        return;
+    }
+    if (!confirm(`确认重新推荐所选 ${selected.length} 条候选项？`)) return;
+    submitPost('{% url "transfer_recommend" %}', { 'rows[]': selected });
+}
+
+function generateTasksSelected() {
+    const selected = Array.from(document.querySelectorAll('.candidate-select:checked')).map((el) => el.value);
+    if (!selected.length) {
+        alert('请先勾选候选项');
+        return;
+    }
+    if (!confirm(`确认生成所选 ${selected.length} 条转寄任务？`)) return;
+    submitPost('{% url "transfer_generate_tasks" %}', { 'rows[]': selected });
+}
+</script>
 {% endblock %}

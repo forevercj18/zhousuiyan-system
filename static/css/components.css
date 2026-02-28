@@ -435,3 +435,122 @@
 .page-info {
     color: #666;
 }
+
+/* ===== 2026 Refresh Theme Overrides ===== */
+.btn {
+    border-radius: 10px;
+    border-color: #cdd7e5;
+    padding: 8px 14px;
+    font-weight: 600;
+    letter-spacing: 0.1px;
+    transition: transform 0.18s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.btn:hover {
+    opacity: 1;
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(18, 35, 62, 0.12);
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, #1f5ea8 0%, #174b87 100%);
+    border-color: #1f5ea8;
+}
+
+.btn-secondary {
+    background: #f8fafd;
+    color: #2f3a4a;
+    border-color: #ced8e8;
+}
+
+.btn-success {
+    background: linear-gradient(135deg, #1f9a52 0%, #187b42 100%);
+    border-color: #187b42;
+}
+
+.btn-danger {
+    background: linear-gradient(135deg, #d83e2f 0%, #b42318 100%);
+    border-color: #b42318;
+}
+
+.btn-warning {
+    background: linear-gradient(135deg, #f59e0b 0%, #c56a08 100%);
+    border-color: #c56a08;
+}
+
+.btn-info {
+    background: linear-gradient(135deg, #1f5ea8 0%, #245995 100%);
+    border-color: #1f5ea8;
+}
+
+.form-group label {
+    color: #2b3443;
+    font-weight: 600;
+}
+
+.form-control {
+    border-radius: 10px;
+    border-color: #ccd7e7;
+    background: #fff;
+    min-height: 38px;
+}
+
+.form-control:focus {
+    border-color: #1f5ea8;
+    box-shadow: 0 0 0 3px rgba(31, 94, 168, 0.14);
+}
+
+.table-container {
+    border-radius: 14px;
+    border: 1px solid #dbe3ef;
+    box-shadow: 0 8px 24px rgba(18, 35, 64, 0.08);
+}
+
+.data-table {
+    min-width: 860px;
+}
+
+.data-table thead {
+    background: linear-gradient(180deg, #f7f9fd 0%, #f2f5fa 100%);
+}
+
+.data-table th {
+    color: #3b4758;
+    font-weight: 700;
+    border-bottom: 1px solid #dde5ef;
+}
+
+.data-table td {
+    color: #2a3341;
+}
+
+.data-table tbody tr:hover {
+    background: #f7faff;
+}
+
+.badge {
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-weight: 700;
+}
+
+.modal-content {
+    border: 1px solid #d6e0ee;
+    border-radius: 14px;
+    box-shadow: 0 20px 44px rgba(18, 35, 62, 0.24);
+}
+
+.filter-group {
+    gap: 10px;
+}
+
+.filter-group .form-control {
+    min-width: 150px;
+}
+
+@media (max-width: 768px) {
+    .btn,
+    .btn-sm {
+        width: auto;
+    }
+}

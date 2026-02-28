@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -20,54 +20,50 @@
             </div>
             <nav class="nav-menu">
                 <a href="{% url 'dashboard' %}" class="nav-item {% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}">
-                    <span class="icon">📊</span>
+                    <span class="icon">&#127968;</span>
                     <span>工作台</span>
                 </a>
-                <a href="{% url 'workbench' %}" class="nav-item {% if request.resolver_match.url_name == 'workbench' %}active{% endif %}">
-                    <span class="icon">💼</span>
-                    <span>订单处理</span>
-                </a>
-                <a href="{% url 'orders_list' %}" class="nav-item {% if 'orders' in request.path %}active{% endif %}">
-                    <span class="icon">📋</span>
-                    <span>订单管理</span>
+                <a href="{% url 'orders_list' %}" class="nav-item {% if 'orders' in request.path or request.resolver_match.url_name == 'workbench' %}active{% endif %}">
+                    <span class="icon">&#128203;</span>
+                    <span>订单中心</span>
                 </a>
                 <a href="{% url 'calendar' %}" class="nav-item {% if request.resolver_match.url_name == 'calendar' %}active{% endif %}">
-                    <span class="icon">📅</span>
+                    <span class="icon">&#128197;</span>
                     <span>日历排期</span>
                 </a>
                 <a href="{% url 'skus_list' %}" class="nav-item {% if request.resolver_match.url_name == 'skus_list' %}active{% endif %}">
-                    <span class="icon">📦</span>
+                    <span class="icon">&#127991;</span>
                     <span>产品管理</span>
                 </a>
                 <a href="{% url 'transfers_list' %}" class="nav-item {% if request.resolver_match.url_name == 'transfers_list' %}active{% endif %}">
-                    <span class="icon">🔄</span>
+                    <span class="icon">&#128257;</span>
                     <span>转寄中心</span>
                 </a>
                 <div class="nav-group">
                     <div class="nav-group-title">采购管理</div>
                     <a href="{% url 'purchase_orders_list' %}" class="nav-item {% if 'purchase-orders' in request.path %}active{% endif %}">
-                        <span class="icon">🛒</span>
+                        <span class="icon">&#128722;</span>
                         <span>采购单</span>
                     </a>
                     <a href="{% url 'parts_inventory_list' %}" class="nav-item {% if 'parts-inventory' in request.path %}active{% endif %}">
-                        <span class="icon">📊</span>
+                        <span class="icon">&#128230;</span>
                         <span>部件库存</span>
                     </a>
                     <a href="{% url 'parts_movements_list' %}" class="nav-item {% if 'parts-movements' in request.path %}active{% endif %}">
-                        <span class="icon">📝</span>
+                        <span class="icon">&#128221;</span>
                         <span>部件流水</span>
                     </a>
                 </div>
                 <a href="{% url 'audit_logs' %}" class="nav-item {% if request.resolver_match.url_name == 'audit_logs' %}active{% endif %}">
-                    <span class="icon">📜</span>
+                    <span class="icon">&#128270;</span>
                     <span>审计日志</span>
                 </a>
                 <a href="{% url 'users_list' %}" class="nav-item {% if request.resolver_match.url_name == 'users_list' %}active{% endif %}">
-                    <span class="icon">👥</span>
+                    <span class="icon">&#128101;</span>
                     <span>用户管理</span>
                 </a>
                 <a href="{% url 'settings' %}" class="nav-item {% if request.resolver_match.url_name == 'settings' %}active{% endif %}">
-                    <span class="icon">⚙️</span>
+                    <span class="icon">&#9881;</span>
                     <span>系统设置</span>
                 </a>
             </nav>

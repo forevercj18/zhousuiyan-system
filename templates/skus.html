@@ -6,6 +6,21 @@
 {% block content %}
 <div class="skus-list">
     <div class="page-header">
+        <div class="header-left">
+            <div class="filter-group">
+                <label>关键词：</label>
+                <input id="keywordInput" type="text" class="form-control" placeholder="编号/名称/类别"
+                       value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterSkus();}">
+            </div>
+            <div class="filter-group">
+                <label>类别：</label>
+                <input id="categoryInput" type="text" class="form-control" placeholder="类别关键字"
+                       value="{{ category|default:'' }}" onkeydown="if(event.key==='Enter'){filterSkus();}">
+            </div>
+            <button class="btn btn-secondary" type="button" onclick="filterSkus()">查询</button>
+            <a class="btn btn-sm" href="{% url 'skus_list' %}">重置</a>
+            <button class="btn btn-sm btn-danger" type="button" onclick="bulkDeleteSkus()">批量删除</button>
+        </div>
         <div class="header-right">
             <button class="btn btn-primary" onclick="showCreateModal()">新建产品</button>
         </div>
@@ -15,6 +30,7 @@
         <table class="data-table">
             <thead>
                 <tr>
+                    <th><input type="checkbox" id="selectAllSkus" onchange="toggleAllSkus(this)"></th>
                     <th>产品编号</th>
                     <th>产品名称</th>
                     <th>类别</th>
@@ -28,6 +44,7 @@
             <tbody>
                 {% for sku in skus %}
                 <tr>
+                    <td><input type="checkbox" class="sku-select" value="{{ sku.id }}"></td>
                     <td>{{ sku.code }}</td>
                     <td>{{ sku.name }}</td>
                     <td>{{ sku.category }}</td>
@@ -44,12 +61,27 @@
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="8" class="text-center">暂无产品数据</td>
+                    <td colspan="9" class="text-center">暂无产品数据</td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
     </div>
+    {% if skus_page and skus_page.paginator.num_pages > 1 %}
+    <div class="pagination">
+        {% if skus_page.has_previous %}
+        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ skus_page.previous_page_number }}">上一页</a>
+        {% else %}
+        <button class="btn btn-sm" disabled>上一页</button>
+        {% endif %}
+        <span class="page-info">第 {{ skus_page.number }} 页，共 {{ skus_page.paginator.num_pages }} 页（共 {{ skus_page.paginator.count }} 条）</span>
+        {% if skus_page.has_next %}
+        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ skus_page.next_page_number }}">下一页</a>
+        {% else %}
+        <button class="btn btn-sm" disabled>下一页</button>
+        {% endif %}
+    </div>
+    {% endif %}
 </div>
 
 <!-- 新建产品模态框 -->
@@ -147,6 +179,16 @@
 </div>
 
 <script>
+function filterSkus() {
+    const keyword = (document.getElementById('keywordInput')?.value || '').trim();
+    const category = (document.getElementById('categoryInput')?.value || '').trim();
+    const params = new URLSearchParams();
+    if (keyword) params.set('keyword', keyword);
+    if (category) params.set('category', category);
+    const q = params.toString();
+    window.location.href = '{% url "skus_list" %}' + (q ? ('?' + q) : '');
+}
+
 function showCreateModal() {
     document.getElementById('createModal').style.display = 'block';
 }
@@ -182,6 +224,53 @@ function deleteSKU(skuId, skuCode) {
         document.body.appendChild(form);
         form.submit();
     }
+}
+
+function submitPost(url, fields) {
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = url;
+    const csrf = document.createElement('input');
+    csrf.type = 'hidden';
+    csrf.name = 'csrfmiddlewaretoken';
+    csrf.value = '{{ csrf_token }}';
+    form.appendChild(csrf);
+    Object.keys(fields || {}).forEach((key) => {
+        const value = fields[key];
+        if (Array.isArray(value)) {
+            value.forEach((v) => {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = key;
+                input.value = v;
+                form.appendChild(input);
+            });
+            return;
+        }
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = key;
+        input.value = value;
+        form.appendChild(input);
+    });
+    document.body.appendChild(form);
+    form.submit();
+}
+
+function toggleAllSkus(checkbox) {
+    document.querySelectorAll('.sku-select').forEach((item) => {
+        item.checked = checkbox.checked;
+    });
+}
+
+function bulkDeleteSkus() {
+    const selected = Array.from(document.querySelectorAll('.sku-select:checked')).map((el) => el.value);
+    if (!selected.length) {
+        alert('请先勾选要删除的产品');
+        return;
+    }
+    if (!confirm(`确认批量删除所选 ${selected.length} 条产品？`)) return;
+    submitPost('{% url "skus_bulk_delete" %}', { 'ids[]': selected });
 }
 
 // 点击模态框外部关闭

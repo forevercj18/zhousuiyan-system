@@ -9,22 +9,29 @@
         <div class="header-left">
             <div class="filter-group">
                 <label>日期范围：</label>
-                <input type="date" id="startDate" class="form-control">
+                <input type="date" id="startDate" class="form-control" value="{{ start_date|default:'' }}">
                 <span>至</span>
-                <input type="date" id="endDate" class="form-control">
+                <input type="date" id="endDate" class="form-control" value="{{ end_date|default:'' }}">
             </div>
             <div class="filter-group">
                 <label>操作类型：</label>
                 <select id="actionFilter" class="form-control">
                     <option value="">全部</option>
-                    <option value="创建订单">创建订单</option>
-                    <option value="确认并待发货">确认并待发货</option>
-                    <option value="出库">出库</option>
-                    <option value="入库">入库</option>
-                    <option value="创建采购单">创建采购单</option>
+                    <option value="create" {% if action == 'create' %}selected{% endif %}>创建</option>
+                    <option value="update" {% if action == 'update' %}selected{% endif %}>修改</option>
+                    <option value="delete" {% if action == 'delete' %}selected{% endif %}>删除</option>
+                    <option value="status_change" {% if action == 'status_change' %}selected{% endif %}>状态变更</option>
+                    <option value="inbound" {% if action == 'inbound' %}selected{% endif %}>入库</option>
+                    <option value="outbound" {% if action == 'outbound' %}selected{% endif %}>出库</option>
                 </select>
             </div>
+            <div class="filter-group">
+                <label>关键词：</label>
+                <input id="keywordInput" type="text" class="form-control" placeholder="对象/详情/操作人"
+                       value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterLogs();}">
+            </div>
             <button class="btn btn-secondary" onclick="filterLogs()">筛选</button>
+            <a class="btn btn-sm" href="{% url 'audit_logs' %}">重置</a>
         </div>
         <div class="header-right">
             <button class="btn btn-primary" onclick="exportLogs()">导出日志</button>
@@ -45,10 +52,10 @@
             <tbody>
                 {% for log in logs %}
                 <tr>
-                    <td>{{ log.timestamp }}</td>
-                    <td>{{ log.user }}</td>
+                    <td>{{ log.created_at|date:"Y-m-d H:i:s" }}</td>
+                    <td>{{ log.user.full_name|default:log.user.username|default:"-" }}</td>
                     <td>
-                        <span class="badge badge-info">{{ log.action }}</span>
+                        <span class="badge badge-info">{{ log.get_action_display }}</span>
                     </td>
                     <td>{{ log.target }}</td>
                     <td class="text-truncate" title="{{ log.details }}">{{ log.details }}</td>
@@ -62,12 +69,21 @@
         </table>
     </div>
 
-    <!-- 分页 -->
+    {% if logs_page and logs_page.paginator.num_pages > 1 %}
     <div class="pagination">
+        {% if logs_page.has_previous %}
+        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ logs_page.previous_page_number }}">上一页</a>
+        {% else %}
         <button class="btn btn-sm" disabled>上一页</button>
-        <span class="page-info">第 1 页，共 1 页</span>
+        {% endif %}
+        <span class="page-info">第 {{ logs_page.number }} 页，共 {{ logs_page.paginator.num_pages }} 页（共 {{ logs_page.paginator.count }} 条）</span>
+        {% if logs_page.has_next %}
+        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ logs_page.next_page_number }}">下一页</a>
+        {% else %}
         <button class="btn btn-sm" disabled>下一页</button>
+        {% endif %}
     </div>
+    {% endif %}
 </div>
 
 <script>
@@ -75,9 +91,14 @@ function filterLogs() {
     const startDate = document.getElementById('startDate').value;
     const endDate = document.getElementById('endDate').value;
     const action = document.getElementById('actionFilter').value;
-
-    console.log('筛选条件：', { startDate, endDate, action });
-    alert('日志筛选功能待实现');
+    const keyword = (document.getElementById('keywordInput')?.value || '').trim();
+    const params = new URLSearchParams();
+    if (startDate) params.set('start_date', startDate);
+    if (endDate) params.set('end_date', endDate);
+    if (action) params.set('action', action);
+    if (keyword) params.set('keyword', keyword);
+    const q = params.toString();
+    window.location.href = '{% url "audit_logs" %}' + (q ? ('?' + q) : '');
 }
 
 function exportLogs() {

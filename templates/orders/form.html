@@ -1,4 +1,4 @@
-﻿{% extends "base.html" %}
+{% extends "base.html" %}
 
 {% block title %}
 {% if mode == 'create' %}新建订单
@@ -21,6 +21,17 @@
 
         <div class="form-section">
             <h3>基本信息</h3>
+            {% if mode != 'view' %}
+            <div class="form-group">
+                <label for="receiver_text">收货信息快捷录入</label>
+                <textarea id="receiver_text" class="form-control" rows="2"
+                          placeholder="粘贴收货信息，如：张三 13800138000 广东省广州市天河区体育西路88号"></textarea>
+                <div style="margin-top:8px;">
+                    <button type="button" class="btn btn-secondary" id="parseReceiverBtn">智能解析</button>
+                    <small id="receiverParseHint" class="form-text text-muted" style="margin-left:8px;">自动识别姓名、电话、地址并回填</small>
+                </div>
+            </div>
+            {% endif %}
             <div class="form-row">
                 <div class="form-group">
                     <label for="customer_name">客户姓名 <span class="required">*</span></label>
@@ -35,7 +46,6 @@
                            {% if mode == 'view' %}readonly{% else %}required{% endif %}>
                 </div>
             </div>
-
             <div class="form-row">
                 <div class="form-group">
                     <label for="event_date">预定日期 <span class="required">*</span></label>
@@ -72,7 +82,7 @@
             <h3>订单明细</h3>
             <div id="orderItems">
                 {% if order %}
-                    {% for item in order.items.all %}
+                    {% for row in order_items_with_transfer %}
                     <div class="order-item">
                         <div class="form-row">
                             <div class="form-group flex-2">
@@ -86,7 +96,7 @@
                                             data-stock="{{ sku.stock }}"
                                             data-price="{{ sku.rental_price }}"
                                             data-deposit="{{ sku.deposit }}"
-                                            {% if sku.id == item.sku_id %}selected{% endif %}>
+                                            {% if sku.id == row.item.sku_id %}selected{% endif %}>
                                         {{ sku.name }} - ¥{{ sku.rental_price }} (库存: {{ sku.stock }})
                                     </option>
                                     {% endfor %}
@@ -95,20 +105,22 @@
                             <div class="form-group flex-2">
                                 <label>转寄来源单（可选）</label>
                                 <select class="form-control transfer-source-select" name="transfer_source_order_id[]"
+                                        data-initial-value="{% if row.preferred_source_order_id %}{{ row.preferred_source_order_id }}{% endif %}"
                                         {% if mode == 'view' %}disabled{% endif %}>
                                     <option value="">自动匹配最优来源单</option>
+                                    <option value="__warehouse__">仓库发货（不使用转寄）</option>
                                 </select>
                             </div>
                             <div class="form-group">
                                 <label>数量</label>
                                 <input type="number" class="form-control quantity-input" name="quantity[]"
-                                       value="{{ item.quantity }}" min="1"
+                                       value="{{ row.item.quantity }}" min="1"
                                        {% if mode == 'view' %}readonly{% endif %}>
                             </div>
                             <div class="form-group">
                                 <label>租金</label>
                                 <input type="text" class="form-control price-display"
-                                       value="¥{{ item.rental_price }}" readonly>
+                                       value="¥{{ row.item.rental_price }}" readonly>
                             </div>
                             {% if mode != 'view' %}
                             <div class="form-group">
@@ -141,6 +153,7 @@
                             <label>转寄来源单（可选）</label>
                             <select class="form-control transfer-source-select" name="transfer_source_order_id[]">
                                 <option value="">自动匹配最优来源单</option>
+                                <option value="__warehouse__">仓库发货（不使用转寄）</option>
                             </select>
                         </div>
                         <div class="form-group">
@@ -289,11 +302,97 @@ document.addEventListener('DOMContentLoaded', function() {
     const eventDateInput = document.getElementById('event_date');
     const rentalDaysInput = document.getElementById('rental_days');
     const deliveryAddressInput = document.getElementById('delivery_address');
+    const customerNameInput = document.getElementById('customer_name');
+    const customerPhoneInput = document.getElementById('customer_phone');
+    const receiverTextInput = document.getElementById('receiver_text');
+    const parseReceiverBtn = document.getElementById('parseReceiverBtn');
+    const receiverParseHint = document.getElementById('receiverParseHint');
     const checkUrl = "{% url 'api_check_availability' %}";
     const transferUrl = "{% url 'api_transfer_match' %}";
     const availabilityCache = new Map();
     const transferCache = new Map();
     let submitting = false;
+
+    function setReceiverParseHint(message, isError) {
+        if (!receiverParseHint) return;
+        receiverParseHint.textContent = message || '';
+        receiverParseHint.style.color = isError ? '#d93025' : '#666';
+    }
+
+    function normalizeReceiverText(text) {
+        return (text || '')
+            .replace(/\r/g, '\n')
+            .replace(/\t/g, ' ')
+            .replace(/[|]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function parseReceiverInfo(rawText) {
+        const text = normalizeReceiverText(rawText);
+        if (!text) {
+            return { name: '', phone: '', address: '' };
+        }
+
+        const labeledName = text.match(/(?:收件人|收货人|联系人|姓名)\s*[:：]\s*([^\s,，;；:：]{2,16})/);
+        const phoneMatch = text.match(/(?:\+?86[-\s]?)?(1[3-9]\d{9})/);
+        const labeledAddress = text.match(/(?:收货地址|收件地址|详细地址|地址)\s*[:：]\s*([^]+)$/);
+
+        let phone = phoneMatch ? phoneMatch[1] : '';
+        let name = labeledName ? labeledName[1].trim() : '';
+        let address = labeledAddress ? labeledAddress[1].trim() : '';
+        const addrHint = /(省|市|区|县|镇|乡|街道|路|大道|号|栋|单元|室|园区|开发区)/;
+
+        // 无标签场景：张三 13800138000 广东省...
+        if (!address) {
+            const textWithoutPhone = phone ? text.replace(phoneMatch[0], ' ') : text;
+            const chunks = textWithoutPhone
+                .split(/[,\n，；;]+/)
+                .map(s => s.trim())
+                .filter(Boolean);
+            const addrCandidates = chunks.filter(c => addrHint.test(c) || c.length >= 8);
+            if (addrCandidates.length > 0) {
+                addrCandidates.sort((a, b) => b.length - a.length);
+                address = addrCandidates[0];
+            }
+
+            // 再按空格切片兜底，避免“姓名 地址”粘在一起
+            if (!address) {
+                const tokens = textWithoutPhone.split(' ').filter(Boolean);
+                if (tokens.length >= 2) {
+                    const first = tokens[0];
+                    const rest = tokens.slice(1).join('');
+                    if (!name && /^[\u4e00-\u9fa5A-Za-z]{2,8}$/.test(first)) {
+                        name = first;
+                    }
+                    if (addrHint.test(rest) && rest.length >= 6) {
+                        address = rest;
+                    }
+                }
+            }
+        }
+
+        if (!name) {
+            const stripped = text
+                .replace(/(?:\+?86[-\s]?)?(1[3-9]\d{9})/g, ' ')
+                .replace(/(?:收件人|收货人|联系人|姓名|电话|手机|收货地址|收件地址|详细地址|地址)\s*[:：]/g, ' ')
+                .replace(/[,\n，；;:：]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            const tokens = stripped.split(' ').filter(Boolean);
+            const candidate = tokens.find(t => /^[\u4e00-\u9fa5A-Za-z]{2,8}$/.test(t));
+            name = candidate || '';
+        }
+
+        // 清理地址中误带的姓名前缀
+        if (name && address) {
+            const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const leadingName = new RegExp(`^${escapedName}[,，\\s]*`);
+            address = address.replace(leadingName, '').trim();
+        }
+
+        return { name, phone, address };
+    }
 
     async function getAvailability(skuId, quantity) {
         const eventDate = eventDateInput?.value;
@@ -336,7 +435,7 @@ document.addEventListener('DOMContentLoaded', function() {
             quantity: String(quantity || 1),
             delivery_address: deliveryAddress
         });
-        if (preferredSourceOrderId) {
+        if (preferredSourceOrderId && /^\d+$/.test(String(preferredSourceOrderId))) {
             params.set('preferred_source_order_id', String(preferredSourceOrderId));
         }
         const resp = await fetch(`${transferUrl}?${params.toString()}`, { credentials: 'same-origin' });
@@ -362,7 +461,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 const price = opt.dataset.price || '0';
                 const stock = opt.dataset.stock || '0';
                 opt.textContent = `${name} - ￥${price} (库存: ${stock})`;
-                opt.disabled = false;
             });
             return;
         }
@@ -375,12 +473,16 @@ document.addEventListener('DOMContentLoaded', function() {
             const data = await getAvailability(opt.value, 1);
             if (data && typeof data.available_count !== 'undefined') {
                 const availableCount = data.available_count;
-                opt.textContent = `${name} - ￥${price} (可用: ${availableCount}/${stock})`;
-                opt.disabled = availableCount <= 0 && opt.value !== selectedValue;
+                if (availableCount <= 0) {
+                    // 缺仓SKU也允许选择：可能可通过转寄满足
+                    opt.textContent = `${name} - ￥${price} [缺仓] (仓库: ${availableCount}/${stock}，可尝试转寄)`;
+                } else {
+                    opt.textContent = `${name} - ￥${price} (可用: ${availableCount}/${stock})`;
+                }
             } else {
                 opt.textContent = `${name} - ￥${price} (可用: --/${stock})`;
-                opt.disabled = false;
             }
+            opt.disabled = false;
         }
     }
 
@@ -410,12 +512,22 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
         const previousValue = transferSelect.value;
-        transferSelect.innerHTML = '<option value="">自动匹配最优来源单</option>';
+        const initialValue = transferSelect.dataset.initialValue || '';
+        transferSelect.innerHTML = '<option value="">自动匹配最优来源单</option><option value="__warehouse__">仓库发货（不使用转寄）</option>';
         const candidates = (transferData && transferData.candidates) ? transferData.candidates : [];
         candidates.forEach((candidate, idx) => {
             const option = document.createElement('option');
             option.value = String(candidate.source_order_id);
-            option.textContent = `${candidate.source_order_no}｜预定:${candidate.source_event_date}｜可转:${candidate.available_qty}`;
+            const gap = typeof candidate.date_gap_score !== 'undefined' ? `${candidate.date_gap_score}天` : '--';
+            const bufferDays = Number(candidate.buffer_days || 0);
+            const confidence = candidate.distance_confidence || 'low';
+            const isKm = candidate.distance_mode === 'km';
+            const distanceText = isKm
+                ? `城市直线距离:${candidate.distance_score}km`
+                : `地址相似差:${candidate.distance_score}（越小越近）`;
+            const sourceArea = `${candidate.source_province || ''}${candidate.source_city || ''}` || '未识别';
+            const targetArea = `${candidate.target_province || ''}${candidate.target_city || ''}` || '未识别';
+            option.textContent = `${candidate.source_order_no}｜预定:${candidate.source_event_date}｜可转:${candidate.available_qty}｜日期差(按新单+${bufferDays}天):${gap}｜区域:${sourceArea}→${targetArea}｜${distanceText}｜定位:${confidence}`;
             if (idx === 0) {
                 option.textContent += '（推荐）';
             }
@@ -423,6 +535,16 @@ document.addEventListener('DOMContentLoaded', function() {
         });
         if (previousValue && transferSelect.querySelector(`option[value="${previousValue}"]`)) {
             transferSelect.value = previousValue;
+            return;
+        }
+        if (initialValue && transferSelect.querySelector(`option[value="${initialValue}"]`)) {
+            transferSelect.value = initialValue;
+            transferSelect.dataset.initialValue = '';
+            return;
+        }
+        if (candidates.length > 0) {
+            // 默认选中推荐来源单（首个候选），除非已有历史选择
+            transferSelect.value = String(candidates[0].source_order_id);
         }
     }
 
@@ -435,6 +557,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const deliveryAddress = (deliveryAddressInput?.value || '').trim();
         const transferSelect = item.querySelector('.transfer-source-select');
         const preferredSourceOrderId = (transferSelect?.value || '').trim();
+        const forceWarehouse = preferredSourceOrderId === '__warehouse__';
 
         if (!skuId || !eventDate) {
             item.dataset.availabilityOk = '1';
@@ -447,7 +570,7 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             const [availabilityData, transferData] = await Promise.all([
                 getAvailability(skuId, quantity),
-                getTransferMatch(skuId, quantity, preferredSourceOrderId)
+                getTransferMatch(skuId, quantity, forceWarehouse ? '' : preferredSourceOrderId)
             ]);
 
             if (!availabilityData) {
@@ -470,19 +593,27 @@ document.addEventListener('DOMContentLoaded', function() {
                     .map(a => a.source_order_no)
                     .filter(Boolean);
 
-                ok = warehouseNeeded <= warehouseAvailable;
-                if (transferQty > 0 && warehouseNeeded > 0) {
-                    hintMsg = `建议：转寄 ${transferQty} 套 + 仓库 ${warehouseNeeded} 套`;
-                } else if (transferQty > 0) {
-                    hintMsg = `建议：本单可全部转寄 ${transferQty} 套`;
+                if (forceWarehouse) {
+                    ok = warehouseAvailable >= requestedQty;
+                    hintMsg = `已选择仓库发货：需仓库 ${requestedQty} 套`;
+                    if (!ok) {
+                        hintMsg += `；仓库还缺 ${requestedQty - warehouseAvailable} 套`;
+                    }
                 } else {
-                    hintMsg = `建议：暂无可转寄，仓库发货 ${requestedQty} 套`;
-                }
-                if (candidateNos.length) {
-                    hintMsg += `（来源：${candidateNos.join('、')}）`;
-                }
-                if (!ok) {
-                    hintMsg += `；仓库还缺 ${warehouseNeeded - warehouseAvailable} 套`;
+                    ok = warehouseNeeded <= warehouseAvailable;
+                    if (transferQty > 0 && warehouseNeeded > 0) {
+                        hintMsg = `建议：转寄 ${transferQty} 套 + 仓库 ${warehouseNeeded} 套`;
+                    } else if (transferQty > 0) {
+                        hintMsg = `建议：本单可全部转寄 ${transferQty} 套`;
+                    } else {
+                        hintMsg = `建议：暂无可转寄，仓库发货 ${requestedQty} 套`;
+                    }
+                    if (candidateNos.length) {
+                        hintMsg += `（来源：${candidateNos.join('、')}）`;
+                    }
+                    if (!ok) {
+                        hintMsg += `；仓库还缺 ${warehouseNeeded - warehouseAvailable} 套`;
+                    }
                 }
             } else if (!deliveryAddress) {
                 hintMsg = `${hintMsg}；填写送货地址后可启用转寄推荐`;
@@ -564,6 +695,30 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         submitting = true;
         orderForm.submit();
+    });
+
+    parseReceiverBtn?.addEventListener('click', function() {
+        const raw = receiverTextInput?.value || '';
+        const parsed = parseReceiverInfo(raw);
+        let hit = 0;
+        if (parsed.name && customerNameInput) {
+            customerNameInput.value = parsed.name;
+            hit += 1;
+        }
+        if (parsed.phone && customerPhoneInput) {
+            customerPhoneInput.value = parsed.phone;
+            hit += 1;
+        }
+        if (parsed.address && deliveryAddressInput) {
+            deliveryAddressInput.value = parsed.address;
+            deliveryAddressInput.dispatchEvent(new Event('input', { bubbles: true }));
+            hit += 1;
+        }
+        if (hit === 0) {
+            setReceiverParseHint('未识别到有效信息，请检查粘贴内容格式。', true);
+            return;
+        }
+        setReceiverParseHint(`解析完成：已填充 ${hit}/3 项。`, false);
     });
 
     checkAllItemsAvailability();

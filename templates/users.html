@@ -353,7 +353,26 @@
 
 <div class="user-management">
     <div class="page-header">
-        <h3>用户管理</h3>
+        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+            <h3 style="margin-right:12px;">用户管理</h3>
+            <input id="keywordInput" type="text" class="form-control" style="width:220px;" placeholder="用户名/姓名/邮箱/手机号"
+                   value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterUsers();}">
+            <select id="roleFilter" class="form-control" style="width:160px;" onchange="filterUsers()">
+                <option value="">全部角色</option>
+                <option value="admin" {% if role_filter == 'admin' %}selected{% endif %}>超级管理员</option>
+                <option value="manager" {% if role_filter == 'manager' %}selected{% endif %}>业务经理</option>
+                <option value="warehouse_manager" {% if role_filter == 'warehouse_manager' %}selected{% endif %}>仓库主管</option>
+                <option value="warehouse_staff" {% if role_filter == 'warehouse_staff' %}selected{% endif %}>仓库操作员</option>
+                <option value="customer_service" {% if role_filter == 'customer_service' %}selected{% endif %}>客服</option>
+            </select>
+            <select id="statusFilter" class="form-control" style="width:120px;" onchange="filterUsers()">
+                <option value="">全部状态</option>
+                <option value="active" {% if status_filter == 'active' %}selected{% endif %}>启用</option>
+                <option value="inactive" {% if status_filter == 'inactive' %}selected{% endif %}>禁用</option>
+            </select>
+            <button class="btn-sm btn-edit" type="button" onclick="filterUsers()">查询</button>
+            <a class="btn-sm btn-disable" href="{% url 'users_list' %}" style="line-height:24px;">重置</a>
+        </div>
         <button class="btn-primary" onclick="openAddUserModal()">+ 添加用户</button>
     </div>
 
@@ -412,6 +431,21 @@
             </tbody>
         </table>
     </div>
+    {% if users_page and users_page.paginator.num_pages > 1 %}
+    <div class="pagination">
+        {% if users_page.has_previous %}
+        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ users_page.previous_page_number }}">上一页</a>
+        {% else %}
+        <button class="btn btn-sm" disabled>上一页</button>
+        {% endif %}
+        <span class="page-info">第 {{ users_page.number }} 页，共 {{ users_page.paginator.num_pages }} 页（共 {{ users_page.paginator.count }} 条）</span>
+        {% if users_page.has_next %}
+        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ users_page.next_page_number }}">下一页</a>
+        {% else %}
+        <button class="btn btn-sm" disabled>下一页</button>
+        {% endif %}
+    </div>
+    {% endif %}
 </div>
 
 <!-- 添加/编辑用户模态框 -->
@@ -465,6 +499,18 @@
 </div>
 
 <script>
+function filterUsers() {
+    const keyword = (document.getElementById('keywordInput')?.value || '').trim();
+    const role = (document.getElementById('roleFilter')?.value || '').trim();
+    const status = (document.getElementById('statusFilter')?.value || '').trim();
+    const params = new URLSearchParams();
+    if (keyword) params.set('keyword', keyword);
+    if (role) params.set('role', role);
+    if (status) params.set('status', status);
+    const q = params.toString();
+    window.location.href = '{% url "users_list" %}' + (q ? ('?' + q) : '');
+}
+
 // 角色权限说明
 const rolePermissions = {
     'admin': '<strong>超级管理员</strong><br>• 查看所有数据<br>• 管理用户和角色<br>• 系统设置<br>• 操作日志',

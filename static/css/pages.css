@@ -569,3 +569,131 @@
         gap: 8px;
     }
 }
+
+/* ===== 2026 Refresh Theme Overrides ===== */
+.dashboard,
+.orders-list,
+.transfers-list,
+.purchase-orders-list,
+.parts-inventory,
+.parts-movements,
+.skus-list,
+.calendar-view {
+    width: 100%;
+}
+
+.page-header {
+    margin-bottom: 18px;
+    padding: 14px 16px;
+    border: 1px solid #dce5f0;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.84);
+    backdrop-filter: blur(2px);
+}
+
+.order-form,
+.purchase-order-form,
+.quick-actions,
+.recent-orders,
+.low-stock-alert,
+.calendar-container,
+.calendar-legend,
+.events-list,
+.form-section {
+    border: 1px solid #dce4ef;
+    border-radius: 14px;
+    box-shadow: 0 8px 22px rgba(18, 35, 64, 0.07);
+}
+
+.order-form,
+.purchase-order-form,
+.quick-actions,
+.recent-orders,
+.low-stock-alert,
+.calendar-container,
+.calendar-legend,
+.events-list {
+    background: #fff;
+}
+
+.form-section {
+    background: #fbfdff;
+    padding: 18px;
+}
+
+.form-section h3 {
+    font-size: 17px;
+    font-weight: 700;
+    color: #1f3044;
+}
+
+.order-item,
+.po-item {
+    background: #fff;
+    border: 1px solid #dfe7f2;
+    border-radius: 12px;
+}
+
+.stats-grid {
+    gap: 16px;
+}
+
+.stat-card {
+    border: 1px solid #dbe4ef;
+    border-radius: 14px;
+    box-shadow: 0 8px 22px rgba(17, 35, 62, 0.08);
+}
+
+.stat-label {
+    color: #607188;
+    font-weight: 600;
+}
+
+.stat-value {
+    color: #1f2f44;
+    font-weight: 700;
+}
+
+.stat-icon {
+    border-radius: 12px;
+    box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.08);
+}
+
+.calendar-day {
+    border-radius: 10px;
+}
+
+.calendar-day.today {
+    border-color: #1f5ea8;
+    background: #eaf3ff;
+}
+
+/* users.html inline style override */
+.user-management .page-header {
+    background: rgba(255, 255, 255, 0.86) !important;
+    border: 1px solid #dce5f0 !important;
+    border-radius: 12px !important;
+    padding: 12px 14px !important;
+}
+
+.user-management .btn-primary,
+.user-management .btn-edit,
+.user-management .btn-save {
+    background: linear-gradient(135deg, #1f5ea8 0%, #174b87 100%) !important;
+    box-shadow: none !important;
+}
+
+.user-management .user-table {
+    border: 1px solid #dce5f0 !important;
+    border-radius: 14px !important;
+    box-shadow: 0 8px 24px rgba(18, 35, 64, 0.08) !important;
+}
+
+.user-management .user-table thead {
+    background: linear-gradient(180deg, #f7f9fd 0%, #f2f5fa 100%) !important;
+}
+
+.user-management .role-admin {
+    background: #e8f1ff !important;
+    color: #1e4f8f !important;
+}
