@@ -77,6 +77,7 @@ def check_sku_availability(sku_id, event_date, quantity=1, exclude_order_id=None
     ).aggregate(total=Sum('quantity'))['total'] or 0
     transfer_allocated = TransferAllocation.objects.filter(
         target_order__in=active_orders,
+        source_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
         sku_id=sku_id,
         status__in=['locked', 'consumed']
     ).aggregate(total=Sum('quantity'))['total'] or 0
@@ -807,21 +808,23 @@ def build_transfer_pool_rows():
         return f"文本差异分 {score}"
 
     target_orders = Order.objects.filter(
-        status__in=['pending', 'confirmed']
+        status__in=['pending', 'confirmed', 'delivered']
     ).prefetch_related('items__sku').order_by('event_date', 'created_at')
 
+    # 当前挂靠展示需要覆盖“已发货”订单，
+    # 因为目标单发货后分配锁会从 locked -> consumed，仍应显示真实挂靠来源。
     allocations = TransferAllocation.objects.filter(
-        target_order__status__in=['pending', 'confirmed'],
-        status='locked'
+        target_order__status__in=['pending', 'confirmed', 'delivered'],
+        status__in=['locked', 'consumed']
     ).select_related('source_order')
     alloc_map = {}
     for alloc in allocations:
         alloc_map.setdefault((alloc.target_order_id, alloc.sku_id), []).append(alloc)
 
-    pending_pairs = set(
+    active_task_pairs = set(
         Transfer.objects.filter(
-            order_to__status__in=['pending', 'confirmed'],
-            status='pending'
+            order_to__status__in=['pending', 'confirmed', 'delivered'],
+            status__in=['pending', 'completed']
         ).values_list('order_to_id', 'sku_id')
     )
 
@@ -830,7 +833,7 @@ def build_transfer_pool_rows():
         for item in order.items.all():
             key = (order.id, item.sku_id)
             allocs = alloc_map.get(key, [])
-            has_pending_task = key in pending_pairs
+            has_pending_task = key in active_task_pairs
             recommended = get_transfer_match_candidates(
                 order.delivery_address,
                 order.event_date,
@@ -896,7 +899,13 @@ def build_transfer_pool_rows():
                 'recommended_ship_date': rec_ship_date,
                 'has_pending_task': has_pending_task,
                 'can_recommend': not has_pending_task,
-                'can_generate_task': (current_source_type == 'transfer' and not has_pending_task),
+                # 生成任务仅允许在目标单“已发货”状态下触发；
+                # 且推荐来源需要可转寄，同时不能已有待执行任务。
+                'can_generate_task': (
+                    order.status == 'delivered'
+                    and recommended_source_type == 'transfer'
+                    and not has_pending_task
+                ),
             })
 
     return rows

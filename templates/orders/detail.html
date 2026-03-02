@@ -141,8 +141,8 @@
     margin-top: 16px;
 }
 
-.order-table-wrap .data-table td,
-.order-table-wrap .data-table th {
+.order-table-wrap .table td,
+.order-table-wrap .table th {
     padding-top: 10px;
     padding-bottom: 10px;
 }
@@ -220,7 +220,8 @@
 
     <div class="panel order-table-wrap">
         <h3>订单明细</h3>
-        <table class="data-table">
+        <div class="table-responsive">
+        <table class="table table-hover table-striped align-middle mb-0">
             <thead>
                 <tr>
                     <th>SKU</th>
@@ -256,6 +257,7 @@
                 {% endfor %}
             </tbody>
         </table>
+        </div>
     </div>
 
     <div class="panel action-panel" style="margin-top: 16px;">

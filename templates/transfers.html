@@ -8,6 +8,13 @@
     <div class="page-header">
         <div class="header-left">
             <div class="filter-group">
+                <label>候选筛选：</label>
+                <select id="candidateActionInput" class="form-select">
+                    <option value="all" {% if candidate_action_filter == 'all' %}selected{% endif %}>全部候选</option>
+                    <option value="generatable" {% if candidate_action_filter == 'generatable' %}selected{% endif %}>仅可生成任务</option>
+                </select>
+            </div>
+            <div class="filter-group">
                 <label>关键词：</label>
                 <input id="keywordInput" type="text" class="form-control" placeholder="订单号/SKU"
                        value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterTransfers();}">
@@ -19,14 +26,46 @@
         </div>
     </div>
 
+    <ul class="nav nav-tabs mb-3" id="transferPanels" role="tablist">
+        <li class="nav-item" role="presentation">
+            <button
+                class="nav-link {% if active_panel != 'tasks' %}active{% endif %}"
+                id="candidates-tab"
+                data-bs-toggle="tab"
+                data-bs-target="#candidates-panel"
+                type="button"
+                role="tab"
+                aria-controls="candidates-panel"
+                aria-selected="{% if active_panel != 'tasks' %}true{% else %}false{% endif %}">
+                转寄候选 <span class="panel-count">{{ candidates_page.paginator.count }}</span>
+            </button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button
+                class="nav-link {% if active_panel == 'tasks' %}active{% endif %}"
+                id="tasks-tab"
+                data-bs-toggle="tab"
+                data-bs-target="#tasks-panel"
+                type="button"
+                role="tab"
+                aria-controls="tasks-panel"
+                aria-selected="{% if active_panel == 'tasks' %}true{% else %}false{% endif %}">
+                转寄任务 <span class="panel-count">{{ tasks_page.paginator.count }}</span>
+            </button>
+        </li>
+    </ul>
+
+    <div class="tab-content">
+    <div class="tab-pane fade {% if active_panel != 'tasks' %}show active{% endif %}" id="candidates-panel" role="tabpanel" aria-labelledby="candidates-tab">
     <div class="form-section">
         <h3>转寄候选</h3>
         <div class="table-container">
-            <table class="data-table">
+            <div class="table-responsive">
+            <table class="table table-hover table-striped align-middle data-table mb-0">
                 <thead>
                     <tr>
                         <th><input type="checkbox" id="selectAllCandidates" onchange="toggleAllCandidates(this)"></th>
-                        <th>订单信息（未发货）</th>
+                        <th>订单信息（可调度）</th>
                         <th>当前挂靠</th>
                         <th>推荐来源</th>
                         <th>款式</th>
@@ -80,24 +119,26 @@
                         </td>
                         <td>
                             {% if item.has_pending_task %}
-                            <span class="badge badge-info">已生成任务</span>
+                            <span class="badge text-bg-primary">已生成任务</span>
                             {% elif item.current_source_type == 'warehouse' %}
-                            <span class="badge badge-warning">仓库挂靠</span>
+                            <span class="badge text-bg-warning">仓库挂靠</span>
                             {% else %}
-                            <span class="badge badge-success">转寄挂靠</span>
+                            <span class="badge text-bg-success">转寄挂靠</span>
                             {% endif %}
                         </td>
                         <td>
-                            <form method="post" action="{% url 'transfer_recommend' %}" style="display:inline;">
-                                {% csrf_token %}
-                                <input type="hidden" name="rows[]" value="{{ item.row_key }}">
-                                <button type="submit" class="btn btn-sm btn-primary" {% if not item.can_recommend %}disabled{% endif %}>重新推荐</button>
-                            </form>
-                            <form method="post" action="{% url 'transfer_generate_tasks' %}" style="display:inline;">
-                                {% csrf_token %}
-                                <input type="hidden" name="rows[]" value="{{ item.row_key }}">
-                                <button type="submit" class="btn btn-sm btn-success" {% if not item.can_generate_task %}disabled{% endif %}>生成任务</button>
-                            </form>
+                            <div class="d-flex flex-wrap gap-2 justify-content-end">
+                                <form method="post" action="{% url 'transfer_recommend' %}" class="m-0">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="rows[]" value="{{ item.row_key }}">
+                                    <button type="submit" class="btn btn-sm btn-primary text-nowrap" {% if not item.can_recommend %}disabled{% endif %}>重新推荐</button>
+                                </form>
+                                <form method="post" action="{% url 'transfer_generate_tasks' %}" class="m-0">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="rows[]" value="{{ item.row_key }}">
+                                    <button type="submit" class="btn btn-sm btn-success text-nowrap" {% if not item.can_generate_task %}disabled{% endif %}>生成任务</button>
+                                </form>
+                            </div>
                         </td>
                     </tr>
                     {% empty %}
@@ -107,38 +148,49 @@
                     {% endfor %}
                 </tbody>
             </table>
+            </div>
         </div>
         {% if candidates_page and candidates_page.paginator.num_pages > 1 %}
-        <div class="pagination">
-            {% if candidates_page.has_previous %}
-            <a class="btn btn-sm" href="?{% if candidate_pagination_query %}{{ candidate_pagination_query }}&{% endif %}candidate_page={{ candidates_page.previous_page_number }}">上一页</a>
-            {% else %}
-            <button class="btn btn-sm" disabled>上一页</button>
-            {% endif %}
+        <nav aria-label="候选分页" class="d-flex justify-content-between align-items-center mt-3">
             <span class="page-info">候选：第 {{ candidates_page.number }} 页，共 {{ candidates_page.paginator.num_pages }} 页（共 {{ candidates_page.paginator.count }} 条）</span>
-            {% if candidates_page.has_next %}
-            <a class="btn btn-sm" href="?{% if candidate_pagination_query %}{{ candidate_pagination_query }}&{% endif %}candidate_page={{ candidates_page.next_page_number }}">下一页</a>
-            {% else %}
-            <button class="btn btn-sm" disabled>下一页</button>
-            {% endif %}
-        </div>
+            <ul class="pagination pagination-sm mb-0">
+                <li class="page-item {% if not candidates_page.has_previous %}disabled{% endif %}">
+                    {% if candidates_page.has_previous %}
+                    <a class="page-link" href="?{% if candidate_pagination_query %}{{ candidate_pagination_query }}&{% endif %}candidate_page={{ candidates_page.previous_page_number }}&panel=candidates">上一页</a>
+                    {% else %}
+                    <span class="page-link">上一页</span>
+                    {% endif %}
+                </li>
+                <li class="page-item disabled"><span class="page-link">{{ candidates_page.number }} / {{ candidates_page.paginator.num_pages }}</span></li>
+                <li class="page-item {% if not candidates_page.has_next %}disabled{% endif %}">
+                    {% if candidates_page.has_next %}
+                    <a class="page-link" href="?{% if candidate_pagination_query %}{{ candidate_pagination_query }}&{% endif %}candidate_page={{ candidates_page.next_page_number }}&panel=candidates">下一页</a>
+                    {% else %}
+                    <span class="page-link">下一页</span>
+                    {% endif %}
+                </li>
+            </ul>
+        </nav>
         {% endif %}
     </div>
+    </div>
 
+    <div class="tab-pane fade {% if active_panel == 'tasks' %}show active{% endif %}" id="tasks-panel" role="tabpanel" aria-labelledby="tasks-tab">
     <div class="form-section">
         <h3>转寄任务</h3>
         <div class="page-header" style="padding: 8px 0 12px 0;">
             <div class="header-left">
                 <a class="btn btn-sm {% if status_filter == 'pending' %}btn-primary{% else %}btn-secondary{% endif %}"
-                   href="?{% if task_tab_query %}{{ task_tab_query }}&{% endif %}status=pending">待操作</a>
+                   href="?{% if task_tab_query %}{{ task_tab_query }}&{% endif %}status=pending&panel=tasks">待操作</a>
                 <a class="btn btn-sm {% if status_filter == 'completed' %}btn-primary{% else %}btn-secondary{% endif %}"
-                   href="?{% if task_tab_query %}{{ task_tab_query }}&{% endif %}status=completed">已完成</a>
+                   href="?{% if task_tab_query %}{{ task_tab_query }}&{% endif %}status=completed&panel=tasks">已完成</a>
                 <a class="btn btn-sm {% if status_filter == 'cancelled' %}btn-primary{% else %}btn-secondary{% endif %}"
-                   href="?{% if task_tab_query %}{{ task_tab_query }}&{% endif %}status=cancelled">已取消</a>
+                   href="?{% if task_tab_query %}{{ task_tab_query }}&{% endif %}status=cancelled&panel=tasks">已取消</a>
             </div>
         </div>
         <div class="table-container">
-            <table class="data-table">
+            <div class="table-responsive">
+            <table class="table table-hover table-striped align-middle data-table mb-0">
                 <thead>
                     <tr>
                         <th>任务ID</th>
@@ -171,8 +223,9 @@
                         <td>{{ task.get_status_display }}</td>
                         <td>
                             {% if task.status == 'pending' %}
-                            <form method="post" action="{% url 'transfer_complete' task.id %}" style="display:inline;">
+                            <form method="post" action="{% url 'transfer_complete' task.id %}" style="display:inline;" class="transfer-complete-form">
                                 {% csrf_token %}
+                                <input type="hidden" name="tracking_no" value="">
                                 <button type="submit" class="btn btn-sm btn-success">完成</button>
                             </form>
                             <form method="post" action="{% url 'transfer_cancel' task.id %}" style="display:inline;">
@@ -191,29 +244,42 @@
                     {% endfor %}
                 </tbody>
             </table>
+            </div>
         </div>
         {% if tasks_page and tasks_page.paginator.num_pages > 1 %}
-        <div class="pagination">
-            {% if tasks_page.has_previous %}
-            <a class="btn btn-sm" href="?{% if task_pagination_query %}{{ task_pagination_query }}&{% endif %}task_page={{ tasks_page.previous_page_number }}">上一页</a>
-            {% else %}
-            <button class="btn btn-sm" disabled>上一页</button>
-            {% endif %}
+        <nav aria-label="任务分页" class="d-flex justify-content-between align-items-center mt-3">
             <span class="page-info">任务：第 {{ tasks_page.number }} 页，共 {{ tasks_page.paginator.num_pages }} 页（共 {{ tasks_page.paginator.count }} 条）</span>
-            {% if tasks_page.has_next %}
-            <a class="btn btn-sm" href="?{% if task_pagination_query %}{{ task_pagination_query }}&{% endif %}task_page={{ tasks_page.next_page_number }}">下一页</a>
-            {% else %}
-            <button class="btn btn-sm" disabled>下一页</button>
-            {% endif %}
-        </div>
+            <ul class="pagination pagination-sm mb-0">
+                <li class="page-item {% if not tasks_page.has_previous %}disabled{% endif %}">
+                    {% if tasks_page.has_previous %}
+                    <a class="page-link" href="?{% if task_pagination_query %}{{ task_pagination_query }}&{% endif %}task_page={{ tasks_page.previous_page_number }}&panel=tasks">上一页</a>
+                    {% else %}
+                    <span class="page-link">上一页</span>
+                    {% endif %}
+                </li>
+                <li class="page-item disabled"><span class="page-link">{{ tasks_page.number }} / {{ tasks_page.paginator.num_pages }}</span></li>
+                <li class="page-item {% if not tasks_page.has_next %}disabled{% endif %}">
+                    {% if tasks_page.has_next %}
+                    <a class="page-link" href="?{% if task_pagination_query %}{{ task_pagination_query }}&{% endif %}task_page={{ tasks_page.next_page_number }}&panel=tasks">下一页</a>
+                    {% else %}
+                    <span class="page-link">下一页</span>
+                    {% endif %}
+                </li>
+            </ul>
+        </nav>
         {% endif %}
+    </div>
+    </div>
     </div>
 </div>
 <script>
 function filterTransfers() {
     const keyword = (document.getElementById('keywordInput')?.value || '').trim();
+    const candidateAction = (document.getElementById('candidateActionInput')?.value || 'all').trim();
     const params = new URLSearchParams();
+    params.set('panel', 'candidates');
     params.set('status', '{{ status_filter|default:"pending" }}');
+    params.set('candidate_action', candidateAction || 'all');
     if (keyword) params.set('keyword', keyword);
     const q = params.toString();
     window.location.href = '{% url "transfers_list" %}' + (q ? ('?' + q) : '');
@@ -256,24 +322,53 @@ function submitPost(url, fields) {
     form.submit();
 }
 
-function recommendSelected() {
+async function recommendSelected() {
     const selected = Array.from(document.querySelectorAll('.candidate-select:checked')).map((el) => el.value);
     if (!selected.length) {
-        alert('请先勾选要重新推荐的候选项');
+        if (window.AppUI) await window.AppUI.alert('请先勾选要重新推荐的候选项');
+        else alert('请先勾选要重新推荐的候选项');
         return;
     }
-    if (!confirm(`确认重新推荐所选 ${selected.length} 条候选项？`)) return;
+    const ok = window.AppUI
+        ? await window.AppUI.confirm(`确认重新推荐所选 ${selected.length} 条候选项？`, '重新推荐确认')
+        : confirm(`确认重新推荐所选 ${selected.length} 条候选项？`);
+    if (!ok) return;
     submitPost('{% url "transfer_recommend" %}', { 'rows[]': selected });
 }
 
-function generateTasksSelected() {
+async function generateTasksSelected() {
     const selected = Array.from(document.querySelectorAll('.candidate-select:checked')).map((el) => el.value);
     if (!selected.length) {
-        alert('请先勾选候选项');
+        if (window.AppUI) await window.AppUI.alert('请先勾选候选项');
+        else alert('请先勾选候选项');
         return;
     }
-    if (!confirm(`确认生成所选 ${selected.length} 条转寄任务？`)) return;
+    const ok = window.AppUI
+        ? await window.AppUI.confirm(`确认生成所选 ${selected.length} 条转寄任务？`, '生成任务确认')
+        : confirm(`确认生成所选 ${selected.length} 条转寄任务？`);
+    if (!ok) return;
     submitPost('{% url "transfer_generate_tasks" %}', { 'rows[]': selected });
 }
+
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.transfer-complete-form').forEach((form) => {
+        form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            let trackingNo = '';
+            if (window.AppUI) {
+                trackingNo = (await window.AppUI.prompt('请输入快递单号', '完成转寄任务', '例如：SF123456789CN')) || '';
+            } else {
+                trackingNo = (window.prompt('请输入快递单号：', '') || '').trim();
+            }
+            if (!trackingNo) {
+                if (window.AppUI) await window.AppUI.alert('快递单号不能为空');
+                else alert('快递单号不能为空');
+                return;
+            }
+            form.querySelector('input[name=\"tracking_no\"]').value = trackingNo;
+            form.submit();
+        });
+    });
+});
 </script>
 {% endblock %}

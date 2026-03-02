@@ -27,12 +27,14 @@
     </div>
 
     <div class="table-container">
-        <table class="data-table">
+        <div class="table-responsive">
+        <table class="table table-hover table-striped align-middle data-table mb-0">
             <thead>
                 <tr>
                     <th><input type="checkbox" id="selectAllSkus" onchange="toggleAllSkus(this)"></th>
                     <th>产品编号</th>
                     <th>产品名称</th>
+                    <th>图片</th>
                     <th>类别</th>
                     <th>租金</th>
                     <th>押金</th>
@@ -47,6 +49,15 @@
                     <td><input type="checkbox" class="sku-select" value="{{ sku.id }}"></td>
                     <td>{{ sku.code }}</td>
                     <td>{{ sku.name }}</td>
+                    <td>
+                        {% if sku.image %}
+                        <a href="#" onclick="openSkuImagePreview('{{ sku.image.url }}', '{{ sku.name|escapejs }}'); return false;" title="点击放大预览">
+                            <img src="{{ sku.image.url }}" alt="{{ sku.name }}" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid #dbe2ea;">
+                        </a>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
                     <td>{{ sku.category }}</td>
                     <td class="text-primary">¥{{ sku.rental_price }}</td>
                     <td>¥{{ sku.deposit }}</td>
@@ -54,33 +65,51 @@
                     <td class="text-truncate" title="{{ sku.description }}">{{ sku.description|default:"-" }}</td>
                     <td>
                         <div class="action-buttons">
-                            <button class="btn btn-sm btn-primary" onclick="showEditModal({{ sku.id }}, '{{ sku.code }}', '{{ sku.name }}', '{{ sku.category }}', '{{ sku.rental_price }}', '{{ sku.deposit }}', {{ sku.stock }}, '{{ sku.description|escapejs }}')">编辑</button>
+                            <button class="btn btn-sm btn-primary"
+                                    data-id="{{ sku.id }}"
+                                    data-code="{{ sku.code }}"
+                                    data-name="{{ sku.name }}"
+                                    data-category="{{ sku.category }}"
+                                    data-rental-price="{{ sku.rental_price }}"
+                                    data-deposit="{{ sku.deposit }}"
+                                    data-stock="{{ sku.stock }}"
+                                    data-description="{{ sku.description|default:''|escape }}"
+                                    data-image-url="{% if sku.image %}{{ sku.image.url }}{% endif %}"
+                                    onclick="showEditModal(this)">编辑</button>
                             <button class="btn btn-sm btn-danger" onclick="deleteSKU({{ sku.id }}, '{{ sku.code }}')">删除</button>
                         </div>
                     </td>
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="9" class="text-center">暂无产品数据</td>
+                    <td colspan="10" class="text-center">暂无产品数据</td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
+        </div>
     </div>
     {% if skus_page and skus_page.paginator.num_pages > 1 %}
-    <div class="pagination">
-        {% if skus_page.has_previous %}
-        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ skus_page.previous_page_number }}">上一页</a>
-        {% else %}
-        <button class="btn btn-sm" disabled>上一页</button>
-        {% endif %}
+    <nav aria-label="产品分页" class="d-flex justify-content-between align-items-center mt-3">
         <span class="page-info">第 {{ skus_page.number }} 页，共 {{ skus_page.paginator.num_pages }} 页（共 {{ skus_page.paginator.count }} 条）</span>
-        {% if skus_page.has_next %}
-        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ skus_page.next_page_number }}">下一页</a>
-        {% else %}
-        <button class="btn btn-sm" disabled>下一页</button>
-        {% endif %}
-    </div>
+        <ul class="pagination pagination-sm mb-0">
+            <li class="page-item {% if not skus_page.has_previous %}disabled{% endif %}">
+                {% if skus_page.has_previous %}
+                <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ skus_page.previous_page_number }}">上一页</a>
+                {% else %}
+                <span class="page-link">上一页</span>
+                {% endif %}
+            </li>
+            <li class="page-item disabled"><span class="page-link">{{ skus_page.number }} / {{ skus_page.paginator.num_pages }}</span></li>
+            <li class="page-item {% if not skus_page.has_next %}disabled{% endif %}">
+                {% if skus_page.has_next %}
+                <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ skus_page.next_page_number }}">下一页</a>
+                {% else %}
+                <span class="page-link">下一页</span>
+                {% endif %}
+            </li>
+        </ul>
+    </nav>
     {% endif %}
 </div>
 
@@ -89,7 +118,7 @@
     <div class="modal-content">
         <span class="close" onclick="closeModal('createModal')">&times;</span>
         <h3>新建产品</h3>
-        <form method="POST" action="{% url 'sku_create' %}">
+        <form method="POST" action="{% url 'sku_create' %}" enctype="multipart/form-data">
             {% csrf_token %}
             <div class="form-row">
                 <div class="form-group">
@@ -123,6 +152,12 @@
                 <label>描述</label>
                 <textarea name="description" class="form-control" rows="3"></textarea>
             </div>
+            <div class="form-group">
+                <label>套餐图片</label>
+                <input type="file" name="image" class="form-control" accept="image/*">
+                <small class="form-text">建议上传 1:1 或 4:3 图片，便于快速识别</small>
+                <div id="createImagePreviewWrap" class="mt-2 text-muted">未选择图片</div>
+            </div>
             <div class="form-actions">
                 <button type="button" class="btn btn-secondary" onclick="closeModal('createModal')">取消</button>
                 <button type="submit" class="btn btn-primary">创建</button>
@@ -136,7 +171,7 @@
     <div class="modal-content">
         <span class="close" onclick="closeModal('editModal')">&times;</span>
         <h3>编辑产品</h3>
-        <form method="POST" id="editForm">
+        <form method="POST" id="editForm" enctype="multipart/form-data">
             {% csrf_token %}
             <div class="form-row">
                 <div class="form-group">
@@ -170,11 +205,37 @@
                 <label>描述</label>
                 <textarea name="description" id="edit_description" class="form-control" rows="3"></textarea>
             </div>
+            <div class="form-group">
+                <label>当前图片</label>
+                <div id="editImagePreviewWrap" class="mb-2 text-muted">暂无图片</div>
+                <input type="file" name="image" id="edit_image" class="form-control" accept="image/*">
+                <div id="editSelectedImagePreviewWrap" class="mt-2 text-muted">未选择新图片</div>
+                <div class="mt-2">
+                    <label class="mb-0">
+                        <input type="checkbox" name="clear_image" value="1" id="edit_clear_image">
+                        清除当前图片
+                    </label>
+                </div>
+            </div>
             <div class="form-actions">
                 <button type="button" class="btn btn-secondary" onclick="closeModal('editModal')">取消</button>
                 <button type="submit" class="btn btn-primary">保存</button>
             </div>
         </form>
+    </div>
+</div>
+
+<div class="modal fade" id="skuImagePreviewModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="skuImagePreviewTitle">图片预览</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body text-center">
+                <img id="skuImagePreviewImg" src="" alt="预览图" style="max-width:100%;max-height:70vh;object-fit:contain;border-radius:8px;">
+            </div>
+        </div>
     </div>
 </div>
 
@@ -191,9 +252,23 @@ function filterSkus() {
 
 function showCreateModal() {
     document.getElementById('createModal').style.display = 'block';
+    const createPreview = document.getElementById('createImagePreviewWrap');
+    const createFile = document.querySelector('#createModal input[name="image"]');
+    if (createPreview) createPreview.textContent = '未选择图片';
+    if (createFile) createFile.value = '';
 }
 
-function showEditModal(id, code, name, category, rentalPrice, deposit, stock, description) {
+function showEditModal(btn) {
+    const id = btn.getAttribute('data-id');
+    const code = btn.getAttribute('data-code') || '';
+    const name = btn.getAttribute('data-name') || '';
+    const category = btn.getAttribute('data-category') || '';
+    const rentalPrice = btn.getAttribute('data-rental-price') || '';
+    const deposit = btn.getAttribute('data-deposit') || '';
+    const stock = btn.getAttribute('data-stock') || '0';
+    const description = btn.getAttribute('data-description') || '';
+    const imageUrl = btn.getAttribute('data-image-url') || '';
+
     document.getElementById('editForm').action = `/skus/${id}/edit/`;
     document.getElementById('edit_code').value = code;
     document.getElementById('edit_name').value = name;
@@ -202,15 +277,75 @@ function showEditModal(id, code, name, category, rentalPrice, deposit, stock, de
     document.getElementById('edit_deposit').value = deposit;
     document.getElementById('edit_stock').value = stock;
     document.getElementById('edit_description').value = description || '';
+    document.getElementById('edit_image').value = '';
+    document.getElementById('edit_clear_image').checked = false;
+    const editSelectedPreview = document.getElementById('editSelectedImagePreviewWrap');
+    if (editSelectedPreview) {
+        editSelectedPreview.textContent = '未选择新图片';
+    }
+
+    const previewWrap = document.getElementById('editImagePreviewWrap');
+    if (imageUrl) {
+        previewWrap.innerHTML = `<a href="#" onclick="openSkuImagePreview('${imageUrl}', '${name.replace(/'/g, "\\'")}'); return false;" title="点击放大预览"><img src="${imageUrl}" alt="当前图片" style="width:72px;height:72px;object-fit:cover;border-radius:8px;border:1px solid #dbe2ea;"></a>`;
+    } else {
+        previewWrap.textContent = '暂无图片';
+    }
     document.getElementById('editModal').style.display = 'block';
 }
+
+function openSkuImagePreview(imageUrl, title) {
+    if (!imageUrl) return;
+    if (!window.bootstrap) {
+        window.open(imageUrl, '_blank');
+        return;
+    }
+    const titleEl = document.getElementById('skuImagePreviewTitle');
+    const imgEl = document.getElementById('skuImagePreviewImg');
+    const modalEl = document.getElementById('skuImagePreviewModal');
+    titleEl.textContent = title ? `${title} - 图片预览` : '图片预览';
+    imgEl.src = imageUrl;
+    const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+    modal.show();
+}
+
+function bindSkuImageInputPreview(inputSelector, previewSelector) {
+    const inputEl = document.querySelector(inputSelector);
+    const previewWrap = document.querySelector(previewSelector);
+    if (!inputEl || !previewWrap) return;
+
+    inputEl.addEventListener('change', function () {
+        const file = this.files && this.files[0];
+        if (!file) {
+            previewWrap.textContent = '未选择图片';
+            return;
+        }
+        if (!file.type || !file.type.startsWith('image/')) {
+            previewWrap.textContent = '所选文件不是图片';
+            return;
+        }
+        const objectUrl = URL.createObjectURL(file);
+        const safeName = String(file.name || '预览').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        previewWrap.innerHTML =
+            `<a href="#" onclick="openSkuImagePreview('${objectUrl}', '${safeName}'); return false;" title="点击放大预览">` +
+            `<img src="${objectUrl}" alt="本地预览" style="width:88px;height:88px;object-fit:cover;border-radius:8px;border:1px solid #dbe2ea;">` +
+            `</a>`;
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    bindSkuImageInputPreview('#createModal input[name=\"image\"]', '#createImagePreviewWrap');
+    bindSkuImageInputPreview('#edit_image', '#editSelectedImagePreviewWrap');
+});
 
 function closeModal(modalId) {
     document.getElementById(modalId).style.display = 'none';
 }
 
-function deleteSKU(skuId, skuCode) {
-    if (confirm(`确定要删除产品 ${skuCode} 吗？`)) {
+async function deleteSKU(skuId, skuCode) {
+    const ok = window.AppUI
+        ? await window.AppUI.confirm(`确定要删除产品 ${skuCode} 吗？`, '删除产品确认')
+        : confirm(`确定要删除产品 ${skuCode} 吗？`);
+    if (ok) {
         const form = document.createElement('form');
         form.method = 'POST';
         form.action = `/skus/${skuId}/delete/`;
@@ -266,11 +401,18 @@ function toggleAllSkus(checkbox) {
 function bulkDeleteSkus() {
     const selected = Array.from(document.querySelectorAll('.sku-select:checked')).map((el) => el.value);
     if (!selected.length) {
-        alert('请先勾选要删除的产品');
+        if (window.AppUI) window.AppUI.alert('请先勾选要删除的产品');
+        else alert('请先勾选要删除的产品');
         return;
     }
-    if (!confirm(`确认批量删除所选 ${selected.length} 条产品？`)) return;
-    submitPost('{% url "skus_bulk_delete" %}', { 'ids[]': selected });
+    const run = async () => {
+        const ok = window.AppUI
+            ? await window.AppUI.confirm(`确认批量删除所选 ${selected.length} 条产品？`, '批量删除确认')
+            : confirm(`确认批量删除所选 ${selected.length} 条产品？`);
+        if (!ok) return;
+        submitPost('{% url "skus_bulk_delete" %}', { 'ids[]': selected });
+    };
+    run();
 }
 
 // 点击模态框外部关闭

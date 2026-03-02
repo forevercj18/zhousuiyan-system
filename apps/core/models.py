@@ -40,6 +40,7 @@ class SKU(models.Model):
     code = models.CharField('SKU编码', max_length=50, unique=True)
     name = models.CharField('SKU名称', max_length=100)
     category = models.CharField('分类', max_length=50, default='主题套餐')
+    image = models.FileField('SKU图片', upload_to='sku_images/', blank=True, null=True)
     rental_price = models.DecimalField('租金', max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
     deposit = models.DecimalField('押金', max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))])
     stock = models.IntegerField('总库存', validators=[MinValueValidator(0)])

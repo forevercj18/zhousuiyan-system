@@ -141,7 +141,7 @@ function renderEventsList() {
             <div class="event-date">${e.start}</div>
             <div class="event-title">${e.title}</div>
             <div class="event-status">
-                <span class="badge badge-${e.status}">
+                <span class="badge ${e.status === 'confirmed' ? 'text-bg-info' : 'text-bg-primary'}">
                     ${e.status === 'confirmed' ? '待发货' : '已发货'}
                 </span>
             </div>
@@ -162,7 +162,7 @@ function showEventDetails(eventId) {
         <p><strong>预定日期：</strong>${event.start}</p>
         <p><strong>客户信息：</strong>${event.title}</p>
         <p><strong>状态：</strong>
-            <span class="badge badge-${event.status}">
+            <span class="badge ${event.status === 'confirmed' ? 'text-bg-info' : 'text-bg-primary'}">
                 ${event.status === 'confirmed' ? '待发货' : '已发货'}
             </span>
         </p>

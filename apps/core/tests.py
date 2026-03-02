@@ -19,7 +19,12 @@ from .models import (
     TransferAllocation,
 )
 from .services import OrderService, PartsService, ProcurementService
-from .utils import get_transfer_match_candidates, build_transfer_allocation_plan
+from .utils import (
+    get_transfer_match_candidates,
+    build_transfer_allocation_plan,
+    build_transfer_pool_rows,
+    check_sku_availability,
+)
 
 
 User = get_user_model()
@@ -230,6 +235,57 @@ class CoreServicesTestCase(TestCase):
                 },
                 user=self.user,
             )
+
+    def test_check_sku_availability_should_not_release_when_source_completed_but_target_active(self):
+        source_order = Order.objects.create(
+            customer_name='来源客户',
+            customer_phone='13600000001',
+            delivery_address='广东省广州市天河区',
+            event_date=date.today(),
+            rental_days=1,
+            status='completed',
+            created_by=self.user,
+        )
+        target_order = Order.objects.create(
+            customer_name='目标客户',
+            customer_phone='13600000002',
+            delivery_address='广东省深圳市南山区',
+            event_date=date.today() + timedelta(days=5),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=source_order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('100.00'),
+        )
+        OrderItem.objects.create(
+            order=target_order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('100.00'),
+        )
+        TransferAllocation.objects.create(
+            source_order=source_order,
+            target_order=target_order,
+            sku=self.sku,
+            quantity=1,
+            target_event_date=target_order.event_date,
+            window_start=target_order.event_date - timedelta(days=5),
+            window_end=target_order.event_date + timedelta(days=5),
+            status='consumed',
+            created_by=self.user,
+        )
+
+        result = check_sku_availability(self.sku.id, 1)
+        self.assertEqual(result['occupied'], 1)
+        self.assertEqual(result['available_count'], 1)
 
     def test_transfer_candidate_sorting_by_target_plus_buffer_then_distance(self):
         sku = SKU.objects.create(
@@ -514,6 +570,147 @@ class CoreServicesTestCase(TestCase):
         target_date = date.today() + timedelta(days=8)
         candidates = get_transfer_match_candidates('广东揭阳榕城区东升路', target_date, sku.id)
         self.assertTrue(any(c['source_order'].id == source_pending.id for c in candidates))
+
+    def test_transfer_pool_row_generate_task_should_allow_only_when_target_delivered(self):
+        sku = SKU.objects.create(
+            code='SKU-TX-P1',
+            name='候选池套餐',
+            category='主题套餐',
+            rental_price=Decimal('80.00'),
+            deposit=Decimal('20.00'),
+            stock=5,
+            is_active=True,
+        )
+        source = Order.objects.create(
+            customer_name='来源候选',
+            customer_phone='13051000001',
+            delivery_address='广东省广州市天河区体育西路1号',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标候选',
+            customer_phone='13051000002',
+            delivery_address='广东省广州市越秀区中山一路2号',
+            event_date=date.today() + timedelta(days=8),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('80.00'))
+        OrderItem.objects.create(order=target, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('80.00'))
+
+        rows = build_transfer_pool_rows()
+        row = next((r for r in rows if r['order'].id == target.id and r['item'].sku_id == sku.id), None)
+        self.assertIsNotNone(row)
+        self.assertEqual(row['current_source_type'], 'warehouse')
+        self.assertEqual(row['recommended_source_type'], 'transfer')
+        self.assertTrue(row['can_generate_task'])
+
+        target.status = 'pending'
+        target.save(update_fields=['status'])
+        rows = build_transfer_pool_rows()
+        row = next((r for r in rows if r['order'].id == target.id and r['item'].sku_id == sku.id), None)
+        self.assertIsNotNone(row)
+        self.assertFalse(row['can_generate_task'])
+
+    def test_transfer_pool_row_should_mark_has_task_for_completed_transfer(self):
+        sku = SKU.objects.create(
+            code='SKU-TX-P2',
+            name='候选池套餐2',
+            category='主题套餐',
+            rental_price=Decimal('80.00'),
+            deposit=Decimal('20.00'),
+            stock=5,
+            is_active=True,
+        )
+        source = Order.objects.create(
+            customer_name='来源候选2',
+            customer_phone='13052000001',
+            delivery_address='广东省广州市天河区体育西路3号',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标候选2',
+            customer_phone='13052000002',
+            delivery_address='广东省广州市越秀区中山一路3号',
+            event_date=date.today() + timedelta(days=8),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('80.00'))
+        OrderItem.objects.create(order=target, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('80.00'))
+        Transfer.objects.create(
+            order_from=source,
+            order_to=target,
+            sku=sku,
+            quantity=1,
+            gap_days=8,
+            cost_saved=Decimal('100.00'),
+            status='completed',
+            created_by=self.user,
+        )
+
+        rows = build_transfer_pool_rows()
+        row = next((r for r in rows if r['order'].id == target.id and r['item'].sku_id == sku.id), None)
+        self.assertIsNotNone(row)
+        self.assertTrue(row['has_pending_task'])
+        self.assertFalse(row['can_generate_task'])
+
+    def test_transfer_pool_row_should_show_current_source_for_delivered_target_with_consumed_allocation(self):
+        sku = SKU.objects.create(
+            code='SKU-TX-P3',
+            name='候选池套餐3',
+            category='主题套餐',
+            rental_price=Decimal('80.00'),
+            deposit=Decimal('20.00'),
+            stock=5,
+            is_active=True,
+        )
+        source = Order.objects.create(
+            customer_name='来源候选3',
+            customer_phone='13053000001',
+            delivery_address='广东省深圳市南山区科技园1号',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标候选3',
+            customer_phone='13053000002',
+            delivery_address='广东省深圳市福田区车公庙2号',
+            event_date=date.today() + timedelta(days=8),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('80.00'))
+        OrderItem.objects.create(order=target, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('80.00'))
+        TransferAllocation.objects.create(
+            source_order=source,
+            target_order=target,
+            sku=sku,
+            quantity=1,
+            target_event_date=target.event_date,
+            window_start=target.event_date - timedelta(days=5),
+            window_end=target.event_date + timedelta(days=5),
+            distance_score=Decimal('1.0000'),
+            status='consumed',
+            created_by=self.user,
+        )
+
+        rows = build_transfer_pool_rows()
+        row = next((r for r in rows if r['order'].id == target.id and r['item'].sku_id == sku.id), None)
+        self.assertIsNotNone(row)
+        self.assertEqual(row['current_source_type'], 'transfer')
+        self.assertIn(source.order_no, row['current_source_text'])
 
     def test_transfer_candidate_rejects_exact_five_day_gap(self):
         sku = SKU.objects.create(
@@ -876,6 +1073,61 @@ class CoreViewsFlowTestCase(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, 'delivered')
 
+    def test_order_mark_returned_should_block_for_transfer_source_order(self):
+        source_order = Order.objects.create(
+            customer_name='来源客户',
+            customer_phone='13612345678',
+            delivery_address='来源地址',
+            event_date=date.today() + timedelta(days=1),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target_order = Order.objects.create(
+            customer_name='目标客户',
+            customer_phone='13699990000',
+            delivery_address='目标地址',
+            event_date=date.today() + timedelta(days=5),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=source_order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('200.00'),
+        )
+        OrderItem.objects.create(
+            order=target_order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('200.00'),
+        )
+        TransferAllocation.objects.create(
+            source_order=source_order,
+            target_order=target_order,
+            sku=self.sku,
+            quantity=1,
+            target_event_date=target_order.event_date,
+            window_start=target_order.event_date - timedelta(days=5),
+            window_end=target_order.event_date + timedelta(days=5),
+            status='consumed',
+            created_by=self.user,
+        )
+
+        self.client.post(
+            reverse('order_mark_returned', kwargs={'order_id': source_order.id}),
+            {'return_tracking': 'RET-BLOCK', 'balance_paid': '0'}
+        )
+        source_order.refresh_from_db()
+        self.assertEqual(source_order.status, 'delivered')
+        self.assertNotEqual(source_order.return_tracking, 'RET-BLOCK')
+
     def test_workbench_confirm_auto_deliver(self):
         order = Order.objects.create(
             customer_name='自动发货客户',
@@ -1014,9 +1266,59 @@ class CoreViewsFlowTestCase(TestCase):
             ).exists()
         )
 
-        self.client.post(reverse('transfer_complete', kwargs={'transfer_id': transfer.id}))
+        self.client.post(
+            reverse('transfer_complete', kwargs={'transfer_id': transfer.id}),
+            {
+                'tracking_no': 'YT-NEW-001',
+            }
+        )
         transfer.refresh_from_db()
+        order_from.refresh_from_db()
+        order_to.refresh_from_db()
         self.assertEqual(transfer.status, 'completed')
+        self.assertEqual(order_to.status, 'delivered')
+        self.assertEqual(order_to.ship_tracking, 'YT-NEW-001')
+        self.assertEqual(order_from.status, 'completed')
+        self.assertEqual(order_from.return_tracking, 'YT-NEW-001')
+
+    def test_transfer_complete_should_require_tracking_number(self):
+        order_from = Order.objects.create(
+            customer_name='转寄回收2',
+            customer_phone='13611112222',
+            delivery_address='A2地址',
+            event_date=date.today() + timedelta(days=1),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        order_to = Order.objects.create(
+            customer_name='转寄发货2',
+            customer_phone='13622223333',
+            delivery_address='B2地址',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+        )
+        transfer = Transfer.objects.create(
+            order_from=order_from,
+            order_to=order_to,
+            sku=self.sku,
+            quantity=1,
+            gap_days=2,
+            cost_saved=Decimal('100.00'),
+            status='pending',
+            created_by=self.user,
+        )
+
+        resp = self.client.post(
+            reverse('transfer_complete', kwargs={'transfer_id': transfer.id}),
+            {'tracking_no': ''},
+            follow=True
+        )
+        self.assertEqual(resp.status_code, 200)
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'pending')
 
     def test_transfer_recommend_should_skip_when_pending_task_exists(self):
         source = Order.objects.create(
@@ -1129,7 +1431,7 @@ class CoreViewsFlowTestCase(TestCase):
             delivery_address='广东省广州市越秀区',
             event_date=date.today() + timedelta(days=8),
             rental_days=1,
-            status='pending',
+            status='delivered',
             created_by=self.user,
         )
         OrderItem.objects.create(order=source, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
@@ -1175,7 +1477,7 @@ class CoreViewsFlowTestCase(TestCase):
             delivery_address='广东省佛山市南海区',
             event_date=date.today() + timedelta(days=8),
             rental_days=1,
-            status='pending',
+            status='delivered',
             created_by=self.user,
         )
         OrderItem.objects.create(order=target, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
@@ -1191,6 +1493,109 @@ class CoreViewsFlowTestCase(TestCase):
                 sku=self.sku,
                 status='pending'
             ).exists()
+        )
+
+    def test_transfer_generate_tasks_should_skip_when_target_not_delivered(self):
+        source = Order.objects.create(
+            customer_name='来源ND',
+            customer_phone='13620000001',
+            delivery_address='广东省广州市天河区',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标ND',
+            customer_phone='13620000002',
+            delivery_address='广东省广州市越秀区',
+            event_date=date.today() + timedelta(days=8),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        OrderItem.objects.create(order=target, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        TransferAllocation.objects.create(
+            source_order=source,
+            target_order=target,
+            sku=self.sku,
+            quantity=1,
+            target_event_date=target.event_date,
+            window_start=target.event_date - timedelta(days=5),
+            window_end=target.event_date + timedelta(days=5),
+            distance_score=Decimal('1.0000'),
+            status='locked',
+            created_by=self.user,
+        )
+
+        resp = self.client.post(
+            reverse('transfer_generate_tasks'),
+            {'rows[]': [f'{target.id}:{self.sku.id}']},
+            follow=True
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(
+            Transfer.objects.filter(
+                order_to=target,
+                sku=self.sku,
+                status='pending'
+            ).exists()
+        )
+
+    def test_transfer_generate_tasks_should_skip_when_completed_task_exists(self):
+        source = Order.objects.create(
+            customer_name='来源CT',
+            customer_phone='13630000001',
+            delivery_address='广东省广州市天河区',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标CT',
+            customer_phone='13630000002',
+            delivery_address='广东省广州市越秀区',
+            event_date=date.today() + timedelta(days=8),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        OrderItem.objects.create(order=target, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        TransferAllocation.objects.create(
+            source_order=source,
+            target_order=target,
+            sku=self.sku,
+            quantity=1,
+            target_event_date=target.event_date,
+            window_start=target.event_date - timedelta(days=5),
+            window_end=target.event_date + timedelta(days=5),
+            distance_score=Decimal('1.0000'),
+            status='locked',
+            created_by=self.user,
+        )
+        Transfer.objects.create(
+            order_from=source,
+            order_to=target,
+            sku=self.sku,
+            quantity=1,
+            gap_days=8,
+            cost_saved=Decimal('100.00'),
+            status='completed',
+            created_by=self.user,
+        )
+
+        resp = self.client.post(
+            reverse('transfer_generate_tasks'),
+            {'rows[]': [f'{target.id}:{self.sku.id}']},
+            follow=True
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            Transfer.objects.filter(order_to=target, sku=self.sku).count(),
+            1
         )
 
     def test_transfer_generate_tasks_should_switch_to_recommended_source_before_create_task(self):
@@ -1218,7 +1623,7 @@ class CoreViewsFlowTestCase(TestCase):
             delivery_address='广东省广州市越秀区中山一路2号',
             event_date=date.today() + timedelta(days=8),
             rental_days=1,
-            status='pending',
+            status='delivered',
             created_by=self.user,
         )
         OrderItem.objects.create(order=source_current, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
@@ -1259,3 +1664,126 @@ class CoreViewsFlowTestCase(TestCase):
                 status='pending'
             ).exists()
         )
+
+    def test_api_check_duplicate_order_should_return_duplicates(self):
+        existing = Order.objects.create(
+            customer_name='重复客户',
+            customer_phone='18800001111',
+            delivery_address='广东省广州市天河区体育西路100号',
+            event_date=date.today() + timedelta(days=10),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=existing,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('200.00'),
+        )
+
+        resp = self.client.get(
+            reverse('api_check_duplicate_order'),
+            {
+                'customer_phone': '18800001111',
+                'delivery_address': '广东省广州市天河区体育西路100号',
+                'event_date': (date.today() + timedelta(days=10)).isoformat(),
+                'sku_ids[]': [str(self.sku.id)],
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertTrue(payload['data']['has_duplicates'])
+        self.assertEqual(payload['data']['duplicates'][0]['order_no'], existing.order_no)
+
+    def test_api_check_duplicate_order_should_exclude_current_order(self):
+        existing = Order.objects.create(
+            customer_name='编辑客户',
+            customer_phone='18800002222',
+            delivery_address='福建省泉州市丰泽区刺桐路1号',
+            event_date=date.today() + timedelta(days=11),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=existing,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('200.00'),
+        )
+
+        resp = self.client.get(
+            reverse('api_check_duplicate_order'),
+            {
+                'customer_phone': '18800002222',
+                'delivery_address': '福建省泉州市丰泽区刺桐路1号',
+                'event_date': (date.today() + timedelta(days=11)).isoformat(),
+                'sku_ids[]': [str(self.sku.id)],
+                'exclude_order_id': str(existing.id),
+            }
+        )
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertFalse(payload['data']['has_duplicates'])
+
+    def test_dashboard_recent_orders_transfer_allocation_should_deduplicate_and_ignore_released(self):
+        source = Order.objects.create(
+            customer_name='来源D',
+            customer_phone='18900000001',
+            delivery_address='广东省深圳市南山区科技园',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标D',
+            customer_phone='18900000002',
+            delivery_address='广东省深圳市福田区车公庙',
+            event_date=date.today() + timedelta(days=8),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        OrderItem.objects.create(order=target, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        TransferAllocation.objects.create(
+            source_order=source,
+            target_order=target,
+            sku=self.sku,
+            quantity=1,
+            target_event_date=target.event_date,
+            window_start=target.event_date - timedelta(days=5),
+            window_end=target.event_date + timedelta(days=5),
+            distance_score=Decimal('1.0000'),
+            status='locked',
+            created_by=self.user,
+        )
+        TransferAllocation.objects.create(
+            source_order=source,
+            target_order=target,
+            sku=self.sku,
+            quantity=1,
+            target_event_date=target.event_date,
+            window_start=target.event_date - timedelta(days=5),
+            window_end=target.event_date + timedelta(days=5),
+            distance_score=Decimal('1.0000'),
+            status='released',
+            created_by=self.user,
+        )
+
+        resp = self.client.get(reverse('dashboard'))
+        self.assertEqual(resp.status_code, 200)
+        recent_orders = list(resp.context['recent_orders'])
+        target_row = next((o for o in recent_orders if o.id == target.id), None)
+        self.assertIsNotNone(target_row)
+        self.assertEqual(len(target_row.transfer_allocations_display), 1)
+        self.assertEqual(target_row.transfer_allocations_display[0]['order_no'], source.order_no)
+        self.assertEqual(target_row.transfer_allocations_display[0]['quantity'], 1)

@@ -9,7 +9,7 @@
         <div class="header-left">
             <div class="filter-group">
                 <label>类型筛选：</label>
-                <select id="typeFilter" class="form-control" onchange="filterMovements()">
+                <select id="typeFilter" class="form-select" onchange="filterMovements()">
                     <option value="">全部</option>
                     <option value="inbound" {% if type_filter == 'inbound' %}selected{% endif %}>入库</option>
                     <option value="outbound" {% if type_filter == 'outbound' %}selected{% endif %}>出库</option>
@@ -27,7 +27,8 @@
     </div>
 
     <div class="table-container">
-        <table class="data-table">
+        <div class="table-responsive">
+        <table class="table table-hover table-striped align-middle data-table mb-0">
             <thead>
                 <tr>
                     <th>ID</th>
@@ -46,7 +47,7 @@
                     <td>{{ movement.id }}</td>
                     <td>{{ movement.part.name }}</td>
                     <td>
-                        <span class="badge badge-{% if movement.type == 'outbound' %}warning{% elif movement.type == 'inbound' %}success{% else %}info{% endif %}">
+                        <span class="badge text-bg-{% if movement.type == 'outbound' %}warning{% elif movement.type == 'inbound' %}success{% else %}info{% endif %}">
                             {{ movement.get_type_display }}
                         </span>
                     </td>
@@ -63,21 +64,29 @@
                 {% endfor %}
             </tbody>
         </table>
+        </div>
     </div>
     {% if movements_page and movements_page.paginator.num_pages > 1 %}
-    <div class="pagination">
-        {% if movements_page.has_previous %}
-        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ movements_page.previous_page_number }}">上一页</a>
-        {% else %}
-        <button class="btn btn-sm" disabled>上一页</button>
-        {% endif %}
+    <nav aria-label="部件流水分页" class="d-flex justify-content-between align-items-center mt-3">
         <span class="page-info">第 {{ movements_page.number }} 页，共 {{ movements_page.paginator.num_pages }} 页（共 {{ movements_page.paginator.count }} 条）</span>
-        {% if movements_page.has_next %}
-        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ movements_page.next_page_number }}">下一页</a>
-        {% else %}
-        <button class="btn btn-sm" disabled>下一页</button>
-        {% endif %}
-    </div>
+        <ul class="pagination pagination-sm mb-0">
+            <li class="page-item {% if not movements_page.has_previous %}disabled{% endif %}">
+                {% if movements_page.has_previous %}
+                <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ movements_page.previous_page_number }}">上一页</a>
+                {% else %}
+                <span class="page-link">上一页</span>
+                {% endif %}
+            </li>
+            <li class="page-item disabled"><span class="page-link">{{ movements_page.number }} / {{ movements_page.paginator.num_pages }}</span></li>
+            <li class="page-item {% if not movements_page.has_next %}disabled{% endif %}">
+                {% if movements_page.has_next %}
+                <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ movements_page.next_page_number }}">下一页</a>
+                {% else %}
+                <span class="page-link">下一页</span>
+                {% endif %}
+            </li>
+        </ul>
+    </nav>
     {% endif %}
 </div>
 

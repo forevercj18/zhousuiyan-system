@@ -9,7 +9,7 @@
         <div class="header-left">
             <div class="filter-group">
                 <label>状态筛选：</label>
-                <select id="statusFilter" class="form-control" onchange="filterOrders()">
+                <select id="statusFilter" class="form-select" onchange="filterOrders()">
                     <option value="">全部</option>
                     <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>待处理</option>
                     <option value="confirmed" {% if status_filter == 'confirmed' %}selected{% endif %}>待发货</option>
@@ -33,7 +33,8 @@
     </div>
 
     <div class="table-container">
-        <table class="data-table">
+        <div class="table-responsive">
+        <table class="table table-hover table-striped align-middle data-table mb-0">
             <thead>
                 <tr>
                     <th><input type="checkbox" id="selectAllOrders" onchange="toggleAllOrders(this)"></th>
@@ -61,14 +62,19 @@
                     <td>{{ order.event_date }}</td>
                     <td class="text-truncate" title="{{ order.delivery_address }}">{{ order.delivery_address }}</td>
                     <td>
-                        <span class="badge badge-{{ order.status }}">
-                            {% if order.status == 'pending' %}待处理
-                            {% elif order.status == 'confirmed' %}待发货
-                            {% elif order.status == 'delivered' %}已发货
-                            {% elif order.status == 'completed' %}已完成
-                            {% elif order.status == 'cancelled' %}已取消
-                            {% endif %}
-                        </span>
+                        {% if order.status == 'pending' %}
+                        <span class="badge text-bg-warning">待处理</span>
+                        {% elif order.status == 'confirmed' %}
+                        <span class="badge text-bg-info">待发货</span>
+                        {% elif order.status == 'delivered' %}
+                        <span class="badge text-bg-primary">已发货</span>
+                        {% elif order.status == 'completed' %}
+                        <span class="badge text-bg-success">已完成</span>
+                        {% elif order.status == 'cancelled' %}
+                        <span class="badge text-bg-secondary">已取消</span>
+                        {% else %}
+                        <span class="badge text-bg-light">{{ order.get_status_display }}</span>
+                        {% endif %}
                     </td>
                     <td>
                         {% with allocs=order.transfer_allocations_display %}
@@ -80,6 +86,11 @@
                                 <span class="text-muted">仓库发货</span>
                             {% endif %}
                         {% endwith %}
+                        {% if order.active_as_source_count > 0 %}
+                        <div class="mt-1">
+                            <span class="badge text-bg-info">作为来源单占用中（{{ order.active_as_source_count }}）</span>
+                        </div>
+                        {% endif %}
                     </td>
                     <td>￥{{ order.total_amount }}</td>
                     <td>￥{{ order.deposit_paid }}</td>
@@ -88,18 +99,21 @@
                     <td>
                         <div class="action-buttons">
                             <a href="{% url 'order_detail' order.id %}" class="btn btn-sm">查看</a>
+                            {% if order.status == 'pending' or order.status == 'confirmed' %}
                             <a href="{% url 'order_edit' order.id %}" class="btn btn-sm btn-primary">编辑</a>
+                            {% endif %}
                             {% if order.status == 'pending' %}
-                            <button class="btn btn-sm btn-warning" onclick="confirmOrDeliver({{ order.id }}, '{{ order.order_no|escapejs }}')">确认/发货</button>
+                            <button class="btn btn-sm btn-warning" onclick="confirmOrDeliver({{ order.id }}, '{{ order.order_no|escapejs }}', '{{ order.expected_deposit|default:'0.00' }}')">确认/发货</button>
                             {% elif order.status == 'confirmed' %}
                             <button class="btn btn-sm btn-success" onclick="markDelivered({{ order.id }}, '{{ order.order_no|escapejs }}')">录入运单发货</button>
                             {% elif order.status == 'delivered' %}
+                            {% if order.can_mark_returned_in_orders_center %}
                             <button class="btn btn-sm btn-info" onclick="markReturned({{ order.id }}, '{{ order.order_no|escapejs }}', '{{ order.balance }}')">标记归还</button>
+                            {% else %}
+                            <button class="btn btn-sm btn-secondary" type="button" onclick="showTransferCenterTip('{{ order.order_no|escapejs }}')">转寄中心操作</button>
+                            {% endif %}
                             {% elif order.status == 'returned' %}
                             <button class="btn btn-sm btn-success" onclick="markCompleted({{ order.id }}, '{{ order.order_no|escapejs }}')">标记完成</button>
-                            {% endif %}
-                            {% if order.status != 'completed' and order.status != 'cancelled' %}
-                            <button class="btn btn-sm btn-danger" onclick="cancelOrder({{ order.id }}, '{{ order.order_no|escapejs }}')">取消</button>
                             {% endif %}
                             {% if order.status == 'pending' %}
                             <button class="btn btn-sm btn-danger" onclick="deleteOrder({{ order.id }}, '{{ order.order_no }}')">删除</button>
@@ -114,22 +128,56 @@
                 {% endfor %}
             </tbody>
         </table>
+        </div>
     </div>
     {% if orders_page and orders_page.paginator.num_pages > 1 %}
-    <div class="pagination">
-        {% if orders_page.has_previous %}
-        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ orders_page.previous_page_number }}">上一页</a>
-        {% else %}
-        <button class="btn btn-sm" disabled>上一页</button>
-        {% endif %}
+    <nav aria-label="订单分页" class="d-flex justify-content-between align-items-center mt-3">
         <span class="page-info">第 {{ orders_page.number }} 页，共 {{ orders_page.paginator.num_pages }} 页（共 {{ orders_page.paginator.count }} 条）</span>
-        {% if orders_page.has_next %}
-        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ orders_page.next_page_number }}">下一页</a>
-        {% else %}
-        <button class="btn btn-sm" disabled>下一页</button>
-        {% endif %}
-    </div>
+        <ul class="pagination pagination-sm mb-0">
+            <li class="page-item {% if not orders_page.has_previous %}disabled{% endif %}">
+                {% if orders_page.has_previous %}
+                <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ orders_page.previous_page_number }}">上一页</a>
+                {% else %}
+                <span class="page-link">上一页</span>
+                {% endif %}
+            </li>
+            <li class="page-item disabled"><span class="page-link">{{ orders_page.number }} / {{ orders_page.paginator.num_pages }}</span></li>
+            <li class="page-item {% if not orders_page.has_next %}disabled{% endif %}">
+                {% if orders_page.has_next %}
+                <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ orders_page.next_page_number }}">下一页</a>
+                {% else %}
+                <span class="page-link">下一页</span>
+                {% endif %}
+            </li>
+        </ul>
+    </nav>
     {% endif %}
+</div>
+
+<div class="modal fade" id="confirmDeliverModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">确认/发货</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <div class="text-muted mb-3" id="confirmDeliverOrderNo">订单号：</div>
+                <div class="mb-3">
+                    <label for="confirmDeliverDeposit" class="form-label">已收押金</label>
+                    <input type="number" step="0.01" min="0" class="form-control" id="confirmDeliverDeposit" placeholder="例如：200">
+                </div>
+                <div>
+                    <label for="confirmDeliverTracking" class="form-label">快递单号（可选）</label>
+                    <input type="text" class="form-control" id="confirmDeliverTracking" placeholder="留空=仅确认，不发货">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="confirmDeliverSubmitBtn">确认提交</button>
+            </div>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -177,71 +225,153 @@ function submitPost(url, fields) {
     form.submit();
 }
 
-function confirmOrDeliver(orderId, orderNo) {
-    const deposit = prompt(`订单 ${orderNo}：请输入已收押金（默认 0）`, '0');
-    if (deposit === null) return;
-    const shipTracking = prompt('如需直接发货，请输入快递单号（留空仅确认）', '');
-    if (shipTracking === null) return;
-    const payload = { deposit_paid: deposit || '0' };
-    if (shipTracking.trim()) {
+async function confirmOrDeliver(orderId, orderNo, defaultDeposit) {
+    const result = await openConfirmDeliverDialog(orderNo, defaultDeposit);
+    if (!result || !result.ok) return;
+    const payload = { deposit_paid: result.deposit || '0' };
+    if ((result.shipTracking || '').trim()) {
         payload.auto_deliver = '1';
-        payload.ship_tracking = shipTracking.trim();
+        payload.ship_tracking = result.shipTracking.trim();
     }
     submitPost(`/orders/${orderId}/confirm/`, payload);
 }
 
-function markDelivered(orderId, orderNo) {
-    const shipTracking = prompt(`订单 ${orderNo}：请输入快递单号`, '');
-    if (shipTracking === null) return;
+function openConfirmDeliverDialog(orderNo, defaultDeposit) {
+    return new Promise((resolve) => {
+        const initialDeposit = String(defaultDeposit || '0').trim() || '0';
+        if (!window.bootstrap) {
+            const deposit = prompt(`订单 ${orderNo}：请输入已收押金`, initialDeposit);
+            if (deposit === null || typeof deposit === 'undefined') {
+                resolve({ ok: false });
+                return;
+            }
+            const shipTracking = prompt('如需直接发货，请输入快递单号（留空仅确认）', '');
+            if (shipTracking === null || typeof shipTracking === 'undefined') {
+                resolve({ ok: false });
+                return;
+            }
+            resolve({ ok: true, deposit: String(deposit || '0'), shipTracking: String(shipTracking || '') });
+            return;
+        }
+
+        const modalEl = document.getElementById('confirmDeliverModal');
+        const orderNoEl = document.getElementById('confirmDeliverOrderNo');
+        const depositEl = document.getElementById('confirmDeliverDeposit');
+        const trackingEl = document.getElementById('confirmDeliverTracking');
+        const submitBtn = document.getElementById('confirmDeliverSubmitBtn');
+        const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: 'static' });
+
+        orderNoEl.textContent = `订单号：${orderNo}`;
+        depositEl.value = initialDeposit;
+        trackingEl.value = '';
+
+        let done = false;
+        const cleanup = () => {
+            modalEl.removeEventListener('hidden.bs.modal', onHidden);
+            submitBtn.removeEventListener('click', onSubmit);
+        };
+        const onHidden = () => {
+            if (!done) {
+                done = true;
+                cleanup();
+                resolve({ ok: false });
+            }
+        };
+        const onSubmit = async () => {
+            const deposit = (depositEl.value || '0').trim();
+            if (deposit && Number(deposit) < 0) {
+                if (window.AppUI) await window.AppUI.alert('押金不能小于 0');
+                return;
+            }
+            done = true;
+            cleanup();
+            resolve({
+                ok: true,
+                deposit: deposit || '0',
+                shipTracking: (trackingEl.value || '').trim(),
+            });
+            modal.hide();
+        };
+
+        modalEl.addEventListener('hidden.bs.modal', onHidden);
+        submitBtn.addEventListener('click', onSubmit);
+        modal.show();
+        setTimeout(() => depositEl.focus(), 120);
+    });
+}
+
+async function markDelivered(orderId, orderNo) {
+    const shipTracking = window.AppUI
+        ? await window.AppUI.prompt(`订单 ${orderNo}：请输入快递单号`, '录入运单发货', '')
+        : prompt(`订单 ${orderNo}：请输入快递单号`, '');
+    if (shipTracking === null || typeof shipTracking === 'undefined') return;
     if (!shipTracking.trim()) {
-        alert('快递单号不能为空');
+        if (window.AppUI) await window.AppUI.alert('快递单号不能为空');
+        else alert('快递单号不能为空');
         return;
     }
     submitPost(`/orders/${orderId}/mark-delivered/`, { ship_tracking: shipTracking.trim() });
 }
 
-function markReturned(orderId, orderNo, balance) {
-    const returnTracking = prompt(`订单 ${orderNo}：请输入回收单号（可空）`, '');
-    if (returnTracking === null) return;
-    const balancePaid = prompt(`请输入本次已收尾款（当前待收：${balance}）`, '0');
-    if (balancePaid === null) return;
+async function markReturned(orderId, orderNo, balance) {
+    const returnTracking = window.AppUI
+        ? await window.AppUI.prompt(`订单 ${orderNo}：请输入回收快递单号（必填）`, '标记归还', '例如：SF123456789CN')
+        : prompt(`订单 ${orderNo}：请输入回收快递单号（必填）`, '');
+    if (returnTracking === null || typeof returnTracking === 'undefined') return;
+    if (!String(returnTracking).trim()) {
+        if (window.AppUI) await window.AppUI.alert('回收快递单号不能为空');
+        else alert('回收快递单号不能为空');
+        return;
+    }
+    const balancePaid = window.AppUI
+        ? await window.AppUI.prompt(`请输入本次已收尾款（当前待收：${balance}）`, '标记归还', '0')
+        : prompt(`请输入本次已收尾款（当前待收：${balance}）`, '0');
+    if (balancePaid === null || typeof balancePaid === 'undefined') return;
     submitPost(`/orders/${orderId}/mark-returned/`, {
         return_tracking: returnTracking.trim(),
         balance_paid: balancePaid || '0'
     });
 }
 
-function markCompleted(orderId, orderNo) {
-    if (!confirm(`确认将订单 ${orderNo} 标记为已完成？`)) return;
+async function markCompleted(orderId, orderNo) {
+    const ok = window.AppUI
+        ? await window.AppUI.confirm(`确认将订单 ${orderNo} 标记为已完成？`, '订单完成确认')
+        : confirm(`确认将订单 ${orderNo} 标记为已完成？`);
+    if (!ok) return;
     submitPost(`/orders/${orderId}/mark-completed/`, {});
 }
 
-function cancelOrder(orderId, orderNo) {
-    const reason = prompt(`请输入订单 ${orderNo} 的取消原因`, '手动取消');
-    if (reason === null) return;
-    submitPost(`/orders/${orderId}/cancel/`, { reason: reason || '手动取消' });
+async function showTransferCenterTip(orderNo) {
+    const msg = `订单 ${orderNo} 属于转寄链路，请前往【转寄中心】完成操作。`;
+    if (window.AppUI) {
+        await window.AppUI.alert(msg, '请前往转寄中心');
+    } else {
+        alert(msg);
+    }
 }
 
-function deleteOrder(orderId, orderNo) {
-    if (confirm(`确定要删除订单 ${orderNo} 吗？此操作不可恢复。`)) {
-        const form = document.createElement('form');
-        form.method = 'POST';
-        form.action = `/orders/${orderId}/delete/`;
+async function deleteOrder(orderId, orderNo) {
+    const ok = window.AppUI
+        ? await window.AppUI.confirm(`确定要删除订单 ${orderNo} 吗？此操作不可恢复。`, '删除确认')
+        : confirm(`确定要删除订单 ${orderNo} 吗？此操作不可恢复。`);
+    if (!ok) return;
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = `/orders/${orderId}/delete/`;
 
-        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
-        if (csrfToken) {
-            form.appendChild(csrfToken.cloneNode());
-        } else {
-            const input = document.createElement('input');
-            input.type = 'hidden';
-            input.name = 'csrfmiddlewaretoken';
-            input.value = '{{ csrf_token }}';
-            form.appendChild(input);
-        }
-
-        document.body.appendChild(form);
-        form.submit();
+    const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
+    if (csrfToken) {
+        form.appendChild(csrfToken.cloneNode());
+    } else {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'csrfmiddlewaretoken';
+        input.value = '{{ csrf_token }}';
+        form.appendChild(input);
     }
+
+    document.body.appendChild(form);
+    form.submit();
 }
 
 function toggleAllOrders(checkbox) {
@@ -250,13 +380,17 @@ function toggleAllOrders(checkbox) {
     });
 }
 
-function bulkDeleteOrders() {
+async function bulkDeleteOrders() {
     const selected = Array.from(document.querySelectorAll('.order-select:checked')).map((el) => el.value);
     if (!selected.length) {
-        alert('请先勾选要删除的订单');
+        if (window.AppUI) await window.AppUI.alert('请先勾选要删除的订单');
+        else alert('请先勾选要删除的订单');
         return;
     }
-    if (!confirm(`确认批量删除所选 ${selected.length} 条订单？`)) return;
+    const ok = window.AppUI
+        ? await window.AppUI.confirm(`确认批量删除所选 ${selected.length} 条订单？`, '批量删除确认')
+        : confirm(`确认批量删除所选 ${selected.length} 条订单？`);
+    if (!ok) return;
     submitPost('{% url "orders_bulk_delete" %}', { 'ids[]': selected });
 }
 </script>

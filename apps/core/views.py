@@ -6,9 +6,10 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.http import JsonResponse
+from django.urls import reverse
 from django.core.paginator import Paginator
 from django.db.models import Q, Count, Sum, F
-from django.db import models
+from django.db import models, transaction
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -30,11 +31,84 @@ from .utils import (
 )
 
 
+def _normalize_text(value):
+    return ''.join((value or '').strip().split()).lower()
+
+
+def _find_duplicate_orders(customer_phone, delivery_address, event_date, sku_ids=None, exclude_order_id=None, limit=10):
+    phone = (customer_phone or '').strip()
+    normalized_address = _normalize_text(delivery_address)
+    if not phone or not normalized_address or not event_date:
+        return []
+
+    queryset = Order.objects.filter(
+        customer_phone=phone,
+        event_date=event_date,
+    ).exclude(status='cancelled')
+    if exclude_order_id:
+        queryset = queryset.exclude(id=exclude_order_id)
+    if sku_ids:
+        queryset = queryset.filter(items__sku_id__in=sku_ids).distinct()
+    queryset = queryset.prefetch_related('items__sku').order_by('-created_at')
+
+    duplicates = []
+    for order in queryset:
+        if _normalize_text(order.delivery_address) != normalized_address:
+            continue
+        overlap_sku_ids = set()
+        if sku_ids:
+            overlap_sku_ids = {item.sku_id for item in order.items.all() if item.sku_id in sku_ids}
+            if not overlap_sku_ids:
+                continue
+        duplicates.append({
+            'id': order.id,
+            'order_no': order.order_no,
+            'customer_name': order.customer_name,
+            'customer_phone': order.customer_phone,
+            'event_date': order.event_date,
+            'status': order.status,
+            'created_at': order.created_at,
+            'delivery_address': order.delivery_address,
+            'overlap_sku_ids': overlap_sku_ids,
+        })
+        if len(duplicates) >= limit:
+            break
+    return duplicates
+
+
 def _build_querystring(request, exclude_keys=None):
     params = request.GET.copy()
     for key in (exclude_keys or []):
         params.pop(key, None)
     return params.urlencode()
+
+
+def _attach_transfer_allocations_display(orders):
+    for order in orders:
+        grouped = defaultdict(int)
+        for alloc in order.transfer_allocations_target.all():
+            if alloc.status not in ['locked', 'consumed']:
+                continue
+            if not alloc.source_order_id:
+                continue
+            grouped[alloc.source_order.order_no] += int(alloc.quantity or 0)
+        order.transfer_allocations_display = [
+            {'order_no': order_no, 'quantity': qty}
+            for order_no, qty in grouped.items()
+            if qty > 0
+        ]
+
+
+def _is_transfer_source_order_active(order):
+    """
+    判断订单是否仍在转寄链路中作为来源单被使用。
+    命中时应在订单中心禁用“标记归还”，要求去转寄中心操作。
+    """
+    return TransferAllocation.objects.filter(
+        source_order=order,
+        status__in=['locked', 'consumed'],
+        target_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
+    ).exists()
 
 
 def _log_transfer_action(user, action, target, details):
@@ -84,6 +158,7 @@ def dashboard(request):
     ).aggregate(total=Sum('quantity'))['total'] or 0
     transfer_allocated = TransferAllocation.objects.filter(
         target_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
+        source_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
         sku__is_active=True,
         status__in=['locked', 'consumed']
     ).aggregate(total=Sum('quantity'))['total'] or 0
@@ -111,6 +186,7 @@ def dashboard(request):
         'items__sku',
         'transfer_allocations_target__source_order',
     ).order_by('-created_at')[:5]
+    _attach_transfer_allocations_display(recent_orders)
 
     # 库存不足的部件
     low_stock_parts = Part.objects.filter(
@@ -163,19 +239,30 @@ def orders_list(request):
 
     orders = orders.order_by('-created_at')
     orders_page = Paginator(orders, 10).get_page(request.GET.get('page'))
+    _attach_transfer_allocations_display(orders_page.object_list)
+    current_ids = [o.id for o in orders_page.object_list]
+    source_blocked_ids = set(
+        TransferAllocation.objects.filter(
+            source_order_id__in=current_ids,
+            status__in=['locked', 'consumed'],
+            target_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
+        ).values_list('source_order_id', flat=True)
+    )
+    source_usage_count_map = {
+        row['source_order_id']: row['cnt']
+        for row in TransferAllocation.objects.filter(
+            source_order_id__in=current_ids,
+            status__in=['locked', 'consumed'],
+            target_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
+        ).values('source_order_id').annotate(cnt=Count('id'))
+    }
     for order in orders_page.object_list:
-        grouped = defaultdict(int)
-        for alloc in order.transfer_allocations_target.all():
-            if alloc.status not in ['locked', 'consumed']:
-                continue
-            if not alloc.source_order_id:
-                continue
-            grouped[alloc.source_order.order_no] += int(alloc.quantity or 0)
-        order.transfer_allocations_display = [
-            {'order_no': order_no, 'quantity': qty}
-            for order_no, qty in grouped.items()
-            if qty > 0
-        ]
+        order.can_mark_returned_in_orders_center = order.id not in source_blocked_ids
+        order.active_as_source_count = source_usage_count_map.get(order.id, 0)
+        order.expected_deposit = sum(
+            (item.deposit or Decimal('0.00')) * (item.quantity or 0)
+            for item in order.items.all()
+        )
 
     context = {
         'orders': orders_page,
@@ -234,7 +321,20 @@ def order_create(request):
 
             # 创建订单
             order = OrderService.create_order(data, request.user)
-            messages.success(request, f'订单创建成功：{order.order_no}')
+            pending_transfer_tasks = Transfer.objects.filter(
+                order_to=order,
+                status='pending'
+            ).count()
+            if pending_transfer_tasks > 0:
+                messages.success(
+                    request,
+                    f'订单创建成功：{order.order_no}，已自动生成 {pending_transfer_tasks} 条转寄任务'
+                )
+            else:
+                messages.success(
+                    request,
+                    f'订单创建成功：{order.order_no}，当前为仓库发货，未生成转寄任务'
+                )
             return redirect('orders_list')
 
         except ValueError as e:
@@ -257,6 +357,9 @@ def order_create(request):
 def order_edit(request, order_id):
     """编辑订单"""
     order = get_object_or_404(Order, id=order_id)
+    if order.status not in ['pending', 'confirmed']:
+        messages.error(request, f'订单状态为 {order.get_status_display()}，无法编辑')
+        return redirect('orders_list')
 
     if request.method == 'POST':
         try:
@@ -447,8 +550,14 @@ def transfers_list(request):
     candidates = build_transfer_pool_rows()
     keyword = (request.GET.get('keyword', '') or '').strip()
     status_filter = (request.GET.get('status', 'pending') or 'pending').strip()
+    candidate_action_filter = (request.GET.get('candidate_action', 'all') or 'all').strip()
+    active_panel = (request.GET.get('panel', 'candidates') or 'candidates').strip()
     if status_filter not in ['pending', 'completed', 'cancelled', 'all']:
         status_filter = 'pending'
+    if candidate_action_filter not in ['all', 'generatable']:
+        candidate_action_filter = 'all'
+    if active_panel not in ['candidates', 'tasks']:
+        active_panel = 'candidates'
 
     # 获取转寄任务
     tasks = Transfer.objects.select_related(
@@ -476,8 +585,10 @@ def transfers_list(request):
             or keyword_lower in (c['current_source_text'] or '').lower()
             or keyword_lower in (c['recommended_source_text'] or '').lower()
         ]
+    if candidate_action_filter == 'generatable':
+        candidates = [c for c in candidates if c.get('can_generate_task')]
 
-    candidates_page = Paginator(candidates, 10).get_page(request.GET.get('candidate_page'))
+    candidates_page = Paginator(candidates, 5).get_page(request.GET.get('candidate_page'))
     tasks_page = Paginator(tasks, 10).get_page(request.GET.get('task_page'))
     for task in tasks_page.object_list:
         task.transfer_ship_date = task.order_from.event_date + timedelta(days=1)
@@ -497,6 +608,8 @@ def transfers_list(request):
         'tasks_page': tasks_page,
         'keyword': keyword,
         'status_filter': status_filter,
+        'candidate_action_filter': candidate_action_filter,
+        'active_panel': active_panel,
         'candidate_pagination_query': _build_querystring(request, ['candidate_page']),
         'task_pagination_query': _build_querystring(request, ['task_page']),
         'task_tab_query': _build_querystring(request, ['status', 'task_page']),
@@ -530,7 +643,7 @@ def transfer_recommend(request):
         order_id = int(order_id_raw)
         sku_id = int(sku_id_raw)
 
-        order = Order.objects.filter(id=order_id, status__in=['pending', 'confirmed']).first()
+        order = Order.objects.filter(id=order_id, status__in=['pending', 'confirmed', 'delivered']).first()
         if not order:
             skipped_invalid += 1
             continue
@@ -538,7 +651,7 @@ def transfer_recommend(request):
         if not item:
             skipped_invalid += 1
             continue
-        if Transfer.objects.filter(order_to=order, sku_id=sku_id, status='pending').exists():
+        if Transfer.objects.filter(order_to=order, sku_id=sku_id, status__in=['pending', 'completed']).exists():
             skipped_pending_task += 1
             continue
 
@@ -582,7 +695,7 @@ def transfer_recommend(request):
     if success:
         messages.success(request, f'重新推荐完成：成功 {success} 条（仅更新挂靠，不生成任务）')
     if skipped_pending_task:
-        messages.warning(request, f'跳过 {skipped_pending_task} 条：已生成待执行转寄任务，不可重推')
+        messages.warning(request, f'跳过 {skipped_pending_task} 条：存在未取消转寄任务，不可重推')
     if skipped_invalid:
         messages.warning(request, f'跳过 {skipped_invalid} 条：数据无效或状态不允许')
     return redirect('transfers_list')
@@ -601,6 +714,7 @@ def transfer_generate_tasks(request):
 
     success = 0
     skipped_warehouse = 0
+    skipped_not_delivered = 0
     skipped_exists = 0
     skipped_invalid = 0
     updated_to_recommended = 0
@@ -616,11 +730,14 @@ def transfer_generate_tasks(request):
         order_id = int(order_id_raw)
         sku_id = int(sku_id_raw)
 
-        order = Order.objects.filter(id=order_id, status__in=['pending', 'confirmed']).first()
+        order = Order.objects.filter(id=order_id).first()
         if not order or not OrderItem.objects.filter(order=order, sku_id=sku_id).exists():
             skipped_invalid += 1
             continue
-        if Transfer.objects.filter(order_to=order, sku_id=sku_id, status='pending').exists():
+        if order.status != 'delivered':
+            skipped_not_delivered += 1
+            continue
+        if Transfer.objects.filter(order_to=order, sku_id=sku_id, status__in=['pending', 'completed']).exists():
             skipped_exists += 1
             continue
 
@@ -701,8 +818,10 @@ def transfer_generate_tasks(request):
         messages.info(request, f'其中 {updated_to_recommended} 条已先更新为推荐来源挂靠')
     if skipped_warehouse:
         messages.warning(request, f'跳过 {skipped_warehouse} 条：当前挂靠为仓库发货')
+    if skipped_not_delivered:
+        messages.warning(request, f'跳过 {skipped_not_delivered} 条：仅“已发货”订单可生成转寄任务')
     if skipped_exists:
-        messages.warning(request, f'跳过 {skipped_exists} 条：已存在待执行转寄任务')
+        messages.warning(request, f'跳过 {skipped_exists} 条：已存在未取消转寄任务')
     if skipped_invalid:
         messages.warning(request, f'跳过 {skipped_invalid} 条：数据无效或状态不允许')
     return redirect('transfers_list')
@@ -736,19 +855,69 @@ def transfer_complete(request, transfer_id):
     """完成转寄任务"""
     if request.method == 'POST':
         try:
-            transfer = get_object_or_404(Transfer, id=transfer_id)
-            if transfer.status != 'pending':
-                raise ValueError('仅待执行任务可完成')
-            transfer.status = 'completed'
-            transfer.save(update_fields=['status', 'updated_at'])
-            AuditLog.objects.create(
-                user=request.user,
-                action='status_change',
-                module='转寄',
-                target=f'任务#{transfer.id}',
-                details='标记转寄任务完成',
-                ip_address=None
-            )
+            with transaction.atomic():
+                transfer = get_object_or_404(Transfer.objects.select_related('order_from', 'order_to'), id=transfer_id)
+                if transfer.status != 'pending':
+                    raise ValueError('仅待执行任务可完成')
+
+                tracking_no = (request.POST.get('tracking_no') or '').strip()
+                if not tracking_no:
+                    # 兼容旧字段，若前端仍传两字段则兜底使用
+                    tracking_no = (request.POST.get('target_ship_tracking') or '').strip() or (
+                        request.POST.get('source_return_tracking') or ''
+                    ).strip()
+                if not tracking_no:
+                    raise ValueError('请录入快递单号')
+
+                target_order = transfer.order_to
+                source_order = transfer.order_from
+
+                # 1) 新单：写入发货单号并推进至已发货
+                target_order.ship_tracking = tracking_no
+                if target_order.status != 'delivered':
+                    target_order.status = 'delivered'
+                target_order.save(update_fields=['ship_tracking', 'status', 'updated_at'])
+
+                # 对应目标单转寄锁标记为已消耗
+                TransferAllocation.objects.filter(
+                    target_order=target_order,
+                    sku_id=transfer.sku_id,
+                    status='locked'
+                ).update(status='consumed')
+
+                # 2) 来源单：写入回收单号并推进至已完成（归还 -> 完成）
+                source_order.return_tracking = tracking_no
+                if source_order.status in ['delivered', 'in_use']:
+                    source_order.status = 'returned'
+                    source_order.save(update_fields=['return_tracking', 'status', 'updated_at'])
+                    source_order.status = 'completed'
+                    source_order.save(update_fields=['status', 'updated_at'])
+                elif source_order.status == 'returned':
+                    source_order.save(update_fields=['return_tracking', 'updated_at'])
+                    source_order.status = 'completed'
+                    source_order.save(update_fields=['status', 'updated_at'])
+                elif source_order.status == 'completed':
+                    source_order.save(update_fields=['return_tracking', 'updated_at'])
+                else:
+                    raise ValueError(f'来源单状态为 {source_order.get_status_display()}，无法执行归还完成')
+
+                transfer.status = 'completed'
+                transfer.notes = (transfer.notes + '\n' if transfer.notes else '') + (
+                    f'完成闭环：快递单号={tracking_no}'
+                )
+                transfer.save(update_fields=['status', 'notes', 'updated_at'])
+
+                AuditLog.objects.create(
+                    user=request.user,
+                    action='status_change',
+                    module='转寄',
+                    target=f'任务#{transfer.id}',
+                    details=(
+                        f'标记转寄任务完成；新单({target_order.order_no})已发货[{tracking_no}]；'
+                        f'来源单({source_order.order_no})已完成[{tracking_no}]'
+                    ),
+                    ip_address=None
+                )
             messages.success(request, '转寄任务已完成')
         except Exception as e:
             messages.error(request, f'操作失败：{str(e)}')
@@ -819,6 +988,7 @@ def sku_create(request):
                 code=request.POST.get('code'),
                 name=request.POST.get('name'),
                 category=request.POST.get('category'),
+                image=request.FILES.get('image'),
                 rental_price=request.POST.get('rental_price'),
                 deposit=request.POST.get('deposit'),
                 stock=int(request.POST.get('stock', 0)),
@@ -842,6 +1012,11 @@ def sku_edit(request, sku_id):
             sku.code = request.POST.get('code')
             sku.name = request.POST.get('name')
             sku.category = request.POST.get('category')
+            new_image = request.FILES.get('image')
+            if request.POST.get('clear_image') == '1':
+                sku.image = None
+            elif new_image:
+                sku.image = new_image
             sku.rental_price = request.POST.get('rental_price')
             sku.deposit = request.POST.get('deposit')
             sku.stock = int(request.POST.get('stock', 0))
@@ -1270,7 +1445,15 @@ def parts_movements_list(request):
 @require_permission('settings', 'view')
 def settings_view(request):
     """系统设置"""
+    allowed_tabs = {'order', 'transfer', 'warehouse', 'system'}
+    active_tab = (request.GET.get('tab') or 'order').strip()
+    if active_tab not in allowed_tabs:
+        active_tab = 'order'
+
     if request.method == 'POST':
+        active_tab = (request.POST.get('active_tab') or active_tab).strip()
+        if active_tab not in allowed_tabs:
+            active_tab = 'order'
         # 更新设置
         for key in [
             'ship_lead_days',
@@ -1282,13 +1465,13 @@ def settings_view(request):
             'warehouse_sender_address',
         ]:
             value = request.POST.get(key)
-            if value:
+            if value is not None:
                 SystemSettings.objects.update_or_create(
                     key=key,
                     defaults={'value': value}
                 )
         messages.success(request, '设置保存成功')
-        return redirect('settings')
+        return redirect(f"{reverse('settings')}?tab={active_tab}")
 
     # 获取设置
     settings = {}
@@ -1297,6 +1480,7 @@ def settings_view(request):
 
     context = {
         'settings': settings,
+        'active_tab': active_tab,
     }
     return render(request, 'settings.html', context)
 
@@ -1419,6 +1603,9 @@ def order_mark_returned(request, order_id):
     """工作台：标记归还"""
     if request.method == 'POST':
         try:
+            order = get_object_or_404(Order, id=order_id)
+            if _is_transfer_source_order_active(order):
+                raise ValueError('该订单为转寄链路订单，请前往【转寄中心】完成操作')
             return_tracking = request.POST.get('return_tracking', '')
             balance_paid = Decimal(request.POST.get('balance_paid', '0') or '0')
             OrderService.mark_as_returned(order_id, return_tracking, balance_paid, request.user)
@@ -1438,6 +1625,8 @@ def order_mark_completed(request, order_id):
         try:
             order = get_object_or_404(Order, id=order_id)
             if order.status == 'delivered':
+                if _is_transfer_source_order_active(order):
+                    raise ValueError('该订单为转寄链路订单，请前往【转寄中心】完成操作')
                 OrderService.mark_as_returned(order_id, request.POST.get('return_tracking', ''), Decimal('0.00'), request.user)
             OrderService.complete_order(order_id, request.user)
             messages.success(request, '订单已标记为已完成')
@@ -1554,6 +1743,61 @@ def api_transfer_match(request):
                     } for a in plan['allocations']
                 ],
                 'candidates': candidates,
+            }
+        })
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)})
+
+
+@login_required
+def api_check_duplicate_order(request):
+    """API: 检查潜在重复订单（提醒用途，不拦截）"""
+    try:
+        customer_phone = request.GET.get('customer_phone', '')
+        delivery_address = request.GET.get('delivery_address', '')
+        event_date_raw = request.GET.get('event_date')
+        exclude_order_id = request.GET.get('exclude_order_id')
+        sku_ids_raw = request.GET.getlist('sku_ids[]') or request.GET.getlist('sku_ids') or []
+        if not sku_ids_raw:
+            sku_ids_raw = [x for x in (request.GET.get('sku_ids', '') or '').split(',') if x]
+        sku_ids = [int(x) for x in sku_ids_raw if str(x).isdigit()]
+        exclude_id = int(exclude_order_id) if str(exclude_order_id).isdigit() else None
+        event_date = datetime.strptime(event_date_raw, '%Y-%m-%d').date() if event_date_raw else None
+
+        duplicates = _find_duplicate_orders(
+            customer_phone=customer_phone,
+            delivery_address=delivery_address,
+            event_date=event_date,
+            sku_ids=sku_ids,
+            exclude_order_id=exclude_id,
+            limit=20,
+        )
+        status_display_map = dict(Order.STATUS_CHOICES)
+        data = []
+        for row in duplicates:
+            overlap_names = []
+            if row['overlap_sku_ids']:
+                overlap_names = list(
+                    SKU.objects.filter(id__in=row['overlap_sku_ids']).values_list('name', flat=True)
+                )
+            data.append({
+                'id': row['id'],
+                'order_no': row['order_no'],
+                'customer_name': row['customer_name'],
+                'customer_phone': row['customer_phone'],
+                'event_date': row['event_date'].strftime('%Y-%m-%d'),
+                'status': row['status'],
+                'status_display': status_display_map.get(row['status'], row['status']),
+                'created_at': row['created_at'].strftime('%Y-%m-%d %H:%M'),
+                'delivery_address': row['delivery_address'],
+                'overlap_sku_names': overlap_names,
+            })
+
+        return JsonResponse({
+            'success': True,
+            'data': {
+                'has_duplicates': len(data) > 0,
+                'duplicates': data,
             }
         })
     except Exception as e:

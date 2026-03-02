@@ -15,7 +15,7 @@
             </div>
             <div class="filter-group">
                 <label>操作类型：</label>
-                <select id="actionFilter" class="form-control">
+                <select id="actionFilter" class="form-select">
                     <option value="">全部</option>
                     <option value="create" {% if action == 'create' %}selected{% endif %}>创建</option>
                     <option value="update" {% if action == 'update' %}selected{% endif %}>修改</option>
@@ -39,7 +39,8 @@
     </div>
 
     <div class="table-container">
-        <table class="data-table">
+        <div class="table-responsive">
+        <table class="table table-hover table-striped align-middle data-table mb-0">
             <thead>
                 <tr>
                     <th>时间</th>
@@ -55,7 +56,7 @@
                     <td>{{ log.created_at|date:"Y-m-d H:i:s" }}</td>
                     <td>{{ log.user.full_name|default:log.user.username|default:"-" }}</td>
                     <td>
-                        <span class="badge badge-info">{{ log.get_action_display }}</span>
+                        <span class="badge text-bg-info">{{ log.get_action_display }}</span>
                     </td>
                     <td>{{ log.target }}</td>
                     <td class="text-truncate" title="{{ log.details }}">{{ log.details }}</td>
@@ -67,22 +68,30 @@
                 {% endfor %}
             </tbody>
         </table>
+        </div>
     </div>
 
     {% if logs_page and logs_page.paginator.num_pages > 1 %}
-    <div class="pagination">
-        {% if logs_page.has_previous %}
-        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ logs_page.previous_page_number }}">上一页</a>
-        {% else %}
-        <button class="btn btn-sm" disabled>上一页</button>
-        {% endif %}
+    <nav aria-label="审计日志分页" class="d-flex justify-content-between align-items-center mt-3">
         <span class="page-info">第 {{ logs_page.number }} 页，共 {{ logs_page.paginator.num_pages }} 页（共 {{ logs_page.paginator.count }} 条）</span>
-        {% if logs_page.has_next %}
-        <a class="btn btn-sm" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ logs_page.next_page_number }}">下一页</a>
-        {% else %}
-        <button class="btn btn-sm" disabled>下一页</button>
-        {% endif %}
-    </div>
+        <ul class="pagination pagination-sm mb-0">
+            <li class="page-item {% if not logs_page.has_previous %}disabled{% endif %}">
+                {% if logs_page.has_previous %}
+                <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ logs_page.previous_page_number }}">上一页</a>
+                {% else %}
+                <span class="page-link">上一页</span>
+                {% endif %}
+            </li>
+            <li class="page-item disabled"><span class="page-link">{{ logs_page.number }} / {{ logs_page.paginator.num_pages }}</span></li>
+            <li class="page-item {% if not logs_page.has_next %}disabled{% endif %}">
+                {% if logs_page.has_next %}
+                <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ logs_page.next_page_number }}">下一页</a>
+                {% else %}
+                <span class="page-link">下一页</span>
+                {% endif %}
+            </li>
+        </ul>
+    </nav>
     {% endif %}
 </div>
 
@@ -102,7 +111,8 @@ function filterLogs() {
 }
 
 function exportLogs() {
-    alert('导出日志功能待实现');
+    if (window.AppUI) window.AppUI.alert('导出日志功能待实现');
+    else alert('导出日志功能待实现');
 }
 </script>
 {% endblock %}
