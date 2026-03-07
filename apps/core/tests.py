@@ -8,11 +8,13 @@ from django.http import HttpResponse
 from django.test import TestCase
 from django.test.client import RequestFactory
 from django.urls import reverse
+from django.utils import timezone
 
 from .middleware import AuditLogMiddleware
 from .models import (
     AuditLog,
     InventoryUnit,
+    UnitMovement,
     Order,
     OrderItem,
     Part,
@@ -1826,6 +1828,57 @@ class CoreViewsFlowTestCase(TestCase):
         ids = [part.id for part in resp.context['parts_page'].object_list]
         self.assertIn(low_part.id, ids)
         self.assertNotIn(normal_part.id, ids)
+
+    def test_outbound_inventory_dashboard_should_expose_health_score(self):
+        unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKUFLOW0001-0001',
+            status='in_transit',
+            current_location_type='transit',
+            is_active=True,
+        )
+        mv = UnitMovement.objects.create(
+            unit=unit,
+            event_type='TRANSFER_PENDING',
+            status='warning',
+            notes='测试健康分',
+            operator=self.user,
+        )
+        UnitMovement.objects.filter(id=mv.id).update(event_time=timezone.now() - timedelta(days=8))
+
+        resp = self.client.get(reverse('outbound_inventory_dashboard'))
+        self.assertEqual(resp.status_code, 200)
+        summary = resp.context['summary']
+        self.assertIn('avg_outbound_health', summary)
+        units = list(resp.context['units_page'].object_list)
+        target = next((u for u in units if u.id == unit.id), None)
+        self.assertIsNotNone(target)
+        self.assertTrue(hasattr(target, 'health_score'))
+        self.assertTrue(hasattr(target, 'health_level'))
+        self.assertGreaterEqual(target.health_score, 0)
+        self.assertLessEqual(target.health_score, 100)
+
+    def test_outbound_inventory_export_should_contain_health_columns(self):
+        unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKUFLOW0001-0002',
+            status='in_transit',
+            current_location_type='transit',
+            is_active=True,
+        )
+        UnitMovement.objects.create(
+            unit=unit,
+            event_type='TRANSFER_SHIPPED',
+            status='normal',
+            notes='导出健康字段',
+            operator=self.user,
+        )
+        resp = self.client.get(reverse('outbound_inventory_export'))
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn('健康分', content)
+        self.assertIn('健康等级', content)
+        self.assertIn(unit.unit_no, content)
 
 
 class ActionPermissionGuardTests(TestCase):

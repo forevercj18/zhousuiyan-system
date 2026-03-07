@@ -200,6 +200,54 @@ def _get_unit_status_display(status):
     return dict(InventoryUnit.STATUS_CHOICES).get(status, status)
 
 
+def _compute_unit_health(unit_status, hop_count, outbound_days, warn_reason='', latest_event_type=''):
+    """
+    单套健康分（0~100）：
+    - 基础分 100，按风险扣分。
+    - 仅用于看板可视化，不影响业务主流程判定。
+    """
+    score = 100
+
+    # 链路复杂度：转寄节点越多，风险越高
+    score -= min(int(hop_count or 0) * 4, 32)
+
+    # 在外时长：长期在外存在损耗/丢件风险
+    score -= min(int(outbound_days or 0) * 2, 30)
+
+    # 状态惩罚
+    if unit_status == 'in_transit':
+        score -= 5
+    elif unit_status == 'maintenance':
+        score -= 20
+    elif unit_status == 'scrapped':
+        score = 0
+
+    # 预警惩罚
+    reason = warn_reason or ''
+    if '转寄节点>' in reason:
+        score -= 10
+    if '在途>' in reason:
+        score -= 10
+    if '待执行>' in reason:
+        score -= 8
+    if '转寄在途>' in reason:
+        score -= 8
+    if '异常节点' in reason:
+        score -= 12
+
+    if latest_event_type == 'EXCEPTION':
+        score -= 10
+
+    score = max(min(int(score), 100), 0)
+    if score >= 80:
+        level = '健康'
+    elif score >= 60:
+        level = '关注'
+    else:
+        level = '风险'
+    return score, level
+
+
 def _build_unit_chain_text(unit):
     moves = UnitMovement.objects.filter(unit=unit).select_related('from_order', 'to_order').order_by('event_time')
     chain = []
@@ -1244,6 +1292,26 @@ def outbound_inventory_dashboard(request):
         if warn_reason:
             warn_reason_by_unit[unit_id] = warn_reason
 
+    # 在外平均健康分（仅统计非在库）
+    outbound_health_scores = []
+    for unit_id in all_active_ids:
+        unit_status = status_map.get(unit_id)
+        if unit_status == 'in_warehouse':
+            continue
+        latest_mv = latest_by_unit.get(unit_id)
+        hop_count = hop_counts.get(unit_id, 0)
+        outbound_days = (now - latest_mv.event_time).days if latest_mv else 0
+        warn_reason = warn_reason_by_unit.get(unit_id, '')
+        score, _ = _compute_unit_health(
+            unit_status=unit_status,
+            hop_count=hop_count,
+            outbound_days=outbound_days,
+            warn_reason=warn_reason,
+            latest_event_type=(latest_mv.event_type if latest_mv else ''),
+        )
+        outbound_health_scores.append(score)
+    summary['avg_outbound_health'] = round(sum(outbound_health_scores) / len(outbound_health_scores), 1) if outbound_health_scores else 100.0
+
     if anomaly_only:
         units = units.filter(id__in=list(warn_reason_by_unit.keys()))
 
@@ -1264,6 +1332,7 @@ def outbound_inventory_dashboard(request):
         transfer_transit = 0
         exception_count = 0
         max_out_days = 0
+        health_scores = []
         for u in sku_units:
             mv = latest_by_unit.get(u['id'])
             if not mv:
@@ -1276,6 +1345,14 @@ def outbound_inventory_dashboard(request):
                 days = (now - mv.event_time).days
                 if days > max_out_days:
                     max_out_days = days
+            score, _ = _compute_unit_health(
+                unit_status=u['status'],
+                hop_count=hop_counts.get(u['id'], 0),
+                outbound_days=(now - mv.event_time).days if mv else 0,
+                warn_reason=warn_reason_by_unit.get(u['id'], ''),
+                latest_event_type=(mv.event_type if mv else ''),
+            )
+            health_scores.append(score)
         sku_cards.append({
             'sku': sku,
             'total': total,
@@ -1286,6 +1363,7 @@ def outbound_inventory_dashboard(request):
             'exception_count': exception_count,
             'maintenance': maintenance,
             'scrapped': scrapped,
+            'avg_health_score': round(sum(health_scores) / len(health_scores), 1) if health_scores else 100.0,
             'is_warn': (max_out_days > warn_outbound_days) or (exception_count > 0),
         })
 
@@ -1306,7 +1384,14 @@ def outbound_inventory_dashboard(request):
             severity += 2
         if '转寄在途>' in warn_reason:
             severity += 2
-        enriched.append((unit, latest_mv, hop_count, outbound_days, warn_reason, severity))
+        health_score, health_level = _compute_unit_health(
+            unit_status=unit.status,
+            hop_count=hop_count,
+            outbound_days=outbound_days,
+            warn_reason=warn_reason,
+            latest_event_type=(latest_mv.event_type if latest_mv else ''),
+        )
+        enriched.append((unit, latest_mv, hop_count, outbound_days, warn_reason, severity, health_score, health_level))
 
     if anomaly_only:
         enriched = [row for row in enriched if row[4]]
@@ -1322,12 +1407,14 @@ def outbound_inventory_dashboard(request):
 
     units_page = Paginator(enriched, 10).get_page(request.GET.get('page'))
     page_units = []
-    for unit, latest_mv, hop_count, outbound_days, warn_reason, severity in units_page.object_list:
+    for unit, latest_mv, hop_count, outbound_days, warn_reason, severity, health_score, health_level in units_page.object_list:
         unit.latest_movement = latest_mv
         unit.hop_count = hop_count
         unit.outbound_days = outbound_days
         unit.warn_reason = warn_reason
         unit.warn_severity = severity
+        unit.health_score = health_score
+        unit.health_level = health_level
         page_units.append(unit)
     units_page.object_list = page_units
     for unit in units_page.object_list:
@@ -1335,6 +1422,16 @@ def outbound_inventory_dashboard(request):
         unit.hop_count = hop_counts.get(unit.id, getattr(unit, 'hop_count', 0))
         unit.outbound_days = getattr(unit, 'outbound_days', (now - unit.latest_movement.event_time).days if (unit.latest_movement and unit.status != 'in_warehouse') else 0)
         unit.warn_reason = getattr(unit, 'warn_reason', warn_reason_by_unit.get(unit.id, ''))
+        if not hasattr(unit, 'health_score') or not hasattr(unit, 'health_level'):
+            score, level = _compute_unit_health(
+                unit_status=unit.status,
+                hop_count=unit.hop_count,
+                outbound_days=unit.outbound_days,
+                warn_reason=unit.warn_reason,
+                latest_event_type=(unit.latest_movement.event_type if unit.latest_movement else ''),
+            )
+            unit.health_score = score
+            unit.health_level = level
 
     # 节点时间线
     timeline_qs = UnitMovement.objects.select_related(
@@ -1503,7 +1600,7 @@ def outbound_inventory_export(request):
     writer = csv.writer(resp)
     writer.writerow([
         '单套编号', 'SKU编码', 'SKU名称', '状态', '当前订单', '最近物流单号', '最近节点', '最近节点时间',
-        '在途天数', '转寄节点数', '预警', '拓扑链路'
+        '在途天数', '转寄节点数', '健康分', '健康等级', '预警', '拓扑链路'
     ])
 
     unit_ids = list(units.values_list('id', flat=True))
@@ -1549,6 +1646,13 @@ def outbound_inventory_export(request):
 
         if anomaly_only and not warn_reason:
             continue
+        health_score, health_level = _compute_unit_health(
+            unit_status=unit.status,
+            hop_count=hop_count,
+            outbound_days=outbound_days,
+            warn_reason=warn_reason,
+            latest_event_type=(latest.event_type if latest else ''),
+        )
 
         writer.writerow([
             unit.unit_no,
@@ -1561,6 +1665,8 @@ def outbound_inventory_export(request):
             latest.event_time.strftime('%Y-%m-%d %H:%M:%S') if latest else '',
             outbound_days,
             hop_count,
+            health_score,
+            health_level,
             warn_reason,
             " -> ".join(chain_map.get(unit.id, [])),
         ])

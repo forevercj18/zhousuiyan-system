@@ -171,6 +171,7 @@
         <div class="stat-card"><div class="stat-title">在途转寄套数</div><div class="stat-value">{{ summary.transfer_in_transit }}</div></div>
         <div class="stat-card"><div class="stat-title">今日新发出</div><div class="stat-value">{{ summary.today_out }}</div></div>
         <div class="stat-card"><div class="stat-title">今日回仓</div><div class="stat-value text-success">{{ summary.today_returned }}</div></div>
+        <div class="stat-card"><div class="stat-title">在外健康均分</div><div class="stat-value">{{ summary.avg_outbound_health }}</div></div>
         <a class="stat-card text-decoration-none" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}anomaly_only=1">
             <div class="stat-title">异常节点数（点我筛选）</div>
             <div class="stat-value text-danger">{{ summary.exception_nodes }}</div>
@@ -190,6 +191,7 @@
                         <th>在途数量</th>
                         <th>转寄在途</th>
                         <th>最长在途天数</th>
+                        <th>健康均分</th>
                         <th>异常数</th>
                     </tr>
                 </thead>
@@ -202,10 +204,11 @@
                         <td>{{ row.transit }}</td>
                         <td>{{ row.transfer_transit }}</td>
                         <td>{{ row.max_out_days }}</td>
+                        <td>{{ row.avg_health_score }}</td>
                         <td>{{ row.exception_count }}</td>
                     </tr>
                     {% empty %}
-                    <tr><td colspan="7" class="text-center">暂无SKU数据</td></tr>
+                    <tr><td colspan="8" class="text-center">暂无SKU数据</td></tr>
                     {% endfor %}
                 </tbody>
             </table>
@@ -249,6 +252,7 @@
                         <th>最近物流单号</th>
                         <th>最近节点</th>
                         <th>最近时间</th>
+                        <th>健康度</th>
                         <th>预警</th>
                     </tr>
                 </thead>
@@ -262,10 +266,19 @@
                         <td>{{ unit.last_tracking_no|default:"-" }}</td>
                         <td>{% if unit.latest_movement %}{{ unit.latest_movement.get_event_type_display }}{% else %}-{% endif %}</td>
                         <td>{% if unit.latest_movement %}{{ unit.latest_movement.event_time|date:"Y-m-d H:i" }}{% else %}-{% endif %}</td>
+                        <td>
+                            {% if unit.health_level == '健康' %}
+                            <span class="badge text-bg-success">{{ unit.health_level }} {{ unit.health_score }}</span>
+                            {% elif unit.health_level == '关注' %}
+                            <span class="badge text-bg-warning">{{ unit.health_level }} {{ unit.health_score }}</span>
+                            {% else %}
+                            <span class="badge text-bg-danger">{{ unit.health_level }} {{ unit.health_score }}</span>
+                            {% endif %}
+                        </td>
                         <td>{% if unit.warn_reason %}<span class="badge text-bg-warning">{{ unit.warn_reason }}</span>{% else %}-{% endif %}</td>
                     </tr>
                     {% empty %}
-                    <tr><td colspan="8" class="text-center">暂无单套数据，先点击“初始化单套编号”</td></tr>
+                    <tr><td colspan="9" class="text-center">暂无单套数据，先点击“初始化单套编号”</td></tr>
                     {% endfor %}
                 </tbody>
             </table>
