@@ -1,4 +1,5 @@
 ﻿{% extends "base.html" %}
+{% load permission_tags %}
 
 {% block title %}订单详情 - 宝宝周岁宴道具租赁系统{% endblock %}
 {% block page_title %}订单详情{% endblock %}
@@ -263,7 +264,7 @@
     <div class="panel action-panel" style="margin-top: 16px;">
         <h3>状态操作</h3>
 
-        {% if order.status == 'pending' %}
+        {% if order.status == 'pending' and request.user|has_action_perm:'order.confirm_delivery' %}
         <form method="post" action="{% url 'order_mark_confirmed' order.id %}">
             {% csrf_token %}
             <div class="action-row">
@@ -274,7 +275,7 @@
                 <button type="submit" class="btn btn-primary">确认并进入待发货</button>
             </div>
         </form>
-        {% elif order.status == 'confirmed' %}
+        {% elif order.status == 'confirmed' and request.user|has_action_perm:'order.confirm_delivery' %}
         <form method="post" action="{% url 'order_mark_delivered' order.id %}">
             {% csrf_token %}
             <div class="action-row">
@@ -285,7 +286,7 @@
                 <button type="submit" class="btn btn-primary">标记发货</button>
             </div>
         </form>
-        {% elif order.status == 'delivered' %}
+        {% elif order.status == 'delivered' and request.user|has_action_perm:'order.mark_returned' %}
         <form method="post" action="{% url 'order_mark_returned' order.id %}">
             {% csrf_token %}
             <div class="action-row">
@@ -307,7 +308,7 @@
         </form>
         {% endif %}
 
-        {% if order.status != 'completed' and order.status != 'cancelled' %}
+        {% if order.status != 'completed' and order.status != 'cancelled' and request.user|has_action_perm:'order.force_cancel' %}
         <form method="post" action="{% url 'order_cancel' order.id %}">
             {% csrf_token %}
             <div class="action-row">
@@ -322,9 +323,13 @@
     </div>
 
     <div class="top-actions" style="margin-top: 16px; justify-content: flex-end;">
+        {% if order.status == 'pending' or order.status == 'confirmed' %}
         <a href="{% url 'order_edit' order.id %}" class="btn btn-primary">编辑订单</a>
+        {% endif %}
         <a href="{% url 'orders_list' %}" class="btn btn-secondary">返回列表</a>
     </div>
 </div>
 {% endblock %}
+
+
 

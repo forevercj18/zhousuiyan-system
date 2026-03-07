@@ -66,6 +66,16 @@
                                value="{{ settings.max_transfer_gap_days|default:'3' }}" min="0" required>
                         <small class="form-text">来源单与目标单预定日期差超过该值时，不参与转寄候选</small>
                     </div>
+                    <div class="form-group">
+                        <label for="transfer_pending_timeout_hours">转寄待执行超时阈值（小时）</label>
+                        <input type="number" id="transfer_pending_timeout_hours" name="transfer_pending_timeout_hours" class="form-control"
+                               value="{{ settings.transfer_pending_timeout_hours|default:'24' }}" min="1" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="transfer_shipped_timeout_days">转寄在途超时阈值（天）</label>
+                        <input type="number" id="transfer_shipped_timeout_days" name="transfer_shipped_timeout_days" class="form-control"
+                               value="{{ settings.transfer_shipped_timeout_days|default:'3' }}" min="1" required>
+                    </div>
                 </div>
             </div>
 
@@ -93,6 +103,16 @@
             <div class="tab-pane fade {% if active_tab == 'system' %}show active{% endif %}" id="system-pane" role="tabpanel" aria-labelledby="system-tab">
                 <div class="form-section">
                     <h3>系统与界面</h3>
+                    <div class="form-group">
+                        <label for="outbound_max_days_warn">在途超时预警阈值（天）</label>
+                        <input type="number" id="outbound_max_days_warn" name="outbound_max_days_warn" class="form-control"
+                               value="{{ settings.outbound_max_days_warn|default:'10' }}" min="1" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="outbound_max_hops_warn">最大转寄节点预警阈值</label>
+                        <input type="number" id="outbound_max_hops_warn" name="outbound_max_hops_warn" class="form-control"
+                               value="{{ settings.outbound_max_hops_warn|default:'4' }}" min="1" required>
+                    </div>
                     <div class="info-grid">
                         <div class="info-item">
                             <label>系统版本：</label>

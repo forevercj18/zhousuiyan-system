@@ -7,71 +7,62 @@
 <div class="dashboard">
     <!-- 统计卡片 -->
     <div class="stats-grid">
+        {% for card in role_dashboard.focus_cards %}
         <div class="stat-card">
+            {% if card.key == 'pending_orders' %}
             <div class="stat-icon" style="background: #ff9800;">&#128203;</div>
-            <div class="stat-info">
-                <div class="stat-label">待处理订单</div>
-                <div class="stat-value">{{ stats.pending_orders }}</div>
-            </div>
-        </div>
-
-        <div class="stat-card">
-            <div class="stat-icon" style="background: #4caf50;">&#9989;</div>
-            <div class="stat-info">
-                <div class="stat-label">仓库可用库存</div>
-                <div class="stat-value">{{ stats.warehouse_available_stock }}</div>
-            </div>
-        </div>
-
-        <div class="stat-card">
+            {% elif card.key == 'delivered_orders' %}
             <div class="stat-icon" style="background: #2196f3;">&#128666;</div>
-            <div class="stat-info">
-                <div class="stat-label">已发货订单</div>
-                <div class="stat-value">{{ stats.delivered_orders }}</div>
-            </div>
-        </div>
-
-        <div class="stat-card">
+            {% elif card.key == 'completed_orders' %}
+            <div class="stat-icon" style="background: #10b981;">&#9989;</div>
+            {% elif card.key == 'warehouse_available_stock' %}
+            <div class="stat-icon" style="background: #4caf50;">&#9989;</div>
+            {% elif card.key == 'low_stock_parts' %}
             <div class="stat-icon" style="background: #f44336;">&#9888;</div>
-            <div class="stat-info">
-                <div class="stat-label">低库存部件</div>
-                <div class="stat-value">{{ stats.low_stock_parts }}</div>
-            </div>
-        </div>
-
-        <div class="stat-card">
-            <div class="stat-icon" style="background: #607d8b;">&#128257;</div>
-            <div class="stat-info">
-                <div class="stat-label">转寄可用数量</div>
-                <div class="stat-value">{{ stats.transfer_available_count }}</div>
-            </div>
-        </div>
-
-        <div class="stat-card">
+            {% elif card.key == 'total_revenue' %}
             <div class="stat-icon" style="background: #9c27b0;">&#128176;</div>
-            <div class="stat-info">
-                <div class="stat-label">总营收</div>
-                <div class="stat-value">￥{{ stats.total_revenue }}</div>
-            </div>
-        </div>
-
-        <div class="stat-card">
+            {% elif card.key == 'pending_revenue' %}
             <div class="stat-icon" style="background: #00bcd4;">&#128181;</div>
+            {% elif card.key == 'pending_transfer_tasks' %}
+            <div class="stat-icon" style="background: #3b82f6;">&#128260;</div>
+            {% elif card.key == 'transfer_available_count' %}
+            <div class="stat-icon" style="background: #64748b;">&#10227;</div>
+            {% elif card.key == 'total_orders' %}
+            <div class="stat-icon" style="background: #7c3aed;">&#128221;</div>
+            {% else %}
+            <div class="stat-icon" style="background: #64748b;">&#128200;</div>
+            {% endif %}
             <div class="stat-info">
-                <div class="stat-label">待收款</div>
-                <div class="stat-value">￥{{ stats.pending_revenue }}</div>
+                <div class="stat-label">{{ card.label }}</div>
+                {% if card.key == 'total_revenue' or card.key == 'pending_revenue' %}
+                <div class="stat-value">￥{{ card.value }}</div>
+                {% else %}
+                <div class="stat-value">{{ card.value }}</div>
+                {% endif %}
             </div>
         </div>
+        {% endfor %}
+    </div>
+
+    <div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
+        <span class="badge text-bg-light border">当前角色：{{ request.user.get_role_display }}</span>
+        <span class="badge text-bg-info">看板类型：{{ role_dashboard.view_type }}</span>
+        {% for risk in role_dashboard.risk_entries %}
+            <a href="{% url risk.url_name %}{% if risk.query %}?{{ risk.query }}{% endif %}"
+               class="badge text-decoration-none
+               {% if risk.severity == 'danger' %}text-bg-danger{% elif risk.severity == 'warning' %}text-bg-warning{% elif risk.severity == 'info' %}text-bg-info{% else %}text-bg-secondary{% endif %}">
+                {{ risk.label }}：{{ risk.value }}
+            </a>
+        {% endfor %}
     </div>
 
     <!-- 快捷操作 -->
     <div class="quick-actions">
         <h3>快捷操作</h3>
         <div class="action-buttons">
-            <a href="{% url 'order_create' %}" class="btn btn-primary">新建订单</a>
-            <a href="{% url 'workbench' %}" class="btn btn-outline-secondary">订单处理</a>
-            <a href="{% url 'calendar' %}" class="btn btn-outline-secondary">查看排期</a>
-            <a href="{% url 'purchase_order_create' %}" class="btn btn-outline-secondary">创建采购单</a>
+            {% for action in role_dashboard.quick_actions %}
+            <a href="{% url action.url_name %}" class="btn btn-{{ action.style }}">{{ action.label }}</a>
+            {% endfor %}
         </div>
     </div>
 

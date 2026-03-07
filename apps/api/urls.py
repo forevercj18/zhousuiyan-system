@@ -19,4 +19,5 @@ urlpatterns = [
     path('transfers/', views.api_transfers, name='api_transfers'),
     path('transfers/create/', views.api_transfer_create, name='api_transfer_create'),
     path('dashboard/stats/', views.api_dashboard_stats, name='api_dashboard_stats'),
+    path('dashboard/role-view/', views.api_dashboard_role_view, name='api_dashboard_role_view'),
 ]

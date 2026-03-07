@@ -38,6 +38,11 @@ urlpatterns = [
     path('transfers/<int:transfer_id>/complete/', views.transfer_complete, name='transfer_complete'),
     path('transfers/<int:transfer_id>/cancel/', views.transfer_cancel, name='transfer_cancel'),
 
+    # 在外库存看板
+    path('outbound-inventory/', views.outbound_inventory_dashboard, name='outbound_inventory_dashboard'),
+    path('outbound-inventory/export/', views.outbound_inventory_export, name='outbound_inventory_export'),
+    path('outbound-inventory/export-topology/', views.outbound_inventory_topology_export, name='outbound_inventory_topology_export'),
+
     # SKU管理
     path('skus/', views.skus_list, name='skus_list'),
     path('skus/create/', views.sku_create, name='sku_create'),

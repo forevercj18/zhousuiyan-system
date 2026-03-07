@@ -7,8 +7,8 @@ from decimal import Decimal
 from difflib import SequenceMatcher
 import math
 import re
-from django.db.models import Sum, Q, Count
-from .models import SystemSettings, Order, OrderItem, SKU, Transfer, TransferAllocation
+from django.db.models import Sum, Q, Count, F
+from .models import SystemSettings, Order, OrderItem, SKU, Transfer, TransferAllocation, InventoryUnit, Part
 
 
 def get_system_settings():
@@ -29,8 +29,162 @@ def get_system_settings():
     settings.setdefault('warehouse_sender_name', '仓库发货员')
     settings.setdefault('warehouse_sender_phone', '')
     settings.setdefault('warehouse_sender_address', '仓库地址未配置')
+    settings.setdefault('transfer_pending_timeout_hours', 24)
+    settings.setdefault('transfer_shipped_timeout_days', 3)
+    settings.setdefault('outbound_max_days_warn', 10)
+    settings.setdefault('outbound_max_hops_warn', 4)
 
     return settings
+
+
+def get_dashboard_stats_payload(include_transfer_available=False):
+    """统一工作台统计口径（页面/API共用）。"""
+    total_stock = SKU.objects.filter(is_active=True).aggregate(total=Sum('stock'))['total'] or 0
+    occupied_raw = OrderItem.objects.filter(
+        order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
+        sku__is_active=True
+    ).aggregate(total=Sum('quantity'))['total'] or 0
+    transfer_allocated = TransferAllocation.objects.filter(
+        target_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
+        source_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
+        sku__is_active=True,
+        status__in=['locked', 'consumed']
+    ).aggregate(total=Sum('quantity'))['total'] or 0
+    occupied_stock = max(occupied_raw - transfer_allocated, 0)
+    warehouse_available_stock = max(total_stock - occupied_stock, 0)
+    total_revenue = Order.objects.filter(status='completed').aggregate(total=Sum('total_amount'))['total'] or Decimal('0.00')
+    pending_revenue = Order.objects.exclude(status__in=['completed', 'cancelled']).aggregate(total=Sum('balance'))['total'] or Decimal('0.00')
+
+    stats = {
+        'pending_orders': Order.objects.filter(status='pending').count(),
+        'delivered_orders': Order.objects.filter(status='delivered').count(),
+        'completed_orders': Order.objects.filter(status='completed').count(),
+        'warehouse_available_stock': warehouse_available_stock,
+        'total_orders': Order.objects.count(),
+        'total_skus': SKU.objects.filter(is_active=True).count(),
+        'low_stock_parts': Part.objects.filter(is_active=True, current_stock__lt=F('safety_stock')).count(),
+        'total_revenue': total_revenue,
+        'pending_revenue': pending_revenue,
+    }
+    if include_transfer_available:
+        stats['transfer_available_count'] = len(find_transfer_candidates())
+    return stats
+
+
+def get_role_dashboard_payload(user):
+    """
+    角色看板数据层V1（只读聚合）：
+    - 输出基础统计
+    - 根据角色输出推荐关注卡片
+    """
+    base = get_dashboard_stats_payload(include_transfer_available=True)
+    role = getattr(user, 'role', 'warehouse_staff')
+
+    pending_transfer_tasks = Transfer.objects.filter(status='pending').count()
+    overdue_pending_transfers = 0
+
+    risk_entries = [
+        {
+            'key': 'pending_transfer_tasks',
+            'label': '待执行转寄',
+            'value': pending_transfer_tasks,
+            'url_name': 'transfers_list',
+            'query': 'panel=tasks&status=pending',
+            'severity': 'warning',
+        },
+        {
+            'key': 'low_stock_parts',
+            'label': '低库存部件',
+            'value': base['low_stock_parts'],
+            'url_name': 'parts_inventory_list',
+            'query': 'low=1',
+            'severity': 'danger',
+        },
+    ]
+
+    if role in ['admin', 'manager']:
+        view_type = 'business'
+        focus_cards = [
+            {'key': 'total_revenue', 'label': '总营收', 'value': base['total_revenue']},
+            {'key': 'pending_revenue', 'label': '待收款', 'value': base['pending_revenue']},
+            {'key': 'pending_orders', 'label': '待处理订单', 'value': base['pending_orders']},
+            {'key': 'completed_orders', 'label': '已完成订单', 'value': base['completed_orders']},
+            {'key': 'transfer_available_count', 'label': '可转寄候选', 'value': base['transfer_available_count']},
+        ]
+        quick_actions = [
+            {'label': '新建订单', 'url_name': 'order_create', 'style': 'primary'},
+            {'label': '订单中心', 'url_name': 'orders_list', 'style': 'outline-secondary'},
+            {'label': '转寄中心', 'url_name': 'transfers_list', 'style': 'outline-secondary'},
+            {'label': '查看排期', 'url_name': 'calendar', 'style': 'outline-secondary'},
+            {'label': '创建采购单', 'url_name': 'purchase_order_create', 'style': 'outline-secondary'},
+        ]
+        risk_entries.insert(0, {
+            'key': 'pending_orders',
+            'label': '待处理订单',
+            'value': base['pending_orders'],
+            'url_name': 'orders_list',
+            'query': 'status=pending',
+            'severity': 'info',
+        })
+    elif role in ['warehouse_manager', 'warehouse_staff']:
+        view_type = 'warehouse'
+        focus_cards = [
+            {'key': 'warehouse_available_stock', 'label': '仓库可用库存', 'value': base['warehouse_available_stock']},
+            {'key': 'low_stock_parts', 'label': '低库存部件', 'value': base['low_stock_parts']},
+            {'key': 'delivered_orders', 'label': '已发货订单', 'value': base['delivered_orders']},
+            {'key': 'pending_transfer_tasks', 'label': '待执行转寄任务', 'value': pending_transfer_tasks},
+        ]
+        quick_actions = [
+            {'label': '订单中心', 'url_name': 'orders_list', 'style': 'primary'},
+            {'label': '转寄中心', 'url_name': 'transfers_list', 'style': 'outline-secondary'},
+            {'label': '产品管理', 'url_name': 'skus_list', 'style': 'outline-secondary'},
+            {'label': '在外库存', 'url_name': 'outbound_inventory_dashboard', 'style': 'outline-secondary'},
+            {'label': '部件库存', 'url_name': 'parts_inventory_list', 'style': 'outline-secondary'},
+        ]
+        risk_entries.insert(0, {
+            'key': 'pending_orders',
+            'label': '待处理订单',
+            'value': base['pending_orders'],
+            'url_name': 'orders_list',
+            'query': 'status=pending',
+            'severity': 'info',
+        })
+    else:
+        view_type = 'service'
+        focus_cards = [
+            {'key': 'pending_orders', 'label': '待处理订单', 'value': base['pending_orders']},
+            {'key': 'delivered_orders', 'label': '已发货订单', 'value': base['delivered_orders']},
+            {'key': 'pending_revenue', 'label': '待收款', 'value': base['pending_revenue']},
+            {'key': 'total_orders', 'label': '订单总数', 'value': base['total_orders']},
+        ]
+        quick_actions = [
+            {'label': '新建订单', 'url_name': 'order_create', 'style': 'primary'},
+            {'label': '订单中心', 'url_name': 'orders_list', 'style': 'outline-secondary'},
+            {'label': '转寄中心', 'url_name': 'transfers_list', 'style': 'outline-secondary'},
+            {'label': '查看排期', 'url_name': 'calendar', 'style': 'outline-secondary'},
+        ]
+        risk_entries.insert(0, {
+            'key': 'pending_orders',
+            'label': '待处理订单',
+            'value': base['pending_orders'],
+            'url_name': 'orders_list',
+            'query': 'status=pending',
+            'severity': 'info',
+        })
+
+    return {
+        'role': role,
+        'view_type': view_type,
+        'base_stats': base,
+        'focus_cards': focus_cards,
+        'quick_actions': quick_actions,
+        'risk_entries': risk_entries,
+        'risk_hints': {
+            'pending_transfer_tasks': pending_transfer_tasks,
+            'overdue_pending_transfers': overdue_pending_transfers,
+            'low_stock_parts': base['low_stock_parts'],
+        },
+    }
 
 
 def check_sku_availability(sku_id, event_date, quantity=1, exclude_order_id=None, rental_days=1):
@@ -807,6 +961,20 @@ def build_transfer_pool_rows():
             return f"约 {score} km"
         return f"文本差异分 {score}"
 
+    def _preview_units(order_id, sku_id, qty=1):
+        unit_nos = list(
+            InventoryUnit.objects.filter(
+                current_order_id=order_id,
+                sku_id=sku_id,
+                is_active=True,
+            ).order_by('unit_no').values_list('unit_no', flat=True)[: max(int(qty or 1), 1) + 1]
+        )
+        if not unit_nos:
+            return '-'
+        if len(unit_nos) > int(qty or 1):
+            return '、'.join(unit_nos[: int(qty or 1)]) + '...'
+        return '、'.join(unit_nos)
+
     target_orders = Order.objects.filter(
         status__in=['pending', 'confirmed', 'delivered']
     ).prefetch_related('items__sku').order_by('event_date', 'created_at')
@@ -852,11 +1020,13 @@ def build_transfer_pool_rows():
                 }
                 current_event_date = source_order.event_date
                 current_source_type = 'transfer'
+                current_units_preview = _preview_units(source_order.id, item.sku_id, item.quantity)
             else:
                 current_source_text = '仓库发货'
                 current_sender = warehouse_sender
                 current_event_date = None
                 current_source_type = 'warehouse'
+                current_units_preview = '-'
             current_distance_desc = _distance_desc(current_sender.get('address', ''), order.delivery_address)
 
             if top:
@@ -870,6 +1040,7 @@ def build_transfer_pool_rows():
                 rec_ship_date = rec_source.event_date + timedelta(days=1)
                 recommended_event_date = rec_source.event_date
                 recommended_source_type = 'transfer'
+                recommended_units_preview = _preview_units(rec_source.id, item.sku_id, item.quantity)
                 if top.get('distance_mode') == 'km':
                     recommended_distance_desc = f"约 {top.get('distance_score')} km"
                 else:
@@ -880,6 +1051,7 @@ def build_transfer_pool_rows():
                 rec_ship_date = order.event_date - timedelta(days=ship_lead_days)
                 recommended_event_date = None
                 recommended_source_type = 'warehouse'
+                recommended_units_preview = '-'
                 recommended_distance_desc = _distance_desc(rec_sender.get('address', ''), order.delivery_address)
 
             rows.append({
@@ -891,11 +1063,13 @@ def build_transfer_pool_rows():
                 'current_event_date': current_event_date,
                 'current_source_type': current_source_type,
                 'current_distance_desc': current_distance_desc,
+                'current_units_preview': current_units_preview,
                 'recommended_source_text': rec_source_text,
                 'recommended_sender': rec_sender,
                 'recommended_event_date': recommended_event_date,
                 'recommended_source_type': recommended_source_type,
                 'recommended_distance_desc': recommended_distance_desc,
+                'recommended_units_preview': recommended_units_preview,
                 'recommended_ship_date': rec_ship_date,
                 'has_pending_task': has_pending_task,
                 'can_recommend': not has_pending_task,

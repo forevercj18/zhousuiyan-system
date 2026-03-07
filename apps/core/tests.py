@@ -1,12 +1,18 @@
 from datetime import date, timedelta
 from decimal import Decimal
+import json
+from pathlib import Path
 
 from django.contrib.auth import get_user_model
+from django.http import HttpResponse
 from django.test import TestCase
+from django.test.client import RequestFactory
 from django.urls import reverse
 
+from .middleware import AuditLogMiddleware
 from .models import (
     AuditLog,
+    InventoryUnit,
     Order,
     OrderItem,
     Part,
@@ -1787,3 +1793,636 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(len(target_row.transfer_allocations_display), 1)
         self.assertEqual(target_row.transfer_allocations_display[0]['order_no'], source.order_no)
         self.assertEqual(target_row.transfer_allocations_display[0]['quantity'], 1)
+
+    def test_dashboard_should_render_role_risk_entries_and_quick_actions(self):
+        resp = self.client.get(reverse('dashboard'))
+        self.assertEqual(resp.status_code, 200)
+        role_dashboard = resp.context['role_dashboard']
+        self.assertTrue(any(item['url_name'] == 'order_create' for item in role_dashboard['quick_actions']))
+        self.assertTrue(any(item['key'] == 'pending_orders' for item in role_dashboard['risk_entries']))
+        self.assertTrue(any(item['key'] == 'low_stock_parts' and item['query'] == 'low=1' for item in role_dashboard['risk_entries']))
+
+    def test_parts_inventory_low_filter_should_only_return_low_stock_parts(self):
+        low_part = Part.objects.create(
+            name='低库存部件',
+            spec='L1',
+            category='accessory',
+            unit='个',
+            current_stock=1,
+            safety_stock=3,
+            is_active=True,
+        )
+        normal_part = Part.objects.create(
+            name='正常库存部件',
+            spec='N1',
+            category='accessory',
+            unit='个',
+            current_stock=5,
+            safety_stock=3,
+            is_active=True,
+        )
+        resp = self.client.get(reverse('parts_inventory_list') + '?low=1')
+        self.assertEqual(resp.status_code, 200)
+        ids = [part.id for part in resp.context['parts_page'].object_list]
+        self.assertIn(low_part.id, ids)
+        self.assertNotIn(normal_part.id, ids)
+
+
+class ActionPermissionGuardTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username='perm_admin',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.manager = User.objects.create_user(
+            username='perm_manager',
+            password='test123',
+            role='manager',
+            is_superuser=False,
+            is_staff=True,
+        )
+        self.warehouse_manager = User.objects.create_user(
+            username='perm_wh_manager',
+            password='test123',
+            role='warehouse_manager',
+            is_superuser=False,
+            is_staff=True,
+        )
+        self.sku = SKU.objects.create(
+            code='SKU-PERM-1',
+            name='权限测试套餐',
+            category='主题套餐',
+            rental_price=Decimal('100.00'),
+            deposit=Decimal('50.00'),
+            stock=5,
+            is_active=True,
+        )
+
+    def test_manager_should_not_force_cancel_order(self):
+        order = Order.objects.create(
+            customer_name='待取消',
+            customer_phone='13900000001',
+            delivery_address='A',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='pending',
+            created_by=self.admin,
+        )
+        self.client.login(username='perm_manager', password='test123')
+        resp = self.client.post(reverse('order_cancel', kwargs={'order_id': order.id}), {'reason': 'test'}, follow=True)
+        self.assertEqual(resp.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'pending')
+        self.assertContains(resp, 'order.force_cancel', status_code=200)
+
+    def test_warehouse_manager_should_not_cancel_transfer_task(self):
+        source = Order.objects.create(
+            customer_name='来源单',
+            customer_phone='13900000002',
+            delivery_address='B',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.admin,
+            ship_date=date.today() - timedelta(days=1),
+            return_date=date.today() + timedelta(days=1),
+        )
+        target = Order.objects.create(
+            customer_name='目标单',
+            customer_phone='13900000003',
+            delivery_address='C',
+            event_date=date.today() + timedelta(days=5),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.admin,
+            ship_date=date.today() + timedelta(days=4),
+            return_date=date.today() + timedelta(days=6),
+        )
+        transfer = Transfer.objects.create(
+            order_from=source,
+            order_to=target,
+            sku=self.sku,
+            quantity=1,
+            gap_days=5,
+            status='pending',
+            created_by=self.admin,
+        )
+        self.client.login(username='perm_wh_manager', password='test123')
+        resp = self.client.post(reverse('transfer_cancel', kwargs={'transfer_id': transfer.id}), follow=True)
+        self.assertEqual(resp.status_code, 200)
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'pending')
+        self.assertContains(resp, 'transfer.cancel_task', status_code=200)
+
+
+class AuditDiffLogTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='audit_diff_admin',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.sku = SKU.objects.create(
+            code='SKU-AUDIT-1',
+            name='审计测试套餐',
+            category='主题套餐',
+            rental_price=Decimal('168.00'),
+            deposit=Decimal('200.00'),
+            stock=3,
+            is_active=True,
+        )
+        self.client.login(username='audit_diff_admin', password='test123')
+
+    def test_order_cancel_should_write_before_after_diff(self):
+        order = Order.objects.create(
+            customer_name='取消客户',
+            customer_phone='13800000001',
+            delivery_address='广东省深圳市南山区科技园',
+            event_date=date.today() + timedelta(days=2),
+            rental_days=1,
+            status='pending',
+            notes='原备注',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=self.sku.rental_price,
+        )
+
+        resp = self.client.post(
+            reverse('order_cancel', kwargs={'order_id': order.id}),
+            {'reason': '审计测试取消'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'cancelled')
+
+        log = AuditLog.objects.filter(module='订单', target=order.order_no).order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertIn('before', payload)
+        self.assertIn('after', payload)
+        self.assertEqual(payload['before']['status'], 'pending')
+        self.assertEqual(payload['after']['status'], 'cancelled')
+        self.assertIn('status', payload.get('changed_fields', []))
+
+    def test_transfer_cancel_should_write_before_after_diff(self):
+        source = Order.objects.create(
+            customer_name='来源',
+            customer_phone='13800000002',
+            delivery_address='A',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标',
+            customer_phone='13800000003',
+            delivery_address='B',
+            event_date=date.today() + timedelta(days=8),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+        )
+        transfer = Transfer.objects.create(
+            order_from=source,
+            order_to=target,
+            sku=self.sku,
+            quantity=1,
+            gap_days=8,
+            status='pending',
+            created_by=self.user,
+        )
+
+        resp = self.client.post(reverse('transfer_cancel', kwargs={'transfer_id': transfer.id}), follow=True)
+        self.assertEqual(resp.status_code, 200)
+        transfer.refresh_from_db()
+        self.assertEqual(transfer.status, 'cancelled')
+
+        log = AuditLog.objects.filter(module='转寄', target=f'任务#{transfer.id}').order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertEqual(payload['before']['status'], 'pending')
+        self.assertEqual(payload['after']['status'], 'cancelled')
+        self.assertIn('status', payload.get('changed_fields', []))
+
+    def test_settings_save_should_write_before_after_diff(self):
+        SystemSettings.objects.update_or_create(key='ship_lead_days', defaults={'value': '2'})
+        SystemSettings.objects.update_or_create(key='buffer_days', defaults={'value': '1'})
+
+        resp = self.client.post(
+            reverse('settings'),
+            {
+                'active_tab': 'order',
+                'ship_lead_days': '3',
+                'return_offset_days': '1',
+                'buffer_days': '4',
+                'max_transfer_gap_days': '5',
+                'warehouse_sender_name': '仓库A',
+                'warehouse_sender_phone': '18800000000',
+                'warehouse_sender_address': '广东省深圳市南山区',
+                'transfer_pending_timeout_hours': '24',
+                'transfer_shipped_timeout_days': '3',
+                'outbound_max_days_warn': '10',
+                'outbound_max_hops_warn': '4',
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        log = AuditLog.objects.filter(module='系统设置', target='settings').order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertEqual(payload['before']['ship_lead_days'], '2')
+        self.assertEqual(payload['after']['ship_lead_days'], '3')
+        self.assertIn('ship_lead_days', payload.get('changed_fields', []))
+
+    def test_order_confirm_should_write_structured_diff(self):
+        order = Order.objects.create(
+            customer_name='确认客户',
+            customer_phone='13800000009',
+            delivery_address='广东省深圳市福田区',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=self.sku.rental_price,
+        )
+        resp = self.client.post(
+            reverse('order_mark_confirmed', kwargs={'order_id': order.id}),
+            {'deposit_paid': '200.00'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'confirmed')
+        log = AuditLog.objects.filter(module='订单', target=order.order_no).order_by('-created_at').first()
+        payload = json.loads(log.details)
+        self.assertEqual(payload['summary'], '确认订单')
+        self.assertEqual(payload['before']['status'], 'pending')
+        self.assertEqual(payload['after']['status'], 'confirmed')
+
+    def test_init_units_should_write_audit_log(self):
+        InventoryUnit.objects.all().delete()
+        resp = self.client.get(reverse('outbound_inventory_dashboard') + '?init_units=1', follow=True)
+        self.assertEqual(resp.status_code, 200)
+        log = AuditLog.objects.filter(module='在外库存', target='inventory_units.bootstrap').order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertEqual(payload['summary'], '初始化单套库存编号')
+        self.assertIn('created_units', payload.get('after', {}))
+
+
+class AuditLogExportTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='audit_export_admin',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.client.login(username='audit_export_admin', password='test123')
+
+    def test_audit_logs_export_should_return_filtered_csv(self):
+        AuditLog.objects.create(
+            user=self.user,
+            action='update',
+            module='订单',
+            target='ORD-EXPORT-1',
+            details=json.dumps(
+                {
+                    'summary': '修改订单信息',
+                    'before': {'status': 'pending'},
+                    'after': {'status': 'confirmed'},
+                    'changed_fields': ['status'],
+                    'extra': {},
+                },
+                ensure_ascii=False,
+            ),
+            ip_address=None,
+        )
+        AuditLog.objects.create(
+            user=self.user,
+            action='create',
+            module='采购',
+            target='PO-EXPORT-1',
+            details='创建采购单',
+            ip_address=None,
+        )
+
+        resp = self.client.get(
+            reverse('audit_logs'),
+            {'module': '订单', 'export': '1'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('text/csv', resp['Content-Type'])
+        self.assertIn('attachment; filename=\"audit_logs.csv\"', resp['Content-Disposition'])
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn('ORD-EXPORT-1', content)
+        self.assertIn('修改订单信息', content)
+        self.assertNotIn('PO-EXPORT-1', content)
+        self.assertIn(',app,', content)
+        self.assertIn('Before(JSON)', content)
+        self.assertIn('After(JSON)', content)
+        self.assertIn('Extra(JSON)', content)
+
+    def test_audit_logs_export_changed_only_should_exclude_no_change_and_plain_text(self):
+        AuditLog.objects.create(
+            user=self.user,
+            action='update',
+            module='订单',
+            target='ORD-CHANGED-1',
+            details=json.dumps(
+                {
+                    'summary': '有变更',
+                    'before': {'status': 'pending'},
+                    'after': {'status': 'confirmed'},
+                    'changed_fields': ['status'],
+                    'extra': {},
+                },
+                ensure_ascii=False,
+            ),
+            ip_address=None,
+        )
+        AuditLog.objects.create(
+            user=self.user,
+            action='update',
+            module='订单',
+            target='ORD-NOCHANGE-1',
+            details=json.dumps(
+                {
+                    'summary': '无变更',
+                    'before': {'status': 'pending'},
+                    'after': {'status': 'pending'},
+                    'changed_fields': [],
+                    'extra': {},
+                },
+                ensure_ascii=False,
+            ),
+            ip_address=None,
+        )
+        AuditLog.objects.create(
+            user=self.user,
+            action='create',
+            module='订单',
+            target='ORD-PLAIN-1',
+            details='纯文本日志',
+            ip_address=None,
+        )
+
+        resp = self.client.get(
+            reverse('audit_logs'),
+            {'module': '订单', 'structured_only': '1', 'changed_only': '1', 'export': '1'},
+        )
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn('ORD-CHANGED-1', content)
+        self.assertNotIn('ORD-NOCHANGE-1', content)
+        self.assertNotIn('ORD-PLAIN-1', content)
+
+    def test_audit_logs_view_risk_only_and_changed_sort_should_work(self):
+        AuditLog.objects.create(
+            user=self.user,
+            action='status_change',
+            module='订单',
+            target='RISK-A',
+            details=json.dumps(
+                {
+                    'summary': '状态变更A',
+                    'before': {'status': 'pending'},
+                    'after': {'status': 'confirmed'},
+                    'changed_fields': ['status'],
+                    'extra': {},
+                },
+                ensure_ascii=False,
+            ),
+            ip_address=None,
+        )
+        AuditLog.objects.create(
+            user=self.user,
+            action='status_change',
+            module='订单',
+            target='RISK-B',
+            details=json.dumps(
+                {
+                    'summary': '状态变更B',
+                    'before': {'a': 1, 'b': 1},
+                    'after': {'a': 2, 'b': 3},
+                    'changed_fields': ['a', 'b'],
+                    'extra': {},
+                },
+                ensure_ascii=False,
+            ),
+            ip_address=None,
+        )
+        AuditLog.objects.create(
+            user=self.user,
+            action='create',
+            module='订单',
+            target='NON-RISK',
+            details='创建日志',
+            ip_address=None,
+        )
+
+        resp = self.client.get(
+            reverse('audit_logs'),
+            {
+                'risk_only': '1',
+                'structured_only': '1',
+                'changed_only': '1',
+                'sort_by': 'changed_desc',
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        logs = list(resp.context['logs_page'].object_list)
+        self.assertGreaterEqual(len(logs), 2)
+        targets = [item.target for item in logs]
+        self.assertIn('RISK-A', targets)
+        self.assertIn('RISK-B', targets)
+        self.assertNotIn('NON-RISK', targets)
+        self.assertEqual(logs[0].target, 'RISK-B')
+
+    def test_audit_logs_source_filter_should_work(self):
+        AuditLog.objects.create(
+            user=self.user,
+            action='create',
+            module='转寄',
+            target='SRC-API-1',
+            details=json.dumps(
+                {
+                    'summary': 'API日志',
+                    'before': {},
+                    'after': {'ok': True},
+                    'changed_fields': ['ok'],
+                    'extra': {'source': 'api'},
+                },
+                ensure_ascii=False,
+            ),
+            ip_address=None,
+        )
+        AuditLog.objects.create(
+            user=self.user,
+            action='update',
+            module='订单',
+            target='SRC-MW-1',
+            details=json.dumps(
+                {
+                    'summary': '中间件日志',
+                    'before': {},
+                    'after': {},
+                    'changed_fields': [],
+                    'extra': {'source': 'middleware'},
+                },
+                ensure_ascii=False,
+            ),
+            ip_address=None,
+        )
+
+        resp = self.client.get(reverse('audit_logs'), {'source': 'api'})
+        self.assertEqual(resp.status_code, 200)
+        logs = list(resp.context['logs_page'].object_list)
+        targets = [item.target for item in logs]
+        self.assertIn('SRC-API-1', targets)
+        self.assertNotIn('SRC-MW-1', targets)
+
+
+class AuditMiddlewareStructuredTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='audit_mw_admin',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.factory = RequestFactory()
+        self.middleware = AuditLogMiddleware(lambda request: HttpResponse('ok'))
+
+    def test_middleware_should_write_structured_audit_details(self):
+        request = self.factory.post('/orders/create/', {'customer_name': 'A'})
+        request.user = self.user
+        response = HttpResponse('ok', status=200)
+
+        self.middleware.process_response(request, response)
+
+        log = AuditLog.objects.filter(module='订单', target='新订单').order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertEqual(payload.get('summary'), '中间件记录请求操作')
+        self.assertEqual(payload.get('extra', {}).get('source'), 'middleware')
+        self.assertEqual(payload.get('extra', {}).get('path'), '/orders/create/')
+        self.assertEqual(payload.get('extra', {}).get('status_code'), 200)
+
+
+class ProcurementAuditDiffTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='proc_audit_admin',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.part = Part.objects.create(
+            name='审计部件',
+            spec='A1',
+            category='accessory',
+            unit='个',
+            current_stock=10,
+            safety_stock=2,
+            is_active=True,
+        )
+
+    def test_mark_as_ordered_should_write_structured_diff(self):
+        po = PurchaseOrder.objects.create(
+            channel='online',
+            supplier='审计供应商',
+            order_date=date.today(),
+            status='draft',
+            created_by=self.user,
+        )
+        PurchaseOrderItem.objects.create(
+            purchase_order=po,
+            part=self.part,
+            part_name=self.part.name,
+            spec=self.part.spec,
+            unit=self.part.unit,
+            quantity=2,
+            unit_price=Decimal('10.00'),
+            subtotal=Decimal('20.00'),
+        )
+        ProcurementService.mark_as_ordered(po.id, self.user)
+        po.refresh_from_db()
+        self.assertEqual(po.status, 'ordered')
+        log = AuditLog.objects.filter(module='采购', target=po.po_no).order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertEqual(payload['summary'], '采购单标记已下单')
+        self.assertEqual(payload['before']['status'], 'draft')
+        self.assertEqual(payload['after']['status'], 'ordered')
+        self.assertIn('status', payload.get('changed_fields', []))
+
+    def test_parts_outbound_should_write_structured_diff(self):
+        PartsService.outbound(self.part.id, 3, 'DOC-AUDIT-OUT', '审计测试出库', self.user)
+        self.part.refresh_from_db()
+        self.assertEqual(self.part.current_stock, 7)
+        log = AuditLog.objects.filter(module='部件', target=self.part.name).order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertEqual(payload['summary'], '部件出库')
+        self.assertEqual(payload['before']['current_stock'], 10)
+        self.assertEqual(payload['after']['current_stock'], 7)
+        self.assertIn('current_stock', payload.get('changed_fields', []))
+
+
+class AuditCoverageGuardTests(TestCase):
+    def test_production_code_should_not_directly_write_auditlog_objects_create(self):
+        """防回退：生产代码中禁止绕过 AuditService 直接写 AuditLog.objects.create。"""
+        project_root = Path(__file__).resolve().parents[2]
+        scan_targets = [
+            project_root / 'apps' / 'core',
+            project_root / 'apps' / 'api',
+        ]
+        allow_files = {
+            str(project_root / 'apps' / 'core' / 'services' / 'audit_service.py'),
+            str(project_root / 'apps' / 'core' / 'tests.py'),
+            str(project_root / 'apps' / 'api' / 'tests.py'),
+        }
+
+        violations = []
+        for base in scan_targets:
+            for file_path in base.rglob('*.py'):
+                if 'migrations' in file_path.parts:
+                    continue
+                if 'views_backup.py' in file_path.name or 'views_v2.py' in file_path.name:
+                    continue
+                file_str = str(file_path)
+                if file_str in allow_files:
+                    continue
+                content = file_path.read_text(encoding='utf-8')
+                if 'AuditLog.objects.create(' in content:
+                    violations.append(file_str)
+
+        self.assertEqual(
+            violations,
+            [],
+            msg='发现直接 AuditLog.objects.create 调用，请统一改为 AuditService：\n' + '\n'.join(violations),
+        )

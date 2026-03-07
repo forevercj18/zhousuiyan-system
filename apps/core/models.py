@@ -73,6 +73,91 @@ class SKU(models.Model):
         return self.stock - occupied
 
 
+class InventoryUnit(models.Model):
+    """SKU单套库存实例（唯一编号追踪）"""
+    STATUS_CHOICES = [
+        ('in_warehouse', '在库'),
+        ('in_transit', '在途'),
+        ('maintenance', '维修中'),
+        ('scrapped', '已报废'),
+    ]
+
+    LOCATION_CHOICES = [
+        ('warehouse', '仓库'),
+        ('order', '订单'),
+        ('transit', '物流在途'),
+        ('unknown', '未知'),
+    ]
+
+    sku = models.ForeignKey(SKU, on_delete=models.CASCADE, related_name='units', verbose_name='SKU')
+    unit_no = models.CharField('单套编号', max_length=64, unique=True)
+    status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='in_warehouse')
+    current_order = models.ForeignKey('Order', on_delete=models.SET_NULL, null=True, blank=True, related_name='inventory_units', verbose_name='当前归属订单')
+    current_location_type = models.CharField('当前位置类型', max_length=20, choices=LOCATION_CHOICES, default='warehouse')
+    last_tracking_no = models.CharField('最近物流单号', max_length=100, blank=True)
+    is_active = models.BooleanField('是否启用', default=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'inventory_units'
+        verbose_name = '库存单套实例'
+        verbose_name_plural = '库存单套实例'
+        ordering = ['sku_id', 'unit_no']
+        indexes = [
+            models.Index(fields=['sku', 'status']),
+            models.Index(fields=['current_order']),
+            models.Index(fields=['is_active']),
+        ]
+
+    def __str__(self):
+        return f"{self.unit_no} ({self.sku.code})"
+
+
+class UnitMovement(models.Model):
+    """单套库存流转节点日志"""
+    EVENT_CHOICES = [
+        ('WAREHOUSE_OUT', '仓库发出'),
+        ('TRANSFER_PENDING', '转寄待执行'),
+        ('TRANSFER_SHIPPED', '转寄寄出'),
+        ('TRANSFER_COMPLETED', '转寄完成'),
+        ('RETURN_SHIPPED', '回仓在途'),
+        ('RETURNED_WAREHOUSE', '已回仓'),
+        ('EXCEPTION', '异常'),
+    ]
+
+    STATUS_CHOICES = [
+        ('normal', '正常'),
+        ('warning', '预警'),
+        ('timeout', '超时'),
+        ('closed', '闭环完成'),
+    ]
+
+    unit = models.ForeignKey(InventoryUnit, on_delete=models.CASCADE, related_name='movements', verbose_name='单套实例')
+    event_type = models.CharField('节点类型', max_length=30, choices=EVENT_CHOICES)
+    status = models.CharField('节点状态', max_length=20, choices=STATUS_CHOICES, default='normal')
+    from_order = models.ForeignKey('Order', on_delete=models.SET_NULL, null=True, blank=True, related_name='unit_moves_from', verbose_name='来源订单')
+    to_order = models.ForeignKey('Order', on_delete=models.SET_NULL, null=True, blank=True, related_name='unit_moves_to', verbose_name='目标订单')
+    transfer = models.ForeignKey('Transfer', on_delete=models.SET_NULL, null=True, blank=True, related_name='unit_movements', verbose_name='关联转寄任务')
+    tracking_no = models.CharField('物流单号', max_length=100, blank=True)
+    notes = models.TextField('备注', blank=True)
+    operator = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='操作人')
+    event_time = models.DateTimeField('节点时间', auto_now_add=True)
+
+    class Meta:
+        db_table = 'unit_movements'
+        verbose_name = '单套流转日志'
+        verbose_name_plural = '单套流转日志'
+        ordering = ['-event_time']
+        indexes = [
+            models.Index(fields=['event_type', 'status']),
+            models.Index(fields=['unit', 'event_time']),
+        ]
+
+    def __str__(self):
+        return f"{self.unit.unit_no} - {self.event_type}"
+
+
 class Order(models.Model):
     """订单模型"""
     STATUS_CHOICES = [

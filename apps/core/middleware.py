@@ -3,7 +3,7 @@
 自动记录用户的关键操作
 """
 from django.utils.deprecation import MiddlewareMixin
-from apps.core.models import AuditLog
+from apps.core.services import AuditService
 
 
 class AuditLogMiddleware(MiddlewareMixin):
@@ -51,14 +51,18 @@ class AuditLogMiddleware(MiddlewareMixin):
                 # 获取客户端IP
                 ip_address = self._get_client_ip(request)
 
-                # 创建日志记录
-                AuditLog.objects.create(
+                details = self._get_details(request, response, action, module, target)
+                # 创建结构化日志记录
+                AuditService.log_with_diff(
                     user=request.user,
                     action=action,
                     module=module,
                     target=target,
-                    details=self._get_details(request, action),
-                    ip_address=ip_address
+                    summary=details.get('summary', '中间件记录请求操作'),
+                    before=details.get('before', {}),
+                    after=details.get('after', {}),
+                    extra=details.get('extra', {}),
+                    ip_address=ip_address,
                 )
             except Exception as e:
                 # 日志记录失败不应影响正常业务
@@ -116,16 +120,23 @@ class AuditLogMiddleware(MiddlewareMixin):
 
         return action, module, target
 
-    def _get_details(self, request, action):
-        """获取操作详情"""
-        details = f"{action}"
-
-        # 可以根据需要添加更多详情
-        if request.method == 'POST' and hasattr(request, 'POST'):
-            # 可以记录一些关键字段
-            pass
-
-        return details
+    def _get_details(self, request, response, action, module, target):
+        """获取结构化操作详情"""
+        return {
+            'summary': '中间件记录请求操作',
+            'before': {},
+            'after': {},
+            'extra': {
+                'source': 'middleware',
+                'http_method': request.method,
+                'path': request.path,
+                'query_string': request.META.get('QUERY_STRING', ''),
+                'status_code': int(response.status_code),
+                'module': module,
+                'target': target,
+                'action': action,
+            }
+        }
 
     def _get_client_ip(self, request):
         """获取客户端IP地址"""

@@ -26,9 +26,49 @@
                 </select>
             </div>
             <div class="filter-group">
+                <label>模块：</label>
+                <select id="moduleFilter" class="form-select">
+                    <option value="">全部模块</option>
+                    {% for module_name in modules %}
+                    <option value="{{ module_name }}" {% if module_filter == module_name %}selected{% endif %}>{{ module_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>来源：</label>
+                <select id="sourceFilter" class="form-select">
+                    <option value="">全部来源</option>
+                    <option value="app" {% if source_filter == 'app' %}selected{% endif %}>应用服务</option>
+                    <option value="api" {% if source_filter == 'api' %}selected{% endif %}>API</option>
+                    <option value="middleware" {% if source_filter == 'middleware' %}selected{% endif %}>中间件</option>
+                    <option value="plain" {% if source_filter == 'plain' %}selected{% endif %}>旧文本</option>
+                </select>
+            </div>
+            <div class="filter-group">
                 <label>关键词：</label>
                 <input id="keywordInput" type="text" class="form-control" placeholder="对象/详情/操作人"
                        value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterLogs();}">
+            </div>
+            <div class="filter-group form-check mb-0">
+                <input class="form-check-input" type="checkbox" id="structuredOnly" {% if structured_only %}checked{% endif %}>
+                <label class="form-check-label" for="structuredOnly">仅结构化</label>
+            </div>
+            <div class="filter-group form-check mb-0">
+                <input class="form-check-input" type="checkbox" id="changedOnly" {% if changed_only %}checked{% endif %}>
+                <label class="form-check-label" for="changedOnly">仅有字段变更</label>
+            </div>
+            <div class="filter-group form-check mb-0">
+                <input class="form-check-input" type="checkbox" id="riskOnly" {% if risk_only %}checked{% endif %}>
+                <label class="form-check-label" for="riskOnly">仅风险动作</label>
+            </div>
+            <div class="filter-group">
+                <label>排序：</label>
+                <select id="sortBy" class="form-select">
+                    <option value="time_desc" {% if sort_by == 'time_desc' %}selected{% endif %}>时间倒序</option>
+                    <option value="time_asc" {% if sort_by == 'time_asc' %}selected{% endif %}>时间正序</option>
+                    <option value="changed_desc" {% if sort_by == 'changed_desc' %}selected{% endif %}>变更字段数降序</option>
+                    <option value="changed_asc" {% if sort_by == 'changed_asc' %}selected{% endif %}>变更字段数升序</option>
+                </select>
             </div>
             <button class="btn btn-secondary" onclick="filterLogs()">筛选</button>
             <a class="btn btn-sm" href="{% url 'audit_logs' %}">重置</a>
@@ -36,6 +76,13 @@
         <div class="header-right">
             <button class="btn btn-primary" onclick="exportLogs()">导出日志</button>
         </div>
+    </div>
+
+    <div class="d-flex flex-wrap gap-2 mb-3">
+        <span class="badge text-bg-light border">总数：{{ summary_stats.total|default:0 }}</span>
+        <span class="badge text-bg-info">结构化：{{ summary_stats.structured|default:0 }}</span>
+        <span class="badge text-bg-warning">有变更：{{ summary_stats.changed|default:0 }}</span>
+        <span class="badge text-bg-danger">风险动作：{{ summary_stats.risk|default:0 }}</span>
     </div>
 
     <div class="table-container">
@@ -59,7 +106,41 @@
                         <span class="badge text-bg-info">{{ log.get_action_display }}</span>
                     </td>
                     <td>{{ log.target }}</td>
-                    <td class="text-truncate" title="{{ log.details }}">{{ log.details }}</td>
+                    <td>
+                        {% if log.details_parsed.is_structured %}
+                        <div class="fw-semibold text-primary mb-1">{{ log.details_parsed.summary }}</div>
+                        {% if log.details_parsed.changed_fields %}
+                        <div class="mb-1">
+                            {% for field in log.details_parsed.changed_fields %}
+                            <span class="badge text-bg-warning me-1">{{ field }}</span>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                        <details class="small">
+                            <summary class="text-muted">查看详情</summary>
+                            {% if log.details_parsed.before_pretty %}
+                            <div class="mt-2">
+                                <div class="fw-semibold">Before</div>
+                                <pre class="bg-light p-2 rounded border small mb-2">{{ log.details_parsed.before_pretty }}</pre>
+                            </div>
+                            {% endif %}
+                            {% if log.details_parsed.after_pretty %}
+                            <div>
+                                <div class="fw-semibold">After</div>
+                                <pre class="bg-light p-2 rounded border small mb-2">{{ log.details_parsed.after_pretty }}</pre>
+                            </div>
+                            {% endif %}
+                            {% if log.details_parsed.extra_pretty %}
+                            <div>
+                                <div class="fw-semibold">Extra</div>
+                                <pre class="bg-light p-2 rounded border small mb-0">{{ log.details_parsed.extra_pretty }}</pre>
+                            </div>
+                            {% endif %}
+                        </details>
+                        {% else %}
+                        <span class="text-truncate d-inline-block" style="max-width:560px;" title="{{ log.details_parsed.raw }}">{{ log.details_parsed.raw }}</span>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% empty %}
                 <tr>
@@ -100,19 +181,52 @@ function filterLogs() {
     const startDate = document.getElementById('startDate').value;
     const endDate = document.getElementById('endDate').value;
     const action = document.getElementById('actionFilter').value;
+    const module = document.getElementById('moduleFilter').value;
+    const source = document.getElementById('sourceFilter').value;
     const keyword = (document.getElementById('keywordInput')?.value || '').trim();
+    const structuredOnly = document.getElementById('structuredOnly')?.checked;
+    const changedOnly = document.getElementById('changedOnly')?.checked;
+    const riskOnly = document.getElementById('riskOnly')?.checked;
+    const sortBy = document.getElementById('sortBy')?.value || 'time_desc';
     const params = new URLSearchParams();
     if (startDate) params.set('start_date', startDate);
     if (endDate) params.set('end_date', endDate);
     if (action) params.set('action', action);
+    if (module) params.set('module', module);
+    if (source) params.set('source', source);
     if (keyword) params.set('keyword', keyword);
+    if (structuredOnly) params.set('structured_only', '1');
+    if (changedOnly) params.set('changed_only', '1');
+    if (riskOnly) params.set('risk_only', '1');
+    if (sortBy) params.set('sort_by', sortBy);
     const q = params.toString();
     window.location.href = '{% url "audit_logs" %}' + (q ? ('?' + q) : '');
 }
 
 function exportLogs() {
-    if (window.AppUI) window.AppUI.alert('导出日志功能待实现');
-    else alert('导出日志功能待实现');
+    const startDate = document.getElementById('startDate').value;
+    const endDate = document.getElementById('endDate').value;
+    const action = document.getElementById('actionFilter').value;
+    const module = document.getElementById('moduleFilter').value;
+    const source = document.getElementById('sourceFilter').value;
+    const keyword = (document.getElementById('keywordInput')?.value || '').trim();
+    const structuredOnly = document.getElementById('structuredOnly')?.checked;
+    const changedOnly = document.getElementById('changedOnly')?.checked;
+    const riskOnly = document.getElementById('riskOnly')?.checked;
+    const sortBy = document.getElementById('sortBy')?.value || 'time_desc';
+    const params = new URLSearchParams();
+    if (startDate) params.set('start_date', startDate);
+    if (endDate) params.set('end_date', endDate);
+    if (action) params.set('action', action);
+    if (module) params.set('module', module);
+    if (source) params.set('source', source);
+    if (keyword) params.set('keyword', keyword);
+    if (structuredOnly) params.set('structured_only', '1');
+    if (changedOnly) params.set('changed_only', '1');
+    if (riskOnly) params.set('risk_only', '1');
+    if (sortBy) params.set('sort_by', sortBy);
+    params.set('export', '1');
+    window.location.href = '{% url "audit_logs" %}?' + params.toString();
 }
 </script>
 {% endblock %}

@@ -4,11 +4,38 @@
 from django.db import transaction
 from django.utils import timezone
 from decimal import Decimal
-from ..models import PurchaseOrder, PurchaseOrderItem, Part, PartsMovement, AuditLog
+from ..models import PurchaseOrder, PurchaseOrderItem, Part, PartsMovement
+from .audit_service import AuditService
 
 
 class ProcurementService:
     """采购服务"""
+
+    @staticmethod
+    def _snapshot_po(po):
+        return {
+            'id': po.id,
+            'po_no': po.po_no,
+            'status': po.status,
+            'channel': po.channel,
+            'supplier': po.supplier,
+            'order_date': po.order_date,
+            'arrival_date': po.arrival_date,
+            'total_amount': po.total_amount,
+            'notes': po.notes,
+            'items': list(
+                po.items.order_by('id').values(
+                    'id',
+                    'part_id',
+                    'part_name',
+                    'spec',
+                    'unit',
+                    'quantity',
+                    'unit_price',
+                    'subtotal',
+                )
+            ),
+        }
 
     @staticmethod
     @transaction.atomic
@@ -77,13 +104,15 @@ class ProcurementService:
         po.save()
 
         # 4. 记录日志
-        AuditLog.objects.create(
+        AuditService.log_with_diff(
             user=user,
             action='create',
             module='采购',
             target=po.po_no,
-            details=f"创建采购单：{po.supplier}，总金额 ¥{total_amount}",
-            ip_address=None
+            summary='创建采购单',
+            before={},
+            after=ProcurementService._snapshot_po(po),
+            extra={'supplier': po.supplier, 'total_amount': str(total_amount)},
         )
 
         return po
@@ -96,17 +125,19 @@ class ProcurementService:
 
         if po.status != 'draft':
             raise ValueError(f"采购单状态为 {po.get_status_display()}，无法标记已下单")
+        before_snapshot = ProcurementService._snapshot_po(po)
 
         po.status = 'ordered'
         po.save()
 
-        AuditLog.objects.create(
+        AuditService.log_with_diff(
             user=user,
             action='status_change',
             module='采购',
             target=po.po_no,
-            details=f"标记已下单",
-            ip_address=None
+            summary='采购单标记已下单',
+            before=before_snapshot,
+            after=ProcurementService._snapshot_po(po),
         )
 
         return po
@@ -119,19 +150,21 @@ class ProcurementService:
 
         if po.status != 'ordered':
             raise ValueError(f"采购单状态为 {po.get_status_display()}，无法标记已到货")
+        before_snapshot = ProcurementService._snapshot_po(po)
 
         po.status = 'arrived'
         if not po.arrival_date:
             po.arrival_date = timezone.now().date()
         po.save()
 
-        AuditLog.objects.create(
+        AuditService.log_with_diff(
             user=user,
             action='status_change',
             module='采购',
             target=po.po_no,
-            details=f"标记已到货",
-            ip_address=None
+            summary='采购单标记已到货',
+            before=before_snapshot,
+            after=ProcurementService._snapshot_po(po),
         )
 
         return po
@@ -146,6 +179,7 @@ class ProcurementService:
 
         if po.status != 'arrived':
             raise ValueError(f"采购单状态为 {po.get_status_display()}，无法标记已入库")
+        before_snapshot = ProcurementService._snapshot_po(po)
 
         # 1. 更新采购单状态
         po.status = 'stocked'
@@ -191,13 +225,15 @@ class ProcurementService:
                 item.save()
 
         # 3. 记录日志
-        AuditLog.objects.create(
+        AuditService.log_with_diff(
             user=user,
             action='status_change',
             module='采购',
             target=po.po_no,
-            details=f"标记已入库，共 {po.items.count()} 个明细项",
-            ip_address=None
+            summary='采购单标记已入库',
+            before=before_snapshot,
+            after=ProcurementService._snapshot_po(po),
+            extra={'item_count': po.items.count()},
         )
 
         return po
@@ -205,6 +241,18 @@ class ProcurementService:
 
 class PartsService:
     """部件库存服务"""
+
+    @staticmethod
+    def _snapshot_part(part):
+        return {
+            'id': part.id,
+            'name': part.name,
+            'spec': part.spec,
+            'unit': part.unit,
+            'current_stock': part.current_stock,
+            'safety_stock': part.safety_stock,
+            'is_active': part.is_active,
+        }
 
     @staticmethod
     @transaction.atomic
@@ -223,6 +271,7 @@ class PartsService:
             PartsMovement: 流水记录
         """
         part = Part.objects.get(id=part_id)
+        before_snapshot = PartsService._snapshot_part(part)
 
         movement = PartsMovement.objects.create(
             part=part,
@@ -233,13 +282,20 @@ class PartsService:
             operator=user
         )
 
-        AuditLog.objects.create(
+        part.refresh_from_db()
+        AuditService.log_with_diff(
             user=user,
             action='inbound',
             module='部件',
             target=part.name,
-            details=f"入库 {quantity} {part.unit}",
-            ip_address=None
+            summary='部件入库',
+            before=before_snapshot,
+            after=PartsService._snapshot_part(part),
+            extra={
+                'quantity': quantity,
+                'related_doc': related_doc,
+                'notes': notes,
+            },
         )
 
         return movement
@@ -261,6 +317,7 @@ class PartsService:
             PartsMovement: 流水记录
         """
         part = Part.objects.get(id=part_id)
+        before_snapshot = PartsService._snapshot_part(part)
 
         # 检查库存是否充足
         if part.current_stock < quantity:
@@ -275,13 +332,20 @@ class PartsService:
             operator=user
         )
 
-        AuditLog.objects.create(
+        part.refresh_from_db()
+        AuditService.log_with_diff(
             user=user,
             action='outbound',
             module='部件',
             target=part.name,
-            details=f"出库 {quantity} {part.unit}",
-            ip_address=None
+            summary='部件出库',
+            before=before_snapshot,
+            after=PartsService._snapshot_part(part),
+            extra={
+                'quantity': quantity,
+                'related_doc': related_doc,
+                'notes': notes,
+            },
         )
 
         return movement
@@ -303,6 +367,7 @@ class PartsService:
         """
         part = Part.objects.get(id=part_id)
         old_quantity = part.current_stock
+        before_snapshot = PartsService._snapshot_part(part)
 
         movement = PartsMovement.objects.create(
             part=part,
@@ -313,13 +378,20 @@ class PartsService:
             operator=user
         )
 
-        AuditLog.objects.create(
+        part.refresh_from_db()
+        AuditService.log_with_diff(
             user=user,
             action='update',
             module='部件',
             target=part.name,
-            details=f"调整库存：{old_quantity} → {new_quantity} {part.unit}",
-            ip_address=None
+            summary='调整部件库存',
+            before=before_snapshot,
+            after=PartsService._snapshot_part(part),
+            extra={
+                'old_quantity': old_quantity,
+                'new_quantity': new_quantity,
+                'notes': notes,
+            },
         )
 
         return movement

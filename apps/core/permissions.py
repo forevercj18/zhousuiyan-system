@@ -15,21 +15,56 @@ ROLE_PERMISSIONS = {
         'actions': ['*'],  # 所有操作
     },
     'manager': {
-        'modules': ['dashboard', 'orders', 'calendar', 'transfers', 'audit_logs'],
+        'modules': ['dashboard', 'orders', 'calendar', 'transfers', 'outbound_inventory', 'audit_logs'],
         'actions': ['view', 'create', 'update'],
     },
     'warehouse_manager': {
-        'modules': ['workbench', 'orders', 'skus', 'procurement', 'parts', 'audit_logs'],
+        'modules': ['workbench', 'orders', 'skus', 'procurement', 'parts', 'transfers', 'outbound_inventory', 'audit_logs'],
         'actions': ['view', 'create', 'update', 'delete'],
     },
     'warehouse_staff': {
-        'modules': ['workbench', 'skus', 'parts'],
+        'modules': ['workbench', 'skus', 'parts', 'transfers', 'outbound_inventory'],
         'actions': ['view', 'update'],
     },
     'customer_service': {
         'modules': ['orders', 'calendar'],
         'actions': ['view', 'create', 'update'],
     },
+}
+
+
+ROLE_ACTION_PERMISSIONS = {
+    'admin': ['*'],
+    'manager': [
+        'order.confirm_delivery',
+        'order.mark_returned',
+        'order.change_amount',
+        'transfer.recommend',
+        'transfer.create_task',
+        'transfer.complete_task',
+        'inventory.export_topology',
+    ],
+    'warehouse_manager': [
+        'order.confirm_delivery',
+        'order.mark_returned',
+        'transfer.recommend',
+        'transfer.create_task',
+        'transfer.complete_task',
+        'inventory.init_units',
+        'inventory.export_topology',
+        'sku.upload_image',
+        'parts.adjust_stock',
+    ],
+    'warehouse_staff': [
+        'order.confirm_delivery',
+        'order.mark_returned',
+        'transfer.recommend',
+        'transfer.create_task',
+        'transfer.complete_task',
+        'inventory.export_topology',
+        'sku.upload_image',
+    ],
+    'customer_service': [],
 }
 
 
@@ -64,6 +99,19 @@ def has_permission(user, module, action='view'):
             return True
 
     return False
+
+
+def has_action_permission(user, action_code):
+    """检查用户是否具备业务动作级权限"""
+    if not user.is_authenticated:
+        return False
+
+    if user.is_superuser:
+        return True
+
+    role = user.role
+    actions = ROLE_ACTION_PERMISSIONS.get(role, [])
+    return '*' in actions or action_code in actions
 
 
 def require_permission(module, action='view'):
@@ -146,6 +194,7 @@ def get_user_menu(user):
         },
         {'name': 'calendar', 'title': '排期看板', 'url': 'calendar', 'icon': '📅'},
         {'name': 'transfers', 'title': '转寄中心', 'url': 'transfers_list', 'icon': '🔄'},
+        {'name': 'outbound_inventory', 'title': '在外库存看板', 'url': 'outbound_inventory_dashboard', 'icon': '🧭'},
         {'name': 'skus', 'title': 'SKU管理', 'url': 'skus_list', 'icon': '📋'},
         {
             'name': 'procurement',

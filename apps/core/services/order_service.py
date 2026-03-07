@@ -3,9 +3,12 @@
 处理订单创建、更新、状态流转等核心业务
 """
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 from decimal import Decimal
-from ..models import Order, OrderItem, SKU, AuditLog, TransferAllocation
+from ..models import Order, OrderItem, SKU, TransferAllocation
+from .inventory_unit_service import InventoryUnitService
+from .audit_service import AuditService
 from ..utils import (
     check_sku_availability,
     calculate_order_dates,
@@ -17,6 +20,53 @@ from ..utils import (
 
 class OrderService:
     """订单服务"""
+
+    @staticmethod
+    def _snapshot_order(order):
+        items = list(
+            order.items.select_related('sku')
+            .order_by('id')
+            .values(
+                'sku_id',
+                'sku__code',
+                'sku__name',
+                'quantity',
+                'rental_price',
+                'deposit',
+                'subtotal',
+            )
+        )
+        allocations = list(
+            order.transfer_allocations_target.select_related('source_order', 'sku')
+            .filter(status__in=['locked', 'consumed'])
+            .order_by('id')
+            .values(
+                'source_order_id',
+                'source_order__order_no',
+                'sku_id',
+                'sku__code',
+                'quantity',
+                'status',
+            )
+        )
+        return {
+            'id': order.id,
+            'order_no': order.order_no,
+            'status': order.status,
+            'customer_name': order.customer_name,
+            'customer_phone': order.customer_phone,
+            'delivery_address': order.delivery_address,
+            'event_date': order.event_date,
+            'rental_days': order.rental_days,
+            'total_amount': order.total_amount,
+            'deposit_paid': order.deposit_paid,
+            'balance': order.balance,
+            'notes': order.notes,
+            'ship_tracking': order.ship_tracking,
+            'return_tracking': order.return_tracking,
+            'items': items,
+            'allocations': allocations,
+        }
 
     @staticmethod
     @transaction.atomic
@@ -135,13 +185,18 @@ class OrderService:
         sync_transfer_tasks_for_target_order(order, user)
 
         # 6. 记录日志
-        AuditLog.objects.create(
+        AuditService.log_with_diff(
             user=user,
             action='create',
             module='订单',
             target=order.order_no,
-            details=f"创建订单：{order.customer_name}，预定日期：{order.event_date}",
-            ip_address=None
+            summary='创建订单',
+            before={},
+            after=OrderService._snapshot_order(order),
+            extra={
+                'customer_name': order.customer_name,
+                'event_date': order.event_date,
+            },
         )
 
         return order
@@ -165,6 +220,7 @@ class OrderService:
         # 只有待处理和已确认的订单可以编辑
         if order.status not in ['pending', 'confirmed']:
             raise ValueError(f"订单状态为 {order.get_status_display()}，无法编辑")
+        before_snapshot = OrderService._snapshot_order(order)
 
         items = data.get('items')
         if not items:
@@ -261,13 +317,14 @@ class OrderService:
         sync_transfer_tasks_for_target_order(order, user)
 
         # 记录日志
-        AuditLog.objects.create(
+        AuditService.log_with_diff(
             user=user,
             action='update',
             module='订单',
             target=order.order_no,
-            details=f"修改订单信息",
-            ip_address=None
+            summary='修改订单信息',
+            before=before_snapshot,
+            after=OrderService._snapshot_order(order),
         )
 
         return order
@@ -290,6 +347,7 @@ class OrderService:
 
         if order.status != 'pending':
             raise ValueError(f"订单状态为 {order.get_status_display()}，无法确认")
+        before_snapshot = OrderService._snapshot_order(order)
 
         order.status = 'confirmed'
         order.deposit_paid = Decimal(str(deposit_paid))
@@ -298,13 +356,15 @@ class OrderService:
         order.save()
 
         # 记录日志
-        AuditLog.objects.create(
+        AuditService.log_with_diff(
             user=user,
             action='status_change',
             module='订单',
             target=order.order_no,
-            details=f"确认订单，收取押金 ¥{deposit_paid}",
-            ip_address=None
+            summary='确认订单',
+            before=before_snapshot,
+            after=OrderService._snapshot_order(order),
+            extra={'deposit_paid_input': str(deposit_paid)},
         )
 
         return order
@@ -327,10 +387,33 @@ class OrderService:
 
         if order.status != 'confirmed':
             raise ValueError(f"订单状态为 {order.get_status_display()}，无法标记发货")
+        before_snapshot = OrderService._snapshot_order(order)
 
         order.status = 'delivered'
         order.ship_tracking = ship_tracking
         order.save()
+
+        # 仓库发货单套分配（转寄部分不占用仓库单套）
+        item_map = {item.sku_id: item for item in order.items.select_related('sku').all()}
+        transfer_qty_map = {
+            row['sku_id']: int(row['qty'] or 0)
+            for row in TransferAllocation.objects.filter(
+                target_order=order,
+                status='locked'
+            ).values('sku_id').annotate(qty=Sum('quantity'))
+        }
+        for sku_id, item in item_map.items():
+            transfer_qty = transfer_qty_map.get(sku_id, 0)
+            warehouse_qty = max(int(item.quantity or 0) - transfer_qty, 0)
+            if warehouse_qty <= 0:
+                continue
+            InventoryUnitService.allocate_from_warehouse(
+                order=order,
+                sku=item.sku,
+                quantity=warehouse_qty,
+                tracking_no=ship_tracking or '',
+                operator=user,
+            )
 
         # 目标订单发货后，转寄锁进入已消耗状态
         TransferAllocation.objects.filter(
@@ -339,13 +422,15 @@ class OrderService:
         ).update(status='consumed')
 
         # 记录日志
-        AuditLog.objects.create(
+        AuditService.log_with_diff(
             user=user,
             action='status_change',
             module='订单',
             target=order.order_no,
-            details=f"标记已发货，发货单号：{ship_tracking}",
-            ip_address=None
+            summary='标记已发货',
+            before=before_snapshot,
+            after=OrderService._snapshot_order(order),
+            extra={'ship_tracking': ship_tracking},
         )
 
         return order
@@ -369,6 +454,7 @@ class OrderService:
 
         if order.status not in ['delivered', 'in_use']:
             raise ValueError(f"订单状态为 {order.get_status_display()}，无法标记归还")
+        before_snapshot = OrderService._snapshot_order(order)
 
         order.status = 'returned'
         order.return_tracking = return_tracking
@@ -378,15 +464,21 @@ class OrderService:
             order.balance = order.balance - Decimal(str(balance_paid))
 
         order.save()
+        InventoryUnitService.return_to_warehouse(order, return_tracking or '', operator=user)
 
         # 记录日志
-        AuditLog.objects.create(
+        AuditService.log_with_diff(
             user=user,
             action='status_change',
             module='订单',
             target=order.order_no,
-            details=f"标记已归还，回收单号：{return_tracking}",
-            ip_address=None
+            summary='标记已归还',
+            before=before_snapshot,
+            after=OrderService._snapshot_order(order),
+            extra={
+                'return_tracking': return_tracking,
+                'balance_paid_input': str(balance_paid or 0),
+            },
         )
 
         return order
@@ -408,18 +500,21 @@ class OrderService:
 
         if order.status != 'returned':
             raise ValueError(f"订单状态为 {order.get_status_display()}，无法完成")
+        before_snapshot = OrderService._snapshot_order(order)
 
         order.status = 'completed'
         order.save()
 
         # 记录日志
-        AuditLog.objects.create(
+        AuditService.log_with_diff(
             user=user,
             action='status_change',
             module='订单',
             target=order.order_no,
-            details=f"完成订单，退还押金 ¥{order.deposit_paid}",
-            ip_address=None
+            summary='完成订单',
+            before=before_snapshot,
+            after=OrderService._snapshot_order(order),
+            extra={'deposit_paid': str(order.deposit_paid)},
         )
 
         return order
@@ -442,6 +537,7 @@ class OrderService:
 
         if order.status in ['completed', 'cancelled']:
             raise ValueError(f"订单状态为 {order.get_status_display()}，无法取消")
+        before_snapshot = OrderService._snapshot_order(order)
 
         order.status = 'cancelled'
         order.notes = f"{order.notes}\n取消原因：{reason}" if order.notes else f"取消原因：{reason}"
@@ -454,13 +550,15 @@ class OrderService:
         ).update(status='released')
 
         # 记录日志
-        AuditLog.objects.create(
+        AuditService.log_with_diff(
             user=user,
             action='status_change',
             module='订单',
             target=order.order_no,
-            details=f"取消订单，原因：{reason}",
-            ip_address=None
+            summary='取消订单',
+            before=before_snapshot,
+            after=OrderService._snapshot_order(order),
+            extra={'reason': reason},
         )
 
         return order

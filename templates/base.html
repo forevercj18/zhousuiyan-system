@@ -45,6 +45,10 @@
                     <span class="icon"><i class="bi bi-arrow-left-right"></i></span>
                     <span>转寄中心</span>
                 </a>
+                <a href="{% url 'outbound_inventory_dashboard' %}" class="nav-item {% if request.resolver_match.url_name == 'outbound_inventory_dashboard' %}active{% endif %}">
+                    <span class="icon"><i class="bi bi-diagram-3"></i></span>
+                    <span>在外库存看板</span>
+                </a>
                 <div class="nav-group">
                     <div class="nav-group-title">采购管理</div>
                     <a href="{% url 'purchase_orders_list' %}" class="nav-item {% if 'purchase-orders' in request.path %}active{% endif %}">

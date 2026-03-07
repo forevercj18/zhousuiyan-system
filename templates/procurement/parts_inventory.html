@@ -7,6 +7,9 @@
 <div class="parts-inventory">
     <div class="page-header">
         <div class="header-left">
+            {% if low_only %}
+            <span class="badge text-bg-danger">仅看低库存</span>
+            {% endif %}
             <div class="filter-group">
                 <label>类别筛选：</label>
                 <select id="categoryFilter" class="form-select" onchange="filterParts()">
@@ -294,6 +297,8 @@ function filterParts() {
     const params = new URLSearchParams();
     if (category) params.set('category', category);
     if (keyword) params.set('keyword', keyword);
+    const low = new URLSearchParams(window.location.search).get('low');
+    if (low === '1') params.set('low', '1');
     const q = params.toString();
     window.location.href = '{% url "parts_inventory_list" %}' + (q ? ('?' + q) : '');
 }

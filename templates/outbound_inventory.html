@@ -1,0 +1,713 @@
+﻿{% extends "base.html" %}
+{% load permission_tags %}
+
+{% block title %}在外库存看板 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}在外库存看板{% endblock %}
+
+{% block content %}
+<style>
+.outbound-inventory-page .page-header {
+    margin-bottom: 8px;
+}
+.outbound-inventory-page .page-header .btn {
+    min-height: 36px;
+    padding: 6px 12px;
+    font-weight: 600;
+}
+.btn-priority-primary {
+    background: #2563eb;
+    border-color: #2563eb;
+    color: #fff;
+}
+.btn-priority-primary:hover {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+    color: #fff;
+}
+.btn-priority-neutral {
+    background: #fff;
+    border-color: #cbd5e1;
+    color: #334155;
+}
+.btn-priority-neutral:hover {
+    background: #f8fafc;
+    border-color: #94a3b8;
+    color: #0f172a;
+}
+.btn-priority-export {
+    background: #fff;
+    border-color: #93c5fd;
+    color: #1d4ed8;
+}
+.btn-priority-export:hover {
+    background: #eff6ff;
+    border-color: #60a5fa;
+    color: #1e40af;
+}
+.stats-grid .stat-card {
+    padding: 12px 14px;
+}
+.stats-grid .stat-title {
+    margin-bottom: 2px;
+}
+.topology-legend-sticky {
+    position: sticky;
+    top: 8px;
+    z-index: 15;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+}
+.topology-legend-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid #e2e8f0;
+    border-radius: 999px;
+    padding: 4px 10px;
+    background: #f8fafc;
+}
+.topology-legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+}
+.topology-graph-card {
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    background: #f8fafc;
+    padding: 10px 12px;
+    box-shadow: none;
+}
+.topology-graph-title {
+    font-size: 12px;
+    color: #334155;
+    margin-bottom: 6px;
+}
+.topology-svg {
+    background: #ffffff;
+    border: 1px dashed #dbeafe;
+    border-radius: 10px;
+}
+#topologyNodeInfo {
+    border-radius: 10px;
+    background: #f8fafc;
+}
+.flat-section-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.flat-section-title .label {
+    font-size: 16px;
+    font-weight: 700;
+    color: #0f172a;
+}
+.flat-section-title .desc {
+    font-size: 12px;
+    color: #64748b;
+}
+.flat-filter-wrap {
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 10px;
+    background: #f8fafc;
+}
+.flat-table-wrap {
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #fff;
+}
+.flat-table-wrap .table thead th {
+    background: #f1f5f9;
+    border-bottom: 1px solid #e2e8f0;
+    color: #334155;
+    font-weight: 700;
+}
+.flat-table-wrap .table tbody tr:nth-child(2n) {
+    background: #fcfdff;
+}
+.table-mobile-hint {
+    font-size: 12px;
+    color: #64748b;
+    margin-bottom: 6px;
+}
+</style>
+<div class="outbound-inventory-page">
+    <div class="page-header">
+        <div class="header-left d-flex flex-wrap gap-2">
+            {% if request.user|has_action_perm:'inventory.init_units' %}
+            <a class="btn btn-priority-primary" href="{% url 'outbound_inventory_dashboard' %}?init_units=1">初始化单套编号</a>
+            {% endif %}
+            <a class="btn btn-priority-export" href="{% url 'outbound_inventory_export' %}?{% if pagination_query %}{{ pagination_query }}{% endif %}">导出明细</a>
+            <a class="btn btn-priority-export" href="{% url 'outbound_inventory_export' %}?{% if pagination_query %}{{ pagination_query }}&{% endif %}anomaly_only=1">导出异常清单</a>
+            {% if request.user|has_action_perm:'inventory.export_topology' %}
+            <a class="btn btn-priority-export" href="{% url 'outbound_inventory_topology_export' %}?topology_sku_id={{ topology_sku_filter }}{% if anomaly_only %}&anomaly_only=1{% endif %}">导出拓扑CSV</a>
+            <button class="btn btn-priority-export" type="button" onclick="exportTopologyPng()">导出拓扑PNG</button>
+            {% endif %}
+        </div>
+    </div>
+    <div class="topology-legend-sticky d-flex flex-wrap gap-2 align-items-center">
+        <span class="fw-semibold me-1">节点状态图例</span>
+        <span class="topology-legend-chip">
+            <span class="topology-legend-dot" style="background:#eef4ff;border:1px solid #2f6fed;"></span>正常
+        </span>
+        <span class="topology-legend-chip">
+            <span class="topology-legend-dot" style="background:#fff4e5;border:1px solid #f59e0b;"></span>预警
+        </span>
+        <span class="topology-legend-chip">
+            <span class="topology-legend-dot" style="background:#fee2e2;border:1px solid #dc2626;"></span>超时/异常
+        </span>
+    </div>
+
+    <div class="stats-grid mb-2">
+        <div class="stat-card"><div class="stat-title">在途总套数</div><div class="stat-value text-primary">{{ summary.outbound_total }}</div></div>
+        <div class="stat-card"><div class="stat-title">在途转寄套数</div><div class="stat-value">{{ summary.transfer_in_transit }}</div></div>
+        <div class="stat-card"><div class="stat-title">今日新发出</div><div class="stat-value">{{ summary.today_out }}</div></div>
+        <div class="stat-card"><div class="stat-title">今日回仓</div><div class="stat-value text-success">{{ summary.today_returned }}</div></div>
+        <a class="stat-card text-decoration-none" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}anomaly_only=1">
+            <div class="stat-title">异常节点数（点我筛选）</div>
+            <div class="stat-value text-danger">{{ summary.exception_nodes }}</div>
+        </a>
+    </div>
+
+    <div class="form-section mb-3">
+        <h3>SKU视图</h3>
+        <div class="table-mobile-hint d-md-none">左右滑动查看完整表格</div>
+        <div class="table-responsive">
+            <table class="table table-hover table-striped align-middle data-table mb-0">
+                <thead>
+                    <tr>
+                        <th>SKU</th>
+                        <th>总库存</th>
+                        <th>仓内可用</th>
+                        <th>在途数量</th>
+                        <th>转寄在途</th>
+                        <th>最长在途天数</th>
+                        <th>异常数</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in sku_cards %}
+                    <tr {% if row.is_warn %}class="table-warning"{% endif %}>
+                        <td>{{ row.sku.code }} - {{ row.sku.name }}</td>
+                        <td>{{ row.total }}</td>
+                        <td>{{ row.warehouse }}</td>
+                        <td>{{ row.transit }}</td>
+                        <td>{{ row.transfer_transit }}</td>
+                        <td>{{ row.max_out_days }}</td>
+                        <td>{{ row.exception_count }}</td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="7" class="text-center">暂无SKU数据</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="form-section mb-3">
+        <h3>单套明细</h3>
+        <div class="filters d-flex flex-wrap gap-2 mb-2">
+            <form method="get" class="d-flex flex-wrap gap-2 w-100">
+                <input type="text" class="form-control" style="max-width:240px;" name="keyword" value="{{ keyword }}" placeholder="单套编号/SKU/订单号/运单号">
+                <select class="form-select" style="max-width:220px;" name="sku_id">
+                    <option value="">全部SKU</option>
+                    {% for sku in skus %}
+                    <option value="{{ sku.id }}" {% if sku_filter == sku.id|stringformat:"s" %}selected{% endif %}>{{ sku.code }} - {{ sku.name }}</option>
+                    {% endfor %}
+                </select>
+                <select class="form-select" style="max-width:160px;" name="status">
+                    <option value="">全部状态</option>
+                    {% for key, label in status_choices %}
+                    <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+                <select class="form-select" style="max-width:180px;" name="anomaly_only">
+                    <option value="" {% if not anomaly_only %}selected{% endif %}>全部数据</option>
+                    <option value="1" {% if anomaly_only %}selected{% endif %}>仅异常池</option>
+                </select>
+                <button type="submit" class="btn btn-primary">查询</button>
+                <a class="btn btn-secondary" href="{% url 'outbound_inventory_dashboard' %}">重置</a>
+            </form>
+        </div>
+        <div class="table-mobile-hint d-md-none">左右滑动查看完整表格</div>
+        <div class="table-responsive">
+            <table class="table table-hover table-striped align-middle data-table mb-0">
+                <thead>
+                    <tr>
+                        <th>单套编号</th>
+                        <th>SKU</th>
+                        <th>状态</th>
+                        <th>当前归属订单</th>
+                        <th>最近物流单号</th>
+                        <th>最近节点</th>
+                        <th>最近时间</th>
+                        <th>预警</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for unit in units %}
+                    <tr>
+                        <td>{{ unit.unit_no }}</td>
+                        <td>{{ unit.sku.code }} - {{ unit.sku.name }}</td>
+                        <td>{{ unit.get_status_display }}</td>
+                        <td>{% if unit.current_order %}{{ unit.current_order.order_no }}{% else %}-{% endif %}</td>
+                        <td>{{ unit.last_tracking_no|default:"-" }}</td>
+                        <td>{% if unit.latest_movement %}{{ unit.latest_movement.get_event_type_display }}{% else %}-{% endif %}</td>
+                        <td>{% if unit.latest_movement %}{{ unit.latest_movement.event_time|date:"Y-m-d H:i" }}{% else %}-{% endif %}</td>
+                        <td>{% if unit.warn_reason %}<span class="badge text-bg-warning">{{ unit.warn_reason }}</span>{% else %}-{% endif %}</td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="8" class="text-center">暂无单套数据，先点击“初始化单套编号”</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if units_page and units_page.paginator.num_pages > 1 %}
+        <nav aria-label="单套分页" class="d-flex justify-content-between align-items-center mt-3">
+            <span class="page-info">第 {{ units_page.number }} 页，共 {{ units_page.paginator.num_pages }} 页（共 {{ units_page.paginator.count }} 条）</span>
+            <ul class="pagination pagination-sm mb-0">
+                <li class="page-item {% if not units_page.has_previous %}disabled{% endif %}">
+                    {% if units_page.has_previous %}
+                    <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ units_page.previous_page_number }}">上一页</a>
+                    {% else %}
+                    <span class="page-link">上一页</span>
+                    {% endif %}
+                </li>
+                <li class="page-item disabled"><span class="page-link">{{ units_page.number }} / {{ units_page.paginator.num_pages }}</span></li>
+                <li class="page-item {% if not units_page.has_next %}disabled{% endif %}">
+                    {% if units_page.has_next %}
+                    <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ units_page.next_page_number }}">下一页</a>
+                    {% else %}
+                    <span class="page-link">下一页</span>
+                    {% endif %}
+                </li>
+            </ul>
+        </nav>
+        {% endif %}
+    </div>
+
+    <div class="form-section">
+        <h3>拓扑图（SVG）</h3>
+        <div class="filters d-flex flex-wrap gap-2 mb-2">
+            <form method="get" class="d-flex flex-wrap gap-2 w-100">
+                <input type="hidden" name="keyword" value="{{ keyword }}">
+                <input type="hidden" name="sku_id" value="{{ sku_filter }}">
+                <input type="hidden" name="status" value="{{ status_filter }}">
+                <input type="hidden" name="event_type" value="{{ event_type_filter }}">
+                {% if anomaly_only %}<input type="hidden" name="anomaly_only" value="1">{% endif %}
+                <select class="form-select" style="max-width:240px;" name="topology_sku_id">
+                    <option value="">拓扑：全部SKU</option>
+                    {% for sku in skus %}
+                    <option value="{{ sku.id }}" {% if topology_sku_filter == sku.id|stringformat:"s" %}selected{% endif %}>{{ sku.code }} - {{ sku.name }}</option>
+                    {% endfor %}
+                </select>
+                <input type="text" class="form-control" style="max-width:220px;" name="topology_unit_no" value="{{ topology_unit_no_filter }}" placeholder="单套编号定位">
+                <button type="submit" class="btn btn-primary">切换</button>
+                <button type="button" class="btn btn-outline-secondary" onclick="resetTopologySelection()">清除高亮</button>
+            </form>
+        </div>
+        <div class="d-flex flex-wrap gap-2 align-items-center small mb-2">
+            <span class="badge rounded-pill text-bg-primary">点击节点：高亮关联链路</span>
+            <span class="badge rounded-pill text-bg-info">双击节点：打开关联订单/任务</span>
+            <span class="badge rounded-pill text-bg-warning">* 该节点可跳转</span>
+        </div>
+        <div id="topologyNodeInfo" class="alert alert-light border small mb-3">
+            <div id="topologyNodeInfoText">未选中节点</div>
+            <div class="d-flex gap-2 mt-2">
+                <button type="button" id="topologyPrevBtn" class="btn btn-sm btn-priority-neutral" onclick="navigateTopologySelection(-1)" disabled>上一节点</button>
+                <button type="button" id="topologyNextBtn" class="btn btn-sm btn-priority-neutral" onclick="navigateTopologySelection(1)" disabled>下一节点</button>
+            </div>
+        </div>
+        <div class="mb-3 d-flex flex-column gap-3">
+            {% for graph in topology_graphs %}
+            <div class="topology-graph-card">
+                <div class="topology-graph-title">{{ graph.unit_no }} ｜ {{ graph.sku.code }} - {{ graph.sku.name }}</div>
+                <svg class="topology-svg" width="{{ graph.width }}" height="72" viewBox="0 0 {{ graph.width }} 72" xmlns="http://www.w3.org/2000/svg">
+                    {% for l in graph.links %}
+                    <line class="topo-link" data-graph-id="{{ forloop.parentloop.counter0 }}" data-from="{{ forloop.counter0 }}" data-to="{{ forloop.counter }}" x1="{{ l.x1 }}" y1="{{ l.y1 }}" x2="{{ l.x2 }}" y2="{{ l.y2 }}" stroke="#2f6fed" stroke-width="2"/>
+                    {% endfor %}
+                    {% for n in graph.nodes %}
+                    <title>{{ n.hint }}{% if n.url %}（双击打开）{% endif %}</title>
+                    <circle class="topo-node" data-graph-id="{{ forloop.parentloop.counter0 }}" data-index="{{ forloop.counter0 }}" data-url="{{ n.url }}" data-hint="{{ n.hint }}" data-label="{{ n.label }}" cx="{{ n.x }}" cy="{{ n.y }}" r="14" fill="{{ n.fill }}" stroke="{{ n.stroke }}" stroke-width="2"/>
+                    <text class="topo-node-text" data-graph-id="{{ forloop.parentloop.counter0 }}" data-index="{{ forloop.counter0 }}" x="{{ n.x }}" y="{{ n.y|add:'30' }}" text-anchor="middle" font-size="11" fill="{{ n.text }}">{{ n.label }}{% if n.url %}*{% endif %}</text>
+                    {% endfor %}
+                </svg>
+            </div>
+            {% empty %}
+            <div class="text-muted">暂无拓扑图数据</div>
+            {% endfor %}
+        </div>
+        {% if topology_units_page and topology_units_page.paginator.num_pages > 1 %}
+        <nav aria-label="拓扑分页" class="d-flex justify-content-between align-items-center mt-3 mb-3">
+            <span class="page-info">拓扑：第 {{ topology_units_page.number }} 页，共 {{ topology_units_page.paginator.num_pages }} 页（共 {{ topology_units_page.paginator.count }} 条）</span>
+            <ul class="pagination pagination-sm mb-0">
+                <li class="page-item {% if not topology_units_page.has_previous %}disabled{% endif %}">
+                    {% if topology_units_page.has_previous %}
+                    <a class="page-link" href="?{% if topology_pagination_query %}{{ topology_pagination_query }}&{% endif %}topology_page={{ topology_units_page.previous_page_number }}">上一页</a>
+                    {% else %}
+                    <span class="page-link">上一页</span>
+                    {% endif %}
+                </li>
+                <li class="page-item disabled"><span class="page-link">{{ topology_units_page.number }} / {{ topology_units_page.paginator.num_pages }}</span></li>
+                <li class="page-item {% if not topology_units_page.has_next %}disabled{% endif %}">
+                    {% if topology_units_page.has_next %}
+                    <a class="page-link" href="?{% if topology_pagination_query %}{{ topology_pagination_query }}&{% endif %}topology_page={{ topology_units_page.next_page_number }}">下一页</a>
+                    {% else %}
+                    <span class="page-link">下一页</span>
+                    {% endif %}
+                </li>
+            </ul>
+        </nav>
+        {% endif %}
+
+        <div class="flat-section-title">
+            <div class="label">拓扑图（文本链路）</div>
+            <div class="desc">用于快速核对每一套库存的完整流转路径</div>
+        </div>
+        <div class="table-mobile-hint d-md-none">左右滑动查看完整表格</div>
+        <div class="flat-table-wrap table-responsive mb-3">
+            <table class="table table-hover table-striped align-middle data-table mb-0">
+                <thead>
+                    <tr>
+                        <th>单套编号</th>
+                        <th>SKU</th>
+                        <th>转寄节点数</th>
+                        <th>当前状态</th>
+                        <th>链路</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in topology_rows %}
+                    <tr>
+                        <td>{{ row.unit_no }}</td>
+                        <td>{{ row.sku.code }} - {{ row.sku.name }}</td>
+                        <td>{{ row.hop_count }}</td>
+                        <td>{{ row.status }}</td>
+                        <td style="white-space:normal;word-break:break-all;">{{ row.chain_text }}</td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="5" class="text-center">暂无拓扑数据</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="flat-section-title">
+            <div class="label">流转拓扑（事件时间线）</div>
+            <div class="desc">当前预警阈值：在途天数 &gt; {{ warn_outbound_days }} 天；转寄节点数 &gt; {{ warn_hops }}；转寄待执行 &gt; {{ pending_timeout_hours }} 小时；转寄在途 &gt; {{ shipped_timeout_days }} 天</div>
+        </div>
+        <div class="filters d-flex flex-wrap gap-2 mb-2 flat-filter-wrap">
+            <form method="get" class="d-flex flex-wrap gap-2 w-100">
+                <input type="hidden" name="keyword" value="{{ keyword }}">
+                <input type="hidden" name="sku_id" value="{{ sku_filter }}">
+                <input type="hidden" name="status" value="{{ status_filter }}">
+                <select class="form-select" style="max-width:260px;" name="event_type">
+                    <option value="">全部节点类型</option>
+                    {% for key, label in event_type_choices %}
+                    <option value="{{ key }}" {% if event_type_filter == key %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit" class="btn btn-primary">筛选</button>
+                <a class="btn btn-secondary" href="?{% if pagination_query %}{{ pagination_query }}{% endif %}">重置节点筛选</a>
+            </form>
+        </div>
+        <div class="table-mobile-hint d-md-none">左右滑动查看完整表格</div>
+        <div class="flat-table-wrap table-responsive">
+            <table class="table table-hover table-striped align-middle data-table mb-0">
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>单套编号</th>
+                        <th>节点</th>
+                        <th>来源订单</th>
+                        <th>目标订单</th>
+                        <th>转寄任务</th>
+                        <th>运单号</th>
+                        <th>备注</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for move in timeline %}
+                    <tr>
+                        <td>{{ move.event_time|date:"Y-m-d H:i" }}</td>
+                        <td>{{ move.unit.unit_no }}</td>
+                        <td>{{ move.get_event_type_display }}</td>
+                        <td>{% if move.from_order %}{{ move.from_order.order_no }}{% else %}-{% endif %}</td>
+                        <td>{% if move.to_order %}{{ move.to_order.order_no }}{% else %}-{% endif %}</td>
+                        <td>{% if move.transfer %}#{{ move.transfer.id }}{% else %}-{% endif %}</td>
+                        <td>{{ move.tracking_no|default:"-" }}</td>
+                        <td>{{ move.notes|default:"-" }}</td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="8" class="text-center">暂无流转节点</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if timeline_page and timeline_page.paginator.num_pages > 1 %}
+        <nav aria-label="节点分页" class="d-flex justify-content-between align-items-center mt-3">
+            <span class="page-info">第 {{ timeline_page.number }} 页，共 {{ timeline_page.paginator.num_pages }} 页（共 {{ timeline_page.paginator.count }} 条）</span>
+            <ul class="pagination pagination-sm mb-0">
+                <li class="page-item {% if not timeline_page.has_previous %}disabled{% endif %}">
+                    {% if timeline_page.has_previous %}
+                    <a class="page-link" href="?{% if timeline_pagination_query %}{{ timeline_pagination_query }}&{% endif %}timeline_page={{ timeline_page.previous_page_number }}">上一页</a>
+                    {% else %}
+                    <span class="page-link">上一页</span>
+                    {% endif %}
+                </li>
+                <li class="page-item disabled"><span class="page-link">{{ timeline_page.number }} / {{ timeline_page.paginator.num_pages }}</span></li>
+                <li class="page-item {% if not timeline_page.has_next %}disabled{% endif %}">
+                    {% if timeline_page.has_next %}
+                    <a class="page-link" href="?{% if timeline_pagination_query %}{{ timeline_pagination_query }}&{% endif %}timeline_page={{ timeline_page.next_page_number }}">下一页</a>
+                    {% else %}
+                    <span class="page-link">下一页</span>
+                    {% endif %}
+                </li>
+            </ul>
+        </nav>
+        {% endif %}
+    </div>
+</div>
+<script>
+const __topologySelection = {
+    graphId: null,
+    nodeIndex: null,
+};
+
+function updateTopologyInfo(message, isSelected=false) {
+    const panel = document.getElementById('topologyNodeInfo');
+    const text = document.getElementById('topologyNodeInfoText');
+    if (!panel || !text) return;
+    text.textContent = message || '未选中节点';
+    panel.classList.toggle('alert-warning', !!isSelected);
+    panel.classList.toggle('alert-light', !isSelected);
+}
+
+function updateTopologyNavButtons() {
+    const prevBtn = document.getElementById('topologyPrevBtn');
+    const nextBtn = document.getElementById('topologyNextBtn');
+    if (!prevBtn || !nextBtn) return;
+    if (__topologySelection.graphId === null || __topologySelection.nodeIndex === null) {
+        prevBtn.disabled = true;
+        nextBtn.disabled = true;
+        return;
+    }
+    const nodes = Array.from(document.querySelectorAll(`.topo-node[data-graph-id="${__topologySelection.graphId}"]`));
+    if (!nodes.length) {
+        prevBtn.disabled = true;
+        nextBtn.disabled = true;
+        return;
+    }
+    const maxIndex = Math.max(...nodes.map((n) => Number(n.dataset.index || -1)));
+    prevBtn.disabled = __topologySelection.nodeIndex <= 0;
+    nextBtn.disabled = __topologySelection.nodeIndex >= maxIndex;
+}
+
+function clearTopologyHighlight() {
+    document.querySelectorAll('.topo-link').forEach((el) => {
+        el.style.stroke = '#2f6fed';
+        el.style.strokeWidth = '2';
+        el.style.opacity = '1';
+    });
+    document.querySelectorAll('.topo-node').forEach((el) => {
+        el.style.strokeWidth = '2';
+        el.style.filter = '';
+        el.style.opacity = '1';
+    });
+    document.querySelectorAll('.topo-node-text').forEach((el) => {
+        el.style.opacity = '1';
+        el.style.fontWeight = '400';
+    });
+}
+
+function highlightAdjacent(graphId, nodeIndex) {
+    clearTopologyHighlight();
+    document.querySelectorAll(`.topo-link[data-graph-id="${graphId}"]`).forEach((el) => {
+        const from = Number(el.dataset.from || -1);
+        const to = Number(el.dataset.to || -1);
+        if (from === nodeIndex || to === nodeIndex) {
+            el.style.stroke = '#f59e0b';
+            el.style.strokeWidth = '4';
+        } else {
+            el.style.opacity = '0.25';
+        }
+    });
+    document.querySelectorAll(`.topo-node[data-graph-id="${graphId}"]`).forEach((el) => {
+        const idx = Number(el.dataset.index || -1);
+        if (idx === nodeIndex) {
+            el.style.strokeWidth = '4';
+            el.style.filter = 'drop-shadow(0 0 4px rgba(245,158,11,.7))';
+        } else {
+            el.style.opacity = '0.6';
+        }
+    });
+    document.querySelectorAll(`.topo-node-text[data-graph-id="${graphId}"]`).forEach((el) => {
+        const idx = Number(el.dataset.index || -1);
+        if (idx === nodeIndex) {
+            el.style.fontWeight = '700';
+        } else {
+            el.style.opacity = '0.55';
+        }
+    });
+}
+
+function __findNodeElement(graphId, idx) {
+    return document.querySelector(`.topo-node[data-graph-id="${graphId}"][data-index="${idx}"]`);
+}
+
+function __onTopologyNodeClick(graphId, idx) {
+    const node = __findNodeElement(graphId, idx);
+    if (!node) return;
+    if (__topologySelection.graphId === graphId && __topologySelection.nodeIndex === idx) {
+        resetTopologySelection();
+        return;
+    }
+    __topologySelection.graphId = graphId;
+    __topologySelection.nodeIndex = idx;
+    highlightAdjacent(graphId, idx);
+    const label = node.dataset.label || '节点';
+    const hint = node.dataset.hint || '';
+    const canOpen = node.dataset.url ? '（双击可跳转）' : '';
+    updateTopologyInfo(`${label}: ${hint}${canOpen}`, true);
+    updateTopologyNavButtons();
+}
+
+function __onTopologyNodeDblClick(graphId, idx) {
+    const node = __findNodeElement(graphId, idx);
+    if (!node) return;
+    const url = node.dataset.url || '';
+    if (url) {
+        window.open(url, '_blank');
+    }
+}
+
+function resetTopologySelection() {
+    __topologySelection.graphId = null;
+    __topologySelection.nodeIndex = null;
+    clearTopologyHighlight();
+    updateTopologyInfo('未选中节点', false);
+    updateTopologyNavButtons();
+}
+
+function navigateTopologySelection(step) {
+    const graphId = __topologySelection.graphId;
+    const idx = __topologySelection.nodeIndex;
+    if (graphId === null || idx === null) return;
+    const nodes = Array.from(document.querySelectorAll(`.topo-node[data-graph-id="${graphId}"]`))
+        .map((n) => Number(n.dataset.index || -1))
+        .filter((x) => x >= 0)
+        .sort((a, b) => a - b);
+    if (!nodes.length) return;
+    const pos = nodes.indexOf(idx);
+    if (pos < 0) return;
+    const nextPos = pos + step;
+    if (nextPos < 0 || nextPos >= nodes.length) return;
+    __onTopologyNodeClick(graphId, nodes[nextPos]);
+}
+
+function bindTopologyInteractions() {
+    document.querySelectorAll('.topo-node').forEach((node) => {
+        node.style.cursor = 'pointer';
+        node.addEventListener('click', () => {
+            const graphId = node.dataset.graphId;
+            const idx = Number(node.dataset.index || -1);
+            if (graphId === undefined || idx < 0) return;
+            __onTopologyNodeClick(graphId, idx);
+        });
+        node.addEventListener('dblclick', () => {
+            const graphId = node.dataset.graphId;
+            const idx = Number(node.dataset.index || -1);
+            if (graphId === undefined || idx < 0) return;
+            __onTopologyNodeDblClick(graphId, idx);
+        });
+    });
+    document.querySelectorAll('.topo-node-text').forEach((textNode) => {
+        textNode.style.cursor = 'pointer';
+        textNode.addEventListener('click', () => {
+            const graphId = textNode.dataset.graphId;
+            const idx = Number(textNode.dataset.index || -1);
+            if (graphId === undefined || idx < 0) return;
+            __onTopologyNodeClick(graphId, idx);
+        });
+        textNode.addEventListener('dblclick', () => {
+            const graphId = textNode.dataset.graphId;
+            const idx = Number(textNode.dataset.index || -1);
+            if (graphId === undefined || idx < 0) return;
+            __onTopologyNodeDblClick(graphId, idx);
+        });
+    });
+}
+
+async function exportTopologyPng() {
+    const svgs = Array.from(document.querySelectorAll('.topology-svg'));
+    if (!svgs.length) {
+        if (window.AppUI) await window.AppUI.alert('当前无拓扑图可导出');
+        else alert('当前无拓扑图可导出');
+        return;
+    }
+    const gap = 16;
+    const parsed = svgs.map((svg) => ({
+        svg,
+        w: Math.max(svg.viewBox.baseVal.width || svg.clientWidth || 300, 300),
+        h: Math.max(svg.viewBox.baseVal.height || svg.clientHeight || 72, 72),
+    }));
+    const width = Math.max(...parsed.map((x) => x.w)) + 40;
+    const height = parsed.reduce((sum, x) => sum + x.h, 0) + gap * (parsed.length - 1) + 40;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+
+    let y = 20;
+    for (const item of parsed) {
+        const clone = item.svg.cloneNode(true);
+        clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        clone.setAttribute('width', String(item.w));
+        clone.setAttribute('height', String(item.h));
+        const xml = new XMLSerializer().serializeToString(clone);
+        const blob = new Blob([xml], { type: 'image/svg+xml;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const img = new Image();
+        await new Promise((resolve, reject) => {
+            img.onload = () => resolve();
+            img.onerror = reject;
+            img.src = url;
+        });
+        ctx.drawImage(img, 20, y, item.w, item.h);
+        URL.revokeObjectURL(url);
+        y += item.h + gap;
+    }
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    const now = new Date();
+    const stamp = now.getFullYear().toString()
+        + String(now.getMonth() + 1).padStart(2, '0')
+        + String(now.getDate()).padStart(2, '0')
+        + '_'
+        + String(now.getHours()).padStart(2, '0')
+        + String(now.getMinutes()).padStart(2, '0')
+        + String(now.getSeconds()).padStart(2, '0');
+    a.download = `outbound_topology_${stamp}.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    bindTopologyInteractions();
+    resetTopologySelection();
+});
+</script>
+{% endblock %}
+
+
