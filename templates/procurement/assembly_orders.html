@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+
+{% block title %}装配单 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}装配单{% endblock %}
+
+{% block extra_css %}
+<style>
+.summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:16px; }
+.summary-card { background:#fff; border:1px solid #e6ebf2; border-radius:14px; padding:14px 16px; box-shadow:0 8px 24px rgba(15,23,42,.04); }
+.summary-card span { display:block; color:#6b7280; font-size:12px; margin-bottom:6px; }
+.summary-card strong { font-size:24px; color:#111827; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div class="header-left">
+        <form method="get" class="d-flex flex-wrap gap-2 align-items-center">
+            <input type="text" name="keyword" class="form-control" style="max-width:260px;" value="{{ keyword }}" placeholder="装配单号/SKU/部件/创建人">
+            <select name="sku_id" class="form-select" style="max-width:240px;">
+                <option value="">全部SKU</option>
+                {% for sku in skus %}
+                <option value="{{ sku.id }}" {% if sku_filter == sku.id|stringformat:"s" %}selected{% endif %}>{{ sku.code }} - {{ sku.name }}</option>
+                {% endfor %}
+            </select>
+            <select name="status" class="form-select" style="max-width:180px;">
+                <option value="">全部状态</option>
+                {% for key, label in status_choices %}
+                <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="btn btn-secondary">查询</button>
+            <a class="btn btn-sm" href="{% url 'assembly_orders_list' %}">重置</a>
+        </form>
+    </div>
+    <div class="header-right">
+        <a class="btn btn-secondary" href="{% url 'assembly_orders_export' %}?{{ request.GET.urlencode }}">导出CSV</a>
+        <a class="btn btn-primary" href="{% url 'skus_list' %}">去产品管理装配</a>
+    </div>
+</div>
+
+<div class="summary-grid">
+    <div class="summary-card"><span>装配单总数</span><strong>{{ summary.total_count }}</strong></div>
+    <div class="summary-card"><span>已完成</span><strong>{{ summary.completed_count }}</strong></div>
+    <div class="summary-card"><span>已取消</span><strong>{{ summary.cancelled_count }}</strong></div>
+    <div class="summary-card"><span>累计装配套数</span><strong>{{ summary.assembled_sets }}</strong></div>
+</div>
+
+<div class="table-container">
+    <div class="table-responsive">
+        <table class="table table-hover table-striped align-middle data-table mb-0">
+            <thead>
+                <tr>
+                    <th>装配单号</th>
+                    <th>SKU</th>
+                    <th>装配套数</th>
+                    <th>扣减部件</th>
+                    <th>状态</th>
+                    <th>创建人</th>
+                    <th>创建时间</th>
+                    <th>完成时间</th>
+                    <th>备注</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for order in assembly_orders %}
+                <tr>
+                    <td>{{ order.assembly_no }}</td>
+                    <td>{{ order.sku.code }} - {{ order.sku.name }}</td>
+                    <td>{{ order.quantity }}</td>
+                    <td>{{ order.parts_summary }}</td>
+                    <td>{{ order.get_status_display }}</td>
+                    <td>{{ order.created_by.username|default:"-" }}</td>
+                    <td>{{ order.created_at|date:"Y-m-d H:i" }}</td>
+                    <td>{% if order.completed_at %}{{ order.completed_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</td>
+                    <td>{{ order.notes|default:"-" }}</td>
+                    <td>
+                        {% if order.status == 'completed' %}
+                        <form method="post" action="{% url 'assembly_order_cancel' order.id %}" class="d-inline">
+                            {% csrf_token %}
+                            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                            <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('确认取消该装配单并回滚部件、停用新增单套？')">取消装配</button>
+                        </form>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="10" class="text-center">暂无装配单数据</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% if assembly_orders_page and assembly_orders_page.paginator.num_pages > 1 %}
+<nav aria-label="装配单分页" class="d-flex justify-content-between align-items-center mt-3">
+    <span class="page-info">第 {{ assembly_orders_page.number }} 页，共 {{ assembly_orders_page.paginator.num_pages }} 页（共 {{ assembly_orders_page.paginator.count }} 条）</span>
+    <ul class="pagination pagination-sm mb-0">
+        <li class="page-item {% if not assembly_orders_page.has_previous %}disabled{% endif %}">
+            {% if assembly_orders_page.has_previous %}
+            <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ assembly_orders_page.previous_page_number }}">上一页</a>
+            {% else %}
+            <span class="page-link">上一页</span>
+            {% endif %}
+        </li>
+        <li class="page-item disabled"><span class="page-link">{{ assembly_orders_page.number }} / {{ assembly_orders_page.paginator.num_pages }}</span></li>
+        <li class="page-item {% if not assembly_orders_page.has_next %}disabled{% endif %}">
+            {% if assembly_orders_page.has_next %}
+            <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ assembly_orders_page.next_page_number }}">下一页</a>
+            {% else %}
+            <span class="page-link">下一页</span>
+            {% endif %}
+        </li>
+    </ul>
+</nav>
+{% endif %}
+{% endblock %}

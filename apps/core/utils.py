@@ -8,7 +8,128 @@ from difflib import SequenceMatcher
 import math
 import re
 from django.db.models import Sum, Q, Count, F
-from .models import SystemSettings, Order, OrderItem, SKU, Transfer, TransferAllocation, InventoryUnit, Part
+from django.utils import timezone
+from .models import (
+    SystemSettings,
+    Order,
+    OrderItem,
+    SKU,
+    Transfer,
+    TransferAllocation,
+    InventoryUnit,
+    Part,
+    MaintenanceWorkOrder,
+    PartRecoveryInspection,
+    RiskEvent,
+    ApprovalTask,
+    DataConsistencyCheckRun,
+)
+
+
+def build_finance_reconciliation_rows(
+    status_filter='',
+    keyword='',
+    mismatch_only=False,
+    mismatch_field='',
+    min_diff_amount=Decimal('0.00'),
+):
+    """财务对账行构建（页面/API/巡检复用）。"""
+    status_filter = (status_filter or '').strip()
+    keyword = (keyword or '').strip()
+    mismatch_field = (mismatch_field or '').strip()
+    try:
+        min_diff_amount = Decimal(str(min_diff_amount or '0'))
+    except Exception:
+        min_diff_amount = Decimal('0.00')
+    if min_diff_amount < Decimal('0.00'):
+        min_diff_amount = Decimal('0.00')
+    orders = Order.objects.prefetch_related('items').annotate(
+        tx_deposit_received=Sum('finance_transactions__amount', filter=Q(finance_transactions__transaction_type='deposit_received')),
+        tx_balance_received=Sum('finance_transactions__amount', filter=Q(finance_transactions__transaction_type='balance_received')),
+        tx_deposit_refund=Sum('finance_transactions__amount', filter=Q(finance_transactions__transaction_type='deposit_refund')),
+        tx_penalty=Sum('finance_transactions__amount', filter=Q(finance_transactions__transaction_type='penalty_charge')),
+    ).order_by('-created_at')
+    if status_filter:
+        orders = orders.filter(status=status_filter)
+    if keyword:
+        orders = orders.filter(
+            Q(order_no__icontains=keyword) |
+            Q(customer_name__icontains=keyword) |
+            Q(customer_phone__icontains=keyword)
+        )
+
+    rows = []
+    for order in orders:
+        expected_deposit = Decimal('0.00')
+        for item in order.items.all():
+            expected_deposit += (item.deposit or Decimal('0.00')) * Decimal(int(item.quantity or 0))
+        tx_deposit_received = order.tx_deposit_received or Decimal('0.00')
+        tx_balance_received = order.tx_balance_received or Decimal('0.00')
+        tx_deposit_refund = order.tx_deposit_refund or Decimal('0.00')
+        tx_penalty = order.tx_penalty or Decimal('0.00')
+        expected_balance_received = (order.total_amount or Decimal('0.00')) - (order.balance or Decimal('0.00'))
+        expected_refund = (order.deposit_paid or Decimal('0.00')) - tx_penalty
+        if expected_refund < Decimal('0.00'):
+            expected_refund = Decimal('0.00')
+
+        deposit_diff = tx_deposit_received - (order.deposit_paid or Decimal('0.00'))
+        balance_diff = tx_balance_received - expected_balance_received
+        refund_diff = tx_deposit_refund - expected_refund if order.status in ['completed', 'cancelled'] else Decimal('0.00')
+        has_mismatch = any(abs(v) > Decimal('0.01') for v in [deposit_diff, balance_diff, refund_diff])
+        suggestions = []
+        if deposit_diff < Decimal('-0.01'):
+            suggestions.append('押金少收，建议补录收押金流水')
+        elif deposit_diff > Decimal('0.01'):
+            suggestions.append('押金多收，建议核对并补录退押/人工调整')
+        if balance_diff < Decimal('-0.01'):
+            suggestions.append('尾款少收，建议补录收尾款流水')
+        elif balance_diff > Decimal('0.01'):
+            suggestions.append('尾款多收，建议核对是否重复记账')
+        if refund_diff < Decimal('-0.01'):
+            suggestions.append('退押不足，建议补录退押流水')
+        elif refund_diff > Decimal('0.01'):
+            suggestions.append('退押超额，建议核对扣罚与退款口径')
+        if has_mismatch and not suggestions:
+            suggestions.append('账务差异需人工复核')
+
+        mismatch_fields = []
+        if abs(deposit_diff) > Decimal('0.01'):
+            mismatch_fields.append('deposit')
+        if abs(balance_diff) > Decimal('0.01'):
+            mismatch_fields.append('balance')
+        if abs(refund_diff) > Decimal('0.01'):
+            mismatch_fields.append('refund')
+
+        rows.append({
+            'order': order,
+            'expected_deposit': expected_deposit,
+            'tx_deposit_received': tx_deposit_received,
+            'deposit_diff': deposit_diff,
+            'expected_balance_received': expected_balance_received,
+            'tx_balance_received': tx_balance_received,
+            'balance_diff': balance_diff,
+            'expected_refund': expected_refund,
+            'tx_deposit_refund': tx_deposit_refund,
+            'refund_diff': refund_diff,
+            'tx_penalty': tx_penalty,
+            'has_mismatch': has_mismatch,
+            'mismatch_fields': mismatch_fields,
+            'suggestions': suggestions,
+        })
+    if mismatch_only:
+        rows = [r for r in rows if r['has_mismatch']]
+    if mismatch_field in ['deposit', 'balance', 'refund']:
+        rows = [r for r in rows if mismatch_field in (r.get('mismatch_fields') or [])]
+    if min_diff_amount > Decimal('0.00'):
+        rows = [
+            r for r in rows
+            if max(
+                abs(r.get('deposit_diff') or Decimal('0.00')),
+                abs(r.get('balance_diff') or Decimal('0.00')),
+                abs(r.get('refund_diff') or Decimal('0.00')),
+            ) >= min_diff_amount
+        ]
+    return rows
 
 
 def get_system_settings():
@@ -33,13 +154,33 @@ def get_system_settings():
     settings.setdefault('transfer_shipped_timeout_days', 3)
     settings.setdefault('outbound_max_days_warn', 10)
     settings.setdefault('outbound_max_hops_warn', 4)
+    settings.setdefault('approval_pending_warn_hours', 24)
+    settings.setdefault('approval_required_count_default', 1)
+    settings.setdefault('approval_required_count_order_force_cancel', 1)
+    settings.setdefault('approval_required_count_transfer_cancel_task', 1)
+    settings.setdefault('approval_required_count_unit_dispose', 1)
+    settings.setdefault('approval_required_count_unit_disassemble', 1)
+    settings.setdefault('approval_required_count_unit_scrap', 1)
+    settings.setdefault('approval_required_count_map', '{}')
+    settings.setdefault('alert_notify_enabled', 0)
+    settings.setdefault('alert_notify_webhook_url', '')
+    settings.setdefault('alert_notify_min_severity', 'warning')
+    settings.setdefault('page_size_default', 10)
+    settings.setdefault('page_size_transfer_candidates', 5)
+    settings.setdefault('page_size_outbound_topology_units', 5)
+    settings.setdefault('transfer_score_weight_date', 100)
+    settings.setdefault('transfer_score_weight_confidence', 10)
+    settings.setdefault('transfer_score_weight_distance', 1)
 
     return settings
 
 
 def get_dashboard_stats_payload(include_transfer_available=False):
     """统一工作台统计口径（页面/API共用）。"""
-    total_stock = SKU.objects.filter(is_active=True).aggregate(total=Sum('stock'))['total'] or 0
+    total_stock = sum(
+        sku.effective_stock
+        for sku in SKU.objects.filter(is_active=True).only('id', 'stock')
+    )
     occupied_raw = OrderItem.objects.filter(
         order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
         sku__is_active=True
@@ -55,33 +196,76 @@ def get_dashboard_stats_payload(include_transfer_available=False):
     total_revenue = Order.objects.filter(status='completed').aggregate(total=Sum('total_amount'))['total'] or Decimal('0.00')
     pending_revenue = Order.objects.exclude(status__in=['completed', 'cancelled']).aggregate(total=Sum('balance'))['total'] or Decimal('0.00')
 
+    pending_orders_count = Order.objects.filter(status='pending').count()
+    delivered_orders_count = Order.objects.filter(status='delivered').count()
+    completed_orders_count = Order.objects.filter(status='completed').count()
+    cancelled_orders_count = Order.objects.filter(status='cancelled').count()
+    total_orders_count = Order.objects.count()
+    fulfillment_rate = round((completed_orders_count / total_orders_count) * 100, 1) if total_orders_count else 0.0
+    cancel_rate = round((cancelled_orders_count / total_orders_count) * 100, 1) if total_orders_count else 0.0
+    completed_orders = Order.objects.filter(status='completed', ship_date__isnull=False, return_date__isnull=False)
+    transit_days = []
+    for o in completed_orders.only('ship_date', 'return_date'):
+        if o.return_date and o.ship_date:
+            transit_days.append(max((o.return_date - o.ship_date).days, 0))
+    avg_transit_days = round(sum(transit_days) / len(transit_days), 1) if transit_days else 0.0
+    warning_cutoff = today = timezone.localdate()
+    warning_end = warning_cutoff + timedelta(days=7)
+    shipped_statuses = ['delivered', 'in_use', 'returned', 'completed']
+    due_within_7_days_count = (
+        Order.objects.filter(
+            ship_date__gt=warning_cutoff,
+            ship_date__lte=warning_end,
+        )
+        .exclude(status__in=shipped_statuses)
+        .count()
+    )
+
     stats = {
-        'pending_orders': Order.objects.filter(status='pending').count(),
-        'delivered_orders': Order.objects.filter(status='delivered').count(),
-        'completed_orders': Order.objects.filter(status='completed').count(),
+        'pending_orders': pending_orders_count,
+        'delivered_orders': delivered_orders_count,
+        'completed_orders': completed_orders_count,
+        'cancelled_orders': cancelled_orders_count,
         'warehouse_available_stock': warehouse_available_stock,
-        'total_orders': Order.objects.count(),
+        'total_orders': total_orders_count,
         'total_skus': SKU.objects.filter(is_active=True).count(),
         'low_stock_parts': Part.objects.filter(is_active=True, current_stock__lt=F('safety_stock')).count(),
         'total_revenue': total_revenue,
         'pending_revenue': pending_revenue,
+        'open_risk_events': RiskEvent.objects.filter(status='open').count(),
+        'fulfillment_rate': fulfillment_rate,
+        'cancel_rate': cancel_rate,
+        'avg_transit_days': avg_transit_days,
+        'due_within_7_days_count': due_within_7_days_count,
+        'pending_recovery_inspections': PartRecoveryInspection.objects.filter(status='pending').count(),
+        'repair_recovery_inspections': PartRecoveryInspection.objects.filter(status='repair').count(),
+        'draft_maintenance_work_orders': MaintenanceWorkOrder.objects.filter(status='draft').count(),
     }
     if include_transfer_available:
         stats['transfer_available_count'] = len(find_transfer_candidates())
     return stats
 
 
-def get_role_dashboard_payload(user):
+def get_role_dashboard_payload(user, view_role=None):
     """
     角色看板数据层V1（只读聚合）：
     - 输出基础统计
     - 根据角色输出推荐关注卡片
     """
     base = get_dashboard_stats_payload(include_transfer_available=True)
-    role = getattr(user, 'role', 'warehouse_staff')
+    role = (view_role or getattr(user, 'role', 'warehouse_staff') or 'warehouse_staff').strip()
+    valid_roles = {'admin', 'manager', 'warehouse_manager', 'warehouse_staff', 'customer_service'}
+    if role not in valid_roles:
+        role = getattr(user, 'role', 'warehouse_staff')
 
     pending_transfer_tasks = Transfer.objects.filter(status='pending').count()
-    overdue_pending_transfers = 0
+    settings = get_system_settings()
+    transfer_pending_timeout_hours = int(settings.get('transfer_pending_timeout_hours', 24) or 24)
+    transfer_cutoff = timezone.now() - timedelta(hours=transfer_pending_timeout_hours)
+    overdue_pending_transfers = Transfer.objects.filter(status='pending', created_at__lt=transfer_cutoff).count()
+    approval_warn_hours = int(settings.get('approval_pending_warn_hours', 24) or 24)
+    approval_cutoff = timezone.now() - timedelta(hours=approval_warn_hours)
+    overdue_pending_approvals = ApprovalTask.objects.filter(status='pending', created_at__lt=approval_cutoff).count()
 
     risk_entries = [
         {
@@ -101,15 +285,44 @@ def get_role_dashboard_payload(user):
             'severity': 'danger',
         },
     ]
+    if base.get('open_risk_events', 0) > 0:
+        risk_entries.insert(0, {
+            'key': 'open_risk_events',
+            'label': '待处理风险事件',
+            'value': base['open_risk_events'],
+            'url_name': 'risk_events_list',
+            'query': 'status=open',
+            'severity': 'danger',
+        })
+    if overdue_pending_approvals > 0:
+        risk_entries.insert(0, {
+            'key': 'overdue_pending_approvals',
+            'label': '超时待审批',
+            'value': overdue_pending_approvals,
+            'url_name': 'approvals_list',
+            'query': 'status=pending',
+            'severity': 'danger',
+        })
+    if overdue_pending_transfers > 0:
+        risk_entries.insert(0, {
+            'key': 'overdue_pending_transfers',
+            'label': '超时待执行转寄',
+            'value': overdue_pending_transfers,
+            'url_name': 'transfers_list',
+            'query': 'panel=tasks&status=pending',
+            'severity': 'danger',
+        })
 
     if role in ['admin', 'manager']:
         view_type = 'business'
+        warehouse_insights = []
         focus_cards = [
-            {'key': 'total_revenue', 'label': '总营收', 'value': base['total_revenue']},
-            {'key': 'pending_revenue', 'label': '待收款', 'value': base['pending_revenue']},
-            {'key': 'pending_orders', 'label': '待处理订单', 'value': base['pending_orders']},
-            {'key': 'completed_orders', 'label': '已完成订单', 'value': base['completed_orders']},
-            {'key': 'transfer_available_count', 'label': '可转寄候选', 'value': base['transfer_available_count']},
+            {'key': 'total_revenue', 'label': '总营收', 'value': base['total_revenue'], 'url_name': 'finance_transactions_list', 'query': ''},
+            {'key': 'pending_revenue', 'label': '待收款', 'value': base['pending_revenue'], 'url_name': 'orders_list', 'query': ''},
+            {'key': 'pending_orders', 'label': '待处理订单', 'value': base['pending_orders'], 'url_name': 'orders_list', 'query': 'status=pending'},
+            {'key': 'due_within_7_days_count', 'label': '7天内到期', 'value': base['due_within_7_days_count'], 'url_name': 'orders_list', 'query': 'sla=warning'},
+            {'key': 'completed_orders', 'label': '已完成订单', 'value': base['completed_orders'], 'url_name': 'orders_list', 'query': 'status=completed'},
+            {'key': 'transfer_available_count', 'label': '可转寄候选', 'value': base['transfer_available_count'], 'url_name': 'transfers_list', 'query': 'panel=candidates'},
         ]
         quick_actions = [
             {'label': '新建订单', 'url_name': 'order_create', 'style': 'primary'},
@@ -128,11 +341,34 @@ def get_role_dashboard_payload(user):
         })
     elif role in ['warehouse_manager', 'warehouse_staff']:
         view_type = 'warehouse'
+        top_issue_parts = list(
+            Part.objects.filter(is_active=True).annotate(
+                issue_rows=Count(
+                    'inventory_unit_parts',
+                    filter=Q(
+                        inventory_unit_parts__is_active=True,
+                        inventory_unit_parts__status__in=['missing', 'damaged', 'lost'],
+                    )
+                )
+            ).filter(issue_rows__gt=0).order_by('-issue_rows', 'name')[:3]
+        )
+        top_recovery_parts = list(
+            Part.objects.filter(is_active=True).annotate(
+                pending_qty=Sum('recovery_inspections__quantity', filter=Q(recovery_inspections__status='pending')),
+                repair_qty=Sum('recovery_inspections__quantity', filter=Q(recovery_inspections__status='repair')),
+            ).filter(
+                Q(pending_qty__gt=0) | Q(repair_qty__gt=0)
+            ).order_by('-pending_qty', '-repair_qty', 'name')[:3]
+        )
         focus_cards = [
-            {'key': 'warehouse_available_stock', 'label': '仓库可用库存', 'value': base['warehouse_available_stock']},
-            {'key': 'low_stock_parts', 'label': '低库存部件', 'value': base['low_stock_parts']},
-            {'key': 'delivered_orders', 'label': '已发货订单', 'value': base['delivered_orders']},
-            {'key': 'pending_transfer_tasks', 'label': '待执行转寄任务', 'value': pending_transfer_tasks},
+            {'key': 'warehouse_available_stock', 'label': '仓库可用库存', 'value': base['warehouse_available_stock'], 'url_name': 'skus_list', 'query': ''},
+            {'key': 'low_stock_parts', 'label': '低库存部件', 'value': base['low_stock_parts'], 'url_name': 'parts_inventory_list', 'query': 'low=1'},
+            {'key': 'pending_recovery_inspections', 'label': '待质检回件', 'value': base['pending_recovery_inspections'], 'url_name': 'part_recovery_inspections_list', 'query': 'status=pending'},
+            {'key': 'repair_recovery_inspections', 'label': '待维修回件', 'value': base['repair_recovery_inspections'], 'url_name': 'part_recovery_inspections_list', 'query': 'status=repair'},
+            {'key': 'draft_maintenance_work_orders', 'label': '待执行维修单', 'value': base['draft_maintenance_work_orders'], 'url_name': 'maintenance_work_orders_list', 'query': 'status=draft'},
+            {'key': 'pending_transfer_tasks', 'label': '待执行转寄任务', 'value': pending_transfer_tasks, 'url_name': 'transfers_list', 'query': 'panel=tasks&status=pending'},
+            {'key': 'due_within_7_days_count', 'label': '7天内到期', 'value': base['due_within_7_days_count'], 'url_name': 'orders_list', 'query': 'sla=warning'},
+            {'key': 'delivered_orders', 'label': '已发货订单', 'value': base['delivered_orders'], 'url_name': 'orders_list', 'query': 'status=delivered'},
         ]
         quick_actions = [
             {'label': '订单中心', 'url_name': 'orders_list', 'style': 'primary'},
@@ -140,6 +376,7 @@ def get_role_dashboard_payload(user):
             {'label': '产品管理', 'url_name': 'skus_list', 'style': 'outline-secondary'},
             {'label': '在外库存', 'url_name': 'outbound_inventory_dashboard', 'style': 'outline-secondary'},
             {'label': '部件库存', 'url_name': 'parts_inventory_list', 'style': 'outline-secondary'},
+            {'label': '仓储报表', 'url_name': 'warehouse_reports', 'style': 'outline-secondary'},
         ]
         risk_entries.insert(0, {
             'key': 'pending_orders',
@@ -149,13 +386,46 @@ def get_role_dashboard_payload(user):
             'query': 'status=pending',
             'severity': 'info',
         })
+        warehouse_insights = []
+        if top_issue_parts:
+            warehouse_insights.append({
+                'title': '高频异常部件',
+                'items': [
+                    {
+                        'label': part.name,
+                        'value': f"{part.issue_rows} 条异常",
+                        'url_name': 'warehouse_reports',
+                        'query': f'part_id={part.id}&range=30',
+                        'detail_url_name': 'part_issue_pool',
+                        'detail_query': f'keyword={part.name}',
+                    }
+                    for part in top_issue_parts
+                ]
+            })
+        if top_recovery_parts:
+            warehouse_insights.append({
+                'title': '回件待处理焦点',
+                'items': [
+                    {
+                        'label': part.name,
+                        'value': f"待质检 {part.pending_qty or 0} / 待维修 {part.repair_qty or 0}",
+                        'url_name': 'warehouse_reports',
+                        'query': f'part_id={part.id}&range=30',
+                        'detail_url_name': 'part_recovery_inspections_list',
+                        'detail_query': f'keyword={part.name}',
+                    }
+                    for part in top_recovery_parts
+                ]
+            })
     else:
         view_type = 'service'
+        warehouse_insights = []
         focus_cards = [
-            {'key': 'pending_orders', 'label': '待处理订单', 'value': base['pending_orders']},
-            {'key': 'delivered_orders', 'label': '已发货订单', 'value': base['delivered_orders']},
-            {'key': 'pending_revenue', 'label': '待收款', 'value': base['pending_revenue']},
-            {'key': 'total_orders', 'label': '订单总数', 'value': base['total_orders']},
+            {'key': 'pending_orders', 'label': '待处理订单', 'value': base['pending_orders'], 'url_name': 'orders_list', 'query': 'status=pending'},
+            {'key': 'due_within_7_days_count', 'label': '7天内到期', 'value': base['due_within_7_days_count'], 'url_name': 'orders_list', 'query': 'sla=warning'},
+            {'key': 'delivered_orders', 'label': '已发货订单', 'value': base['delivered_orders'], 'url_name': 'orders_list', 'query': 'status=delivered'},
+            {'key': 'pending_revenue', 'label': '待收款', 'value': base['pending_revenue'], 'url_name': 'orders_list', 'query': ''},
+            {'key': 'total_orders', 'label': '订单总数', 'value': base['total_orders'], 'url_name': 'orders_list', 'query': ''},
         ]
         quick_actions = [
             {'label': '新建订单', 'url_name': 'order_create', 'style': 'primary'},
@@ -171,6 +441,7 @@ def get_role_dashboard_payload(user):
             'query': 'status=pending',
             'severity': 'info',
         })
+        warehouse_insights = []
 
     return {
         'role': role,
@@ -179,11 +450,189 @@ def get_role_dashboard_payload(user):
         'focus_cards': focus_cards,
         'quick_actions': quick_actions,
         'risk_entries': risk_entries,
+        'kpi_entries': [
+            {'key': 'fulfillment_rate', 'label': '履约率', 'value': f"{base.get('fulfillment_rate', 0.0)}%", 'url_name': 'orders_list', 'query': 'status=completed'},
+            {'key': 'cancel_rate', 'label': '取消率', 'value': f"{base.get('cancel_rate', 0.0)}%", 'url_name': 'orders_list', 'query': 'status=cancelled'},
+            {'key': 'avg_transit_days', 'label': '平均在途天数', 'value': f"{base.get('avg_transit_days', 0.0)} 天", 'url_name': 'orders_list', 'query': 'status=completed'},
+        ],
         'risk_hints': {
             'pending_transfer_tasks': pending_transfer_tasks,
             'overdue_pending_transfers': overdue_pending_transfers,
+            'overdue_pending_approvals': overdue_pending_approvals,
             'low_stock_parts': base['low_stock_parts'],
         },
+        'warehouse_insights': warehouse_insights,
+    }
+
+
+def run_data_consistency_checks():
+    """
+    数据一致性巡检（只读）：
+    - SKU库存 vs 单套实例总数
+    - 转寄锁重复聚合
+    - 待执行转寄任务与锁数量匹配
+    - 财务对账差异（订单账 vs 交易流水）
+    """
+    issues = []
+
+    # 1) 兼容字段一致性：SKU.stock 仅作为历史兼容镜像，应同步为该 SKU 激活单套数
+    for sku in SKU.objects.filter(is_active=True):
+        unit_total = InventoryUnit.objects.filter(sku=sku, is_active=True).count()
+        if int(unit_total) != int(sku.stock or 0):
+            issues.append({
+                'type': 'legacy_stock_mismatch',
+                'severity': 'warning',
+                'message': f'SKU {sku.code} 的兼容库存字段与单套实例不一致',
+                'meta': {
+                    'sku_id': sku.id,
+                    'sku_code': sku.code,
+                    'legacy_stock': int(sku.stock or 0),
+                    'unit_total': int(unit_total),
+                }
+            })
+
+    # 2) 锁重复：同 source->target->sku 若存在多条 locked，提示检查（部分拆分可能出现，先按warning）
+    duplicate_locked = (
+        TransferAllocation.objects.filter(status='locked')
+        .values('source_order_id', 'target_order_id', 'sku_id')
+        .annotate(row_count=Count('id'), quantity_total=Sum('quantity'))
+        .filter(row_count__gt=1)
+    )
+    for row in duplicate_locked:
+        issues.append({
+            'type': 'duplicate_locked_allocations',
+            'severity': 'warning',
+            'message': '同来源/目标/SKU存在多条已锁定挂靠记录',
+            'meta': {
+                'source_order_id': row['source_order_id'],
+                'target_order_id': row['target_order_id'],
+                'sku_id': row['sku_id'],
+                'row_count': int(row['row_count'] or 0),
+                'quantity_total': int(row['quantity_total'] or 0),
+            }
+        })
+
+    # 3) 转寄任务与锁数量匹配：pending任务数量不应大于同键 locked 总数
+    pending_transfers = Transfer.objects.filter(status='pending').values(
+        'order_from_id', 'order_to_id', 'sku_id'
+    ).annotate(quantity_total=Sum('quantity'))
+    for row in pending_transfers:
+        locked_qty = (
+            TransferAllocation.objects.filter(
+                source_order_id=row['order_from_id'],
+                target_order_id=row['order_to_id'],
+                sku_id=row['sku_id'],
+                status='locked',
+            ).aggregate(total=Sum('quantity'))['total'] or 0
+        )
+        if int(locked_qty) < int(row['quantity_total'] or 0):
+            issues.append({
+                'type': 'transfer_locked_shortage',
+                'severity': 'error',
+                'message': '待执行转寄任务数量超过已锁定挂靠数量',
+                'meta': {
+                    'source_order_id': row['order_from_id'],
+                    'target_order_id': row['order_to_id'],
+                    'sku_id': row['sku_id'],
+                    'pending_qty': int(row['quantity_total'] or 0),
+                    'locked_qty': int(locked_qty or 0),
+                }
+            })
+
+    # 4) 财务对账差异：复用财务对账口径，将异常订单纳入巡检
+    reconciliation_rows = build_finance_reconciliation_rows(mismatch_only=True)
+    for row in reconciliation_rows:
+        order = row.get('order')
+        if not order:
+            continue
+        issues.append({
+            'type': 'finance_reconciliation_mismatch',
+            'severity': 'warning',
+            'message': f'订单 {order.order_no} 财务对账存在差异',
+            'meta': {
+                'order_id': order.id,
+                'order_no': order.order_no,
+                'customer_name': order.customer_name,
+                'deposit_diff': str(row.get('deposit_diff') or Decimal('0.00')),
+                'balance_diff': str(row.get('balance_diff') or Decimal('0.00')),
+                'refund_diff': str(row.get('refund_diff') or Decimal('0.00')),
+                'mismatch_fields': row.get('mismatch_fields') or [],
+                'suggestions': row.get('suggestions') or [],
+            }
+        })
+
+    type_counts = {}
+    for issue in issues:
+        t = issue.get('type') or 'unknown'
+        type_counts[t] = int(type_counts.get(t, 0)) + 1
+
+    return {
+        'total_issues': len(issues),
+        'error_count': sum(1 for i in issues if i['severity'] == 'error'),
+        'warning_count': sum(1 for i in issues if i['severity'] == 'warning'),
+        'type_counts': type_counts,
+        'issues': issues,
+    }
+
+
+def persist_data_consistency_check_result(result, executed_by=None, source='manual'):
+    """保存一致性巡检结果台账"""
+    result = result or {}
+    return DataConsistencyCheckRun.objects.create(
+        source=source or 'manual',
+        total_issues=int(result.get('total_issues') or 0),
+        summary={
+            'error_count': int(result.get('error_count') or 0),
+            'warning_count': int(result.get('warning_count') or 0),
+            'type_counts': result.get('type_counts') or {},
+        },
+        issues=result.get('issues') or [],
+        executed_by=executed_by,
+    )
+
+
+def build_data_consistency_repair_plan(result):
+    """
+    基于巡检结果生成修复计划（仅包含可自动修复与人工建议）。
+    当前自动修复项：
+    - legacy_stock_mismatch: 将兼容字段 SKU.stock 同步为激活单套数
+    """
+    result = result or {}
+    issues = result.get('issues') or []
+    auto_repairs = []
+    manual_items = []
+    for issue in issues:
+        issue_type = issue.get('type')
+        meta = issue.get('meta') or {}
+        if issue_type == 'legacy_stock_mismatch':
+            auto_repairs.append({
+                'type': issue_type,
+                'sku_id': meta.get('sku_id'),
+                'sku_code': meta.get('sku_code'),
+                'from_stock': int(meta.get('legacy_stock') or 0),
+                'to_stock': int(meta.get('unit_total') or 0),
+            })
+        elif issue_type == 'duplicate_locked_allocations':
+            manual_items.append({
+                'type': issue_type,
+                'message': '同来源/目标/SKU有多条锁，建议人工核对后释放冗余锁。',
+                'meta': meta,
+            })
+        elif issue_type == 'transfer_locked_shortage':
+            manual_items.append({
+                'type': issue_type,
+                'message': '待执行转寄数量超过锁数量，建议先补锁或取消异常任务。',
+                'meta': meta,
+            })
+        else:
+            manual_items.append({
+                'type': issue_type or 'unknown',
+                'message': issue.get('message') or '未知问题，请人工处理。',
+                'meta': meta,
+            })
+    return {
+        'auto_repairs': auto_repairs,
+        'manual_items': manual_items,
     }
 
 
@@ -237,18 +686,19 @@ def check_sku_availability(sku_id, event_date, quantity=1, exclude_order_id=None
     ).aggregate(total=Sum('quantity'))['total'] or 0
     occupied = max(occupied_raw - transfer_allocated, 0)
 
-    raw_available_count = sku.stock - occupied
+    effective_stock = sku.effective_stock
+    raw_available_count = effective_stock - occupied
     available_count = max(raw_available_count, 0)
     overbooked_count = max(-raw_available_count, 0)
 
     return {
         'available': raw_available_count >= quantity,
-        'current_stock': sku.stock,
+        'current_stock': effective_stock,
         'occupied': occupied,
         'available_count': available_count,
         'overbooked_count': overbooked_count,
         'message': (
-            f'仓库可用：{available_count}/{sku.stock}（占用：{occupied}）'
+            f'仓库可用：{available_count}/{effective_stock}（占用：{occupied}）'
             if raw_available_count >= quantity
             else (
                 f'仓库库存不足，仅剩{available_count}套（占用：{occupied}）'
@@ -989,19 +1439,21 @@ def build_transfer_pool_rows():
     for alloc in allocations:
         alloc_map.setdefault((alloc.target_order_id, alloc.sku_id), []).append(alloc)
 
-    active_task_pairs = set(
-        Transfer.objects.filter(
+    active_task_map = {
+        (order_to_id, sku_id): status
+        for order_to_id, sku_id, status in Transfer.objects.filter(
             order_to__status__in=['pending', 'confirmed', 'delivered'],
             status__in=['pending', 'completed']
-        ).values_list('order_to_id', 'sku_id')
-    )
+        ).values_list('order_to_id', 'sku_id', 'status')
+    }
 
     rows = []
     for order in target_orders:
         for item in order.items.all():
             key = (order.id, item.sku_id)
             allocs = alloc_map.get(key, [])
-            has_pending_task = key in active_task_pairs
+            task_status = active_task_map.get(key)
+            has_pending_task = task_status in ['pending', 'completed']
             recommended = get_transfer_match_candidates(
                 order.delivery_address,
                 order.event_date,
@@ -1054,6 +1506,30 @@ def build_transfer_pool_rows():
                 recommended_units_preview = '-'
                 recommended_distance_desc = _distance_desc(rec_sender.get('address', ''), order.delivery_address)
 
+            can_recommend = not has_pending_task
+            if can_recommend:
+                can_recommend_reason = ''
+            elif task_status == 'completed':
+                can_recommend_reason = '已存在已完成转寄任务，不可重推'
+            else:
+                can_recommend_reason = '已存在转寄任务，不可重推'
+
+            can_generate_task = (
+                order.status == 'delivered'
+                and recommended_source_type == 'transfer'
+                and not has_pending_task
+            )
+            if can_generate_task:
+                can_generate_reason = ''
+            elif task_status == 'pending':
+                can_generate_reason = '已存在待执行转寄任务'
+            elif task_status == 'completed':
+                can_generate_reason = '已存在已完成转寄任务'
+            elif order.status != 'delivered':
+                can_generate_reason = '目标订单未发货，暂不可生成任务'
+            else:
+                can_generate_reason = '当前推荐来源为仓库发货，无法生成转寄任务'
+
             rows.append({
                 'row_key': f'{order.id}:{item.sku_id}',
                 'order': order,
@@ -1072,14 +1548,11 @@ def build_transfer_pool_rows():
                 'recommended_units_preview': recommended_units_preview,
                 'recommended_ship_date': rec_ship_date,
                 'has_pending_task': has_pending_task,
-                'can_recommend': not has_pending_task,
-                # 生成任务仅允许在目标单“已发货”状态下触发；
-                # 且推荐来源需要可转寄，同时不能已有待执行任务。
-                'can_generate_task': (
-                    order.status == 'delivered'
-                    and recommended_source_type == 'transfer'
-                    and not has_pending_task
-                ),
+                'task_status': task_status,
+                'can_recommend': can_recommend,
+                'can_recommend_reason': can_recommend_reason,
+                'can_generate_task': can_generate_task,
+                'can_generate_reason': can_generate_reason,
             })
 
     return rows
@@ -1244,12 +1717,13 @@ def get_calendar_data(year, month):
                 sku=sku
             ).aggregate(total=Sum('quantity'))['total'] or 0
 
-            available = sku.stock - occupied
+            total_stock = sku.effective_stock
+            available = total_stock - occupied
 
             # 判断状态
             if available == 0:
                 status = 'full'
-            elif available <= sku.stock * 0.2:
+            elif available <= total_stock * 0.2:
                 status = 'tight'
             else:
                 status = 'ok'
@@ -1257,7 +1731,7 @@ def get_calendar_data(year, month):
             data[sku.id][d] = {
                 'occupied': occupied,
                 'available': available,
-                'total': sku.stock,
+                'total': total_stock,
                 'status': status,
                 'orders': list(orders)
             }

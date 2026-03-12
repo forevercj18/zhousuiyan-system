@@ -15,15 +15,15 @@ ROLE_PERMISSIONS = {
         'actions': ['*'],  # 所有操作
     },
     'manager': {
-        'modules': ['dashboard', 'orders', 'calendar', 'transfers', 'outbound_inventory', 'audit_logs'],
+        'modules': ['dashboard', 'orders', 'calendar', 'transfers', 'outbound_inventory', 'audit_logs', 'risk_events', 'approvals', 'finance', 'ops_center'],
         'actions': ['view', 'create', 'update'],
     },
     'warehouse_manager': {
-        'modules': ['workbench', 'orders', 'skus', 'procurement', 'parts', 'transfers', 'outbound_inventory', 'audit_logs'],
+        'modules': ['workbench', 'orders', 'skus', 'procurement', 'parts', 'transfers', 'outbound_inventory', 'audit_logs', 'risk_events', 'approvals', 'finance', 'ops_center'],
         'actions': ['view', 'create', 'update', 'delete'],
     },
     'warehouse_staff': {
-        'modules': ['workbench', 'skus', 'parts', 'transfers', 'outbound_inventory'],
+        'modules': ['workbench', 'skus', 'parts', 'transfers', 'outbound_inventory', 'finance'],
         'actions': ['view', 'update'],
     },
     'customer_service': {
@@ -43,6 +43,9 @@ ROLE_ACTION_PERMISSIONS = {
         'transfer.create_task',
         'transfer.complete_task',
         'inventory.export_topology',
+        'risk.resolve_event',
+        'approval.review',
+        'finance.manual_adjust',
     ],
     'warehouse_manager': [
         'order.confirm_delivery',
@@ -50,10 +53,13 @@ ROLE_ACTION_PERMISSIONS = {
         'transfer.recommend',
         'transfer.create_task',
         'transfer.complete_task',
+        'unit.dispose',
         'inventory.init_units',
         'inventory.export_topology',
         'sku.upload_image',
         'parts.adjust_stock',
+        'risk.resolve_event',
+        'finance.manual_adjust',
     ],
     'warehouse_staff': [
         'order.confirm_delivery',
@@ -63,6 +69,7 @@ ROLE_ACTION_PERMISSIONS = {
         'transfer.complete_task',
         'inventory.export_topology',
         'sku.upload_image',
+        'finance.manual_adjust',
     ],
     'customer_service': [],
 }
@@ -112,6 +119,15 @@ def has_action_permission(user, action_code):
     role = user.role
     actions = ROLE_ACTION_PERMISSIONS.get(role, [])
     return '*' in actions or action_code in actions
+
+
+def can_request_approval(user):
+    """是否允许提交审批单（执行权不足时）"""
+    if not user.is_authenticated:
+        return False
+    if user.is_superuser:
+        return True
+    return user.role in ['manager', 'warehouse_manager']
 
 
 def require_permission(module, action='view'):
@@ -207,6 +223,10 @@ def get_user_menu(user):
             ]
         },
         {'name': 'audit_logs', 'title': '操作日志', 'url': 'audit_logs', 'icon': '📜'},
+        {'name': 'finance', 'title': '财务流水', 'url': 'finance_transactions_list', 'icon': '💰'},
+        {'name': 'ops_center', 'title': '运维中心', 'url': 'ops_center', 'icon': '🧰'},
+        {'name': 'risk_events', 'title': '风险事件', 'url': 'risk_events_list', 'icon': '⚠️'},
+        {'name': 'approvals', 'title': '审批中心', 'url': 'approvals_list', 'icon': '✅'},
         {'name': 'users', 'title': '用户管理', 'url': 'users_list', 'icon': '👥'},
         {'name': 'settings', 'title': '系统设置', 'url': 'settings', 'icon': '⚙️'},
     ]

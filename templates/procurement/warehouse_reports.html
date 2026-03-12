@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+
+{% block title %}仓储报表 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}仓储报表{% endblock %}
+
+{% block extra_css %}
+<style>
+.summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:16px; }
+.summary-card { background:#fff; border:1px solid #e6ebf2; border-radius:14px; padding:14px 16px; box-shadow:0 8px 24px rgba(15,23,42,.04); }
+.summary-card span { display:block; color:#6b7280; font-size:12px; margin-bottom:6px; }
+.summary-card strong { font-size:24px; color:#111827; }
+.report-grid { display:grid; grid-template-columns:2fr 1fr; gap:16px; margin-top:16px; }
+.report-grid-secondary { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-top:16px; }
+.report-card { background:#fff; border:1px solid #e6ebf2; border-radius:16px; padding:18px; box-shadow:0 8px 24px rgba(15,23,42,.04); }
+.trend-table td, .trend-table th { font-size:13px; }
+.mini-bars { display:flex; gap:6px; align-items:flex-end; min-height:72px; }
+.mini-bar-item { flex:1; text-align:center; }
+.mini-bar { width:100%; border-radius:8px 8px 0 0; min-height:4px; }
+.mini-label { font-size:11px; color:#6b7280; margin-top:6px; }
+.mini-value { font-size:12px; font-weight:600; color:#111827; margin-top:4px; }
+.dist-row { margin-bottom:12px; }
+.dist-row:last-child { margin-bottom:0; }
+.dist-meta { display:flex; justify-content:space-between; font-size:13px; margin-bottom:6px; color:#374151; }
+@media (max-width: 1100px) { .report-grid, .report-grid-secondary { grid-template-columns:1fr; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div class="header-left">
+        <form method="get" class="d-flex flex-wrap gap-2 align-items-center">
+            <label class="mb-0">统计周期：</label>
+            <select name="range" class="form-select" style="max-width:180px;" onchange="this.form.submit()">
+                <option value="7" {% if range_days == 7 %}selected{% endif %}>最近7天</option>
+                <option value="30" {% if range_days == 30 %}selected{% endif %}>最近30天</option>
+            </select>
+            <select name="sku_id" class="form-select" style="max-width:240px;" onchange="this.form.submit()">
+                <option value="">全部SKU</option>
+                {% for sku in sku_choices %}
+                <option value="{{ sku.id }}" {% if sku_filter == sku.id|stringformat:"s" %}selected{% endif %}>{{ sku.code }} - {{ sku.name }}</option>
+                {% endfor %}
+            </select>
+            <select name="part_id" class="form-select" style="max-width:220px;" onchange="this.form.submit()">
+                <option value="">全部部件</option>
+                {% for part in part_choices %}
+                <option value="{{ part.id }}" {% if part_filter == part.id|stringformat:"s" %}selected{% endif %}>{{ part.name }}</option>
+                {% endfor %}
+            </select>
+            <a class="btn btn-sm" href="{% url 'warehouse_reports' %}">重置</a>
+        </form>
+    </div>
+    <div class="header-right">
+        <a class="btn btn-secondary" href="{% url 'warehouse_reports_export' %}{% if export_query %}?{{ export_query }}{% endif %}">导出CSV</a>
+        <a class="btn btn-outline-secondary" href="{% url 'assembly_orders_list' %}">查看装配单</a>
+        <a class="btn btn-outline-secondary" href="{% url 'maintenance_work_orders_list' %}">查看维修工单</a>
+        <a class="btn btn-outline-secondary" href="{% url 'unit_disposal_orders_list' %}">查看单套处置单</a>
+        <a class="btn btn-primary" href="{% url 'part_recovery_inspections_list' %}">查看回件质检池</a>
+    </div>
+</div>
+
+<div class="summary-grid">
+    <div class="summary-card"><span>累计完成装配</span><strong>{{ summary.assembly_completed }}</strong></div>
+    <div class="summary-card"><span>待执行维修单</span><strong>{{ summary.maintenance_draft }}</strong></div>
+    <div class="summary-card"><span>已完成维修单</span><strong>{{ summary.maintenance_completed }}</strong></div>
+    <div class="summary-card"><span>已完成单套处置</span><strong>{{ summary.disposal_completed }}</strong></div>
+    <div class="summary-card"><span>待质检回件</span><strong>{{ summary.recovery_pending }}</strong></div>
+    <div class="summary-card"><span>待维修回件</span><strong>{{ summary.recovery_repair }}</strong></div>
+</div>
+
+<div class="report-grid">
+    <div class="report-card">
+        <h3 class="mb-3">近 {{ range_days }} 天仓储趋势</h3>
+        {% for trend in trends %}
+        <div class="mb-4">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <strong>{{ trend.label }}</strong>
+                <span class="text-muted small">峰值：{{ trend.max_value }}</span>
+            </div>
+            <div class="mini-bars">
+                {% for row in trend.rows %}
+                <div class="mini-bar-item">
+                    <div class="mini-bar" style="height: {{ row.percent }}%; background: {{ trend.color }};"></div>
+                </div>
+                {% endfor %}
+            </div>
+            <div class="d-flex gap-2">
+                {% for row in trend.rows %}
+                <div class="mini-bar-item">
+                    <div class="mini-label">{{ row.date }}</div>
+                    <div class="mini-value">{{ row.value }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <div class="report-card">
+        <h3 class="mb-3">状态分布</h3>
+
+        <div class="mb-3">
+            <div class="fw-semibold mb-2">装配单</div>
+            {% for item in assembly_distribution %}
+            <div class="dist-row">
+                <div class="dist-meta"><span>{{ item.label }}</span><span>{{ item.value }} / {{ item.percent }}%</span></div>
+                <div class="progress" role="progressbar" aria-valuenow="{{ item.percent }}" aria-valuemin="0" aria-valuemax="100">
+                    <div class="progress-bar" style="width: {{ item.percent }}%; background: {{ item.color }};"></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="mb-3">
+            <div class="fw-semibold mb-2">维修工单</div>
+            {% for item in maintenance_distribution %}
+            <div class="dist-row">
+                <div class="dist-meta"><span>{{ item.label }}</span><span>{{ item.value }} / {{ item.percent }}%</span></div>
+                <div class="progress" role="progressbar" aria-valuenow="{{ item.percent }}" aria-valuemin="0" aria-valuemax="100">
+                    <div class="progress-bar" style="width: {{ item.percent }}%; background: {{ item.color }};"></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="mb-3">
+            <div class="fw-semibold mb-2">单套处置</div>
+            {% for item in disposal_distribution %}
+            <div class="dist-row">
+                <div class="dist-meta"><span>{{ item.label }}</span><span>{{ item.value }} / {{ item.percent }}%</span></div>
+                <div class="progress" role="progressbar" aria-valuenow="{{ item.percent }}" aria-valuemin="0" aria-valuemax="100">
+                    <div class="progress-bar" style="width: {{ item.percent }}%; background: {{ item.color }};"></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div>
+            <div class="fw-semibold mb-2">回件质检</div>
+            {% for item in recovery_distribution %}
+            <div class="dist-row">
+                <div class="dist-meta"><span>{{ item.label }}</span><span>{{ item.value }} / {{ item.percent }}%</span></div>
+                <div class="progress" role="progressbar" aria-valuenow="{{ item.percent }}" aria-valuemin="0" aria-valuemax="100">
+                    <div class="progress-bar" style="width: {{ item.percent }}%; background: {{ item.color }};"></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+<div class="report-grid-secondary">
+    <div class="report-card">
+        <h3 class="mb-3">高频损耗部件</h3>
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead>
+                    <tr><th>部件</th><th>异常条数</th></tr>
+                </thead>
+                <tbody>
+                    {% for part in issue_top_parts %}
+                    <tr>
+                        <td>
+                            <a href="{% url 'part_issue_pool' %}?part_id={{ part.id }}{% if sku_filter %}&sku_id={{ sku_filter }}{% endif %}&from_report=1&range={{ range_days }}" class="text-decoration-none">
+                                {{ part.name }}
+                            </a>
+                        </td>
+                        <td>{{ part.issue_rows }}</td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="2" class="text-center text-muted py-3">暂无异常部件</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="report-card">
+        <h3 class="mb-3">维修替换排行</h3>
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead>
+                    <tr><th>部件</th><th>替换次数</th></tr>
+                </thead>
+                <tbody>
+                    {% for part in maintenance_top_parts %}
+                    <tr>
+                        <td>
+                            <a href="{% url 'maintenance_work_orders_list' %}?part_id={{ part.id }}{% if sku_filter %}&sku_id={{ sku_filter }}{% endif %}&from_report=1&range={{ range_days }}" class="text-decoration-none">
+                                {{ part.name }}
+                            </a>
+                        </td>
+                        <td>{{ part.replace_total|default:0 }}</td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="2" class="text-center text-muted py-3">暂无维修替换数据</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="report-card">
+        <h3 class="mb-3">回件质检结果排行</h3>
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead>
+                    <tr><th>部件</th><th>待质检</th><th>待维修</th><th>已回库/报废</th></tr>
+                </thead>
+                <tbody>
+                    {% for part in recovery_top_parts %}
+                    <tr>
+                        <td>
+                            <a href="{% url 'part_recovery_inspections_list' %}?part_id={{ part.id }}{% if sku_filter %}&sku_id={{ sku_filter }}{% endif %}&from_report=1&range={{ range_days }}" class="text-decoration-none">
+                                {{ part.name }}
+                            </a>
+                        </td>
+                        <td>{{ part.pending_qty|default:0 }}</td>
+                        <td>{{ part.repair_qty|default:0 }}</td>
+                        <td>{{ part.returned_qty|default:0 }} / {{ part.scrapped_qty|default:0 }}</td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="4" class="text-center text-muted py-3">暂无回件质检数据</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

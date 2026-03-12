@@ -22,6 +22,7 @@
             </div>
             <button class="btn btn-secondary" type="button" onclick="filterTransfers()">查询</button>
             <a class="btn btn-sm" href="{% url 'transfers_list' %}">重置</a>
+            <a class="btn btn-sm btn-outline-secondary" href="{% url 'transfer_recommendation_logs' %}">推荐回放</a>
             {% if request.user|has_action_perm:'transfer.recommend' %}
             <button class="btn btn-sm btn-primary" type="button" onclick="recommendSelected()">重新推荐（多选）</button>
             {% endif %}
@@ -86,7 +87,7 @@
                             {% if item.can_recommend %}
                             <input type="checkbox" class="candidate-select" value="{{ item.row_key }}">
                             {% else %}
-                            <input type="checkbox" disabled title="已生成待执行任务，不可重推">
+                            <input type="checkbox" disabled title="{{ item.can_recommend_reason }}">
                             {% endif %}
                         </td>
                         <td>
@@ -125,8 +126,10 @@
                             {% endif %}
                         </td>
                         <td>
-                            {% if item.has_pending_task %}
+                            {% if item.task_status == 'pending' %}
                             <span class="badge text-bg-primary">已生成任务</span>
+                            {% elif item.task_status == 'completed' %}
+                            <span class="badge text-bg-success">已完成任务</span>
                             {% elif item.current_source_type == 'warehouse' %}
                             <span class="badge text-bg-warning">仓库挂靠</span>
                             {% else %}
@@ -139,14 +142,14 @@
                                 <form method="post" action="{% url 'transfer_recommend' %}" class="m-0">
                                     {% csrf_token %}
                                     <input type="hidden" name="rows[]" value="{{ item.row_key }}">
-                                    <button type="submit" class="btn btn-sm btn-primary text-nowrap" {% if not item.can_recommend %}disabled{% endif %}>重新推荐</button>
+                                    <button type="submit" class="btn btn-sm btn-primary text-nowrap" {% if not item.can_recommend %}disabled title="{{ item.can_recommend_reason }}"{% endif %}>重新推荐</button>
                                 </form>
                                 {% endif %}
                                 {% if request.user|has_action_perm:'transfer.create_task' %}
                                 <form method="post" action="{% url 'transfer_generate_tasks' %}" class="m-0">
                                     {% csrf_token %}
                                     <input type="hidden" name="rows[]" value="{{ item.row_key }}">
-                                    <button type="submit" class="btn btn-sm btn-success text-nowrap" {% if not item.can_generate_task %}disabled{% endif %}>生成任务</button>
+                                    <button type="submit" class="btn btn-sm btn-success text-nowrap" {% if not item.can_generate_task %}disabled title="{{ item.can_generate_reason }}"{% endif %}>生成任务</button>
                                 </form>
                                 {% endif %}
                             </div>
@@ -243,10 +246,12 @@
                                 <button type="submit" class="btn btn-sm btn-success">完成</button>
                             </form>
                             {% endif %}
-                            {% if request.user|has_action_perm:'transfer.cancel_task' %}
+                            {% if request.user|has_action_perm:'transfer.cancel_task' or request.user.role == 'manager' or request.user.role == 'warehouse_manager' %}
                             <form method="post" action="{% url 'transfer_cancel' task.id %}" style="display:inline;">
                                 {% csrf_token %}
-                                <button type="submit" class="btn btn-sm btn-danger">取消</button>
+                                <button type="submit" class="btn btn-sm btn-danger">
+                                    {% if request.user|has_action_perm:'transfer.cancel_task' %}取消{% else %}提交审批{% endif %}
+                                </button>
                             </form>
                             {% endif %}
                             {% else %}

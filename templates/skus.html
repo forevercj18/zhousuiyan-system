@@ -20,6 +20,7 @@
             <button class="btn btn-secondary" type="button" onclick="filterSkus()">查询</button>
             <a class="btn btn-sm" href="{% url 'skus_list' %}">重置</a>
             <button class="btn btn-sm btn-danger" type="button" onclick="bulkDeleteSkus()">批量删除</button>
+            <a class="btn btn-sm" href="{% url 'assembly_orders_list' %}">查看装配单</a>
         </div>
         <div class="header-right">
             <button class="btn btn-primary" onclick="showCreateModal()">新建产品</button>
@@ -38,7 +39,8 @@
                     <th>类别</th>
                     <th>租金</th>
                     <th>押金</th>
-                    <th>库存</th>
+                    <th>系统库存</th>
+                    <th>部件组成</th>
                     <th>描述</th>
                     <th>操作</th>
                 </tr>
@@ -61,10 +63,19 @@
                     <td>{{ sku.category }}</td>
                     <td class="text-primary">¥{{ sku.rental_price }}</td>
                     <td>¥{{ sku.deposit }}</td>
-                    <td>{{ sku.stock }}</td>
+                    <td>{{ sku.effective_stock }}</td>
+                    <td>
+                        <div>{{ sku.component_count }} 项</div>
+                        <small class="text-muted">{{ sku.component_preview }}</small>
+                    </td>
                     <td class="text-truncate" title="{{ sku.description }}">{{ sku.description|default:"-" }}</td>
                     <td>
                         <div class="action-buttons">
+                            <button class="btn btn-sm btn-success"
+                                    data-id="{{ sku.id }}"
+                                    data-code="{{ sku.code }}"
+                                    data-name="{{ sku.name }}"
+                                    onclick="showAssemblyModal(this)">新增库存</button>
                             <button class="btn btn-sm btn-primary"
                                     data-id="{{ sku.id }}"
                                     data-code="{{ sku.code }}"
@@ -72,7 +83,7 @@
                                     data-category="{{ sku.category }}"
                                     data-rental-price="{{ sku.rental_price }}"
                                     data-deposit="{{ sku.deposit }}"
-                                    data-stock="{{ sku.stock }}"
+                                    data-stock="{{ sku.effective_stock }}"
                                     data-description="{{ sku.description|default:''|escape }}"
                                     data-image-url="{% if sku.image %}{{ sku.image.url }}{% endif %}"
                                     onclick="showEditModal(this)">编辑</button>
@@ -82,7 +93,7 @@
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="10" class="text-center">暂无产品数据</td>
+                    <td colspan="11" class="text-center">暂无产品数据</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -144,9 +155,8 @@
                     <input type="number" name="deposit" class="form-control" step="0.01" min="0" required>
                 </div>
             </div>
-            <div class="form-group">
-                <label>库存数量</label>
-                <input type="number" name="stock" class="form-control" value="0" min="0">
+            <div class="alert alert-light border text-muted small mb-3">
+                新建产品只创建套餐定义和 BOM，不直接录入库存。库存增加请在保存后使用“新增库存”装配生成。
             </div>
             <div class="form-group">
                 <label>描述</label>
@@ -157,6 +167,12 @@
                 <input type="file" name="image" class="form-control" accept="image/*">
                 <small class="form-text">建议上传 1:1 或 4:3 图片，便于快速识别</small>
                 <div id="createImagePreviewWrap" class="mt-2 text-muted">未选择图片</div>
+            </div>
+            <div class="form-group">
+                <label>部件组成（BOM）</label>
+                <div id="createBomRows" class="d-flex flex-column gap-2"></div>
+                <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addBomRow('create')">+ 添加部件</button>
+                <small class="form-text">可选：用于后续部件损耗、维修、补件统计。</small>
             </div>
             <div class="form-actions">
                 <button type="button" class="btn btn-secondary" onclick="closeModal('createModal')">取消</button>
@@ -197,9 +213,8 @@
                     <input type="number" name="deposit" id="edit_deposit" class="form-control" step="0.01" min="0" required>
                 </div>
             </div>
-            <div class="form-group">
-                <label>库存数量</label>
-                <input type="number" name="stock" id="edit_stock" class="form-control" min="0">
+            <div class="alert alert-light border text-muted small mb-3">
+                当前库存：<strong id="edit_stock_text">0</strong> 套。库存不支持直接手工修改，请使用“新增库存”装配生成。
             </div>
             <div class="form-group">
                 <label>描述</label>
@@ -217,9 +232,41 @@
                     </label>
                 </div>
             </div>
+            <div class="form-group">
+                <label>部件组成（BOM）</label>
+                <div id="editBomRows" class="d-flex flex-column gap-2"></div>
+                <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addBomRow('edit')">+ 添加部件</button>
+                <small class="form-text">修改后将覆盖该 SKU 原有 BOM 组成。</small>
+            </div>
             <div class="form-actions">
                 <button type="button" class="btn btn-secondary" onclick="closeModal('editModal')">取消</button>
                 <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div id="assemblyModal" class="modal">
+    <div class="modal-content">
+        <span class="close" onclick="closeModal('assemblyModal')">&times;</span>
+        <h3>新增库存（装配）</h3>
+        <form method="POST" id="assemblyForm">
+            {% csrf_token %}
+            <div class="alert alert-info small">
+                <div>SKU：<strong id="assemblySkuTitle">-</strong></div>
+                <div>说明：系统将按已配置 BOM 扣减部件库存，并自动生成单套编号。</div>
+            </div>
+            <div class="form-group">
+                <label>新增套数 <span class="required">*</span></label>
+                <input type="number" name="assembly_quantity" id="assembly_quantity" class="form-control" min="1" value="1" required>
+            </div>
+            <div class="form-group">
+                <label>备注</label>
+                <textarea name="assembly_notes" id="assembly_notes" class="form-control" rows="3" placeholder="如：新采购部件到货后装配"></textarea>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('assemblyModal')">取消</button>
+                <button type="submit" class="btn btn-success">确认装配</button>
             </div>
         </form>
     </div>
@@ -239,7 +286,71 @@
     </div>
 </div>
 
+{{ sku_components_map_json|json_script:"skuComponentsMapData" }}
+
 <script>
+const SKU_COMPONENTS_MAP = JSON.parse(document.getElementById('skuComponentsMapData').textContent || '{}');
+const BOM_PARTS = [
+{% for part in parts %}
+    { id: {{ part.id }}, label: '{{ part.name|escapejs }}{% if part.spec %}（{{ part.spec|escapejs }}）{% endif %}' },
+{% endfor %}
+];
+
+function buildPartOptions(selectedId) {
+    const selected = String(selectedId || '');
+    const base = ['<option value="">请选择部件</option>'];
+    BOM_PARTS.forEach((part) => {
+        const pid = String(part.id);
+        const selectedAttr = pid === selected ? ' selected' : '';
+        base.push(`<option value="${pid}"${selectedAttr}>${part.label}</option>`);
+    });
+    return base.join('');
+}
+
+function createBomRowHtml(mode, row) {
+    const partId = row && row.part_id ? row.part_id : '';
+    const qty = row && row.quantity_per_set ? row.quantity_per_set : 1;
+    const notes = row && row.notes ? String(row.notes).replace(/"/g, '&quot;') : '';
+    return (
+        `<div class="d-flex align-items-center gap-2 bom-row">` +
+            `<select name="component_part_id[]" class="form-control" style="max-width:260px;">${buildPartOptions(partId)}</select>` +
+            `<input type="number" name="component_qty[]" class="form-control" min="1" value="${qty}" style="max-width:120px;" placeholder="单套用量">` +
+            `<input type="text" name="component_notes[]" class="form-control" value="${notes}" placeholder="备注（可选）">` +
+            `<button type="button" class="btn btn-sm btn-outline-danger" onclick="removeBomRow(this)">删除</button>` +
+        `</div>`
+    );
+}
+
+function renderBomRows(mode, rows) {
+    const wrap = document.getElementById(mode + 'BomRows');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    const list = rows && rows.length ? rows : [];
+    if (!list.length) {
+        wrap.innerHTML = createBomRowHtml(mode, {});
+        return;
+    }
+    list.forEach((row) => {
+        wrap.insertAdjacentHTML('beforeend', createBomRowHtml(mode, row));
+    });
+}
+
+function addBomRow(mode) {
+    const wrap = document.getElementById(mode + 'BomRows');
+    if (!wrap) return;
+    wrap.insertAdjacentHTML('beforeend', createBomRowHtml(mode, {}));
+}
+
+function removeBomRow(btn) {
+    const row = btn.closest('.bom-row');
+    if (!row) return;
+    const parent = row.parentElement;
+    row.remove();
+    if (parent && !parent.querySelector('.bom-row')) {
+        parent.insertAdjacentHTML('beforeend', createBomRowHtml(parent.id.includes('edit') ? 'edit' : 'create', {}));
+    }
+}
+
 function filterSkus() {
     const keyword = (document.getElementById('keywordInput')?.value || '').trim();
     const category = (document.getElementById('categoryInput')?.value || '').trim();
@@ -256,6 +367,7 @@ function showCreateModal() {
     const createFile = document.querySelector('#createModal input[name="image"]');
     if (createPreview) createPreview.textContent = '未选择图片';
     if (createFile) createFile.value = '';
+    renderBomRows('create', []);
 }
 
 function showEditModal(btn) {
@@ -275,7 +387,7 @@ function showEditModal(btn) {
     document.getElementById('edit_category').value = category;
     document.getElementById('edit_rental_price').value = rentalPrice;
     document.getElementById('edit_deposit').value = deposit;
-    document.getElementById('edit_stock').value = stock;
+    document.getElementById('edit_stock_text').textContent = stock;
     document.getElementById('edit_description').value = description || '';
     document.getElementById('edit_image').value = '';
     document.getElementById('edit_clear_image').checked = false;
@@ -290,7 +402,19 @@ function showEditModal(btn) {
     } else {
         previewWrap.textContent = '暂无图片';
     }
+    renderBomRows('edit', SKU_COMPONENTS_MAP[String(id)] || []);
     document.getElementById('editModal').style.display = 'block';
+}
+
+function showAssemblyModal(btn) {
+    const id = btn.getAttribute('data-id');
+    const code = btn.getAttribute('data-code') || '';
+    const name = btn.getAttribute('data-name') || '';
+    document.getElementById('assemblyForm').action = `/skus/${id}/assemble/`;
+    document.getElementById('assemblySkuTitle').textContent = `${code} - ${name}`;
+    document.getElementById('assembly_quantity').value = '1';
+    document.getElementById('assembly_notes').value = '';
+    document.getElementById('assemblyModal').style.display = 'block';
 }
 
 function openSkuImagePreview(imageUrl, title) {
@@ -335,6 +459,7 @@ function bindSkuImageInputPreview(inputSelector, previewSelector) {
 document.addEventListener('DOMContentLoaded', function () {
     bindSkuImageInputPreview('#createModal input[name=\"image\"]', '#createImagePreviewWrap');
     bindSkuImageInputPreview('#edit_image', '#editSelectedImagePreviewWrap');
+    renderBomRows('create', []);
 });
 
 function closeModal(modalId) {

@@ -54,6 +54,20 @@
                            value="{% if form_values.customer_phone %}{{ form_values.customer_phone }}{% elif order %}{{ order.customer_phone }}{% endif %}"
                            {% if mode == 'view' %}readonly{% else %}required{% endif %}>
                 </div>
+                <div class="form-group">
+                    <label for="customer_wechat">微信号</label>
+                    <input type="text" id="customer_wechat" name="customer_wechat" class="form-control"
+                           value="{% if form_values.customer_wechat %}{{ form_values.customer_wechat }}{% elif order %}{{ order.customer_wechat }}{% endif %}"
+                           placeholder="请输入客户微信号"
+                           {% if mode == 'view' %}readonly{% endif %}>
+                </div>
+                <div class="form-group">
+                    <label for="xianyu_order_no">闲鱼订单号</label>
+                    <input type="text" id="xianyu_order_no" name="xianyu_order_no" class="form-control"
+                           value="{% if form_values.xianyu_order_no %}{{ form_values.xianyu_order_no }}{% elif order %}{{ order.xianyu_order_no }}{% endif %}"
+                           placeholder="请输入闲鱼订单号"
+                           {% if mode == 'view' %}readonly{% endif %}>
+                </div>
             </div>
             <div class="form-row">
                 <div class="form-group">
@@ -102,11 +116,11 @@
                                     {% for sku in skus %}
                                     <option value="{{ sku.id }}"
                                             data-name="{{ sku.name }}"
-                                            data-stock="{{ sku.stock }}"
+                                            data-stock="{{ sku.effective_stock }}"
                                             data-price="{{ sku.rental_price }}"
                                             data-deposit="{{ sku.deposit }}"
                                             {% if sku.id == row.item.sku_id %}selected{% endif %}>
-                                        {{ sku.name }} - ¥{{ sku.rental_price }} (库存: {{ sku.stock }})
+                                        {{ sku.name }} - ¥{{ sku.rental_price }} (库存: {{ sku.effective_stock }})
                                     </option>
                                     {% endfor %}
                                 </select>
@@ -150,10 +164,10 @@
                                 {% for sku in skus %}
                                 <option value="{{ sku.id }}"
                                         data-name="{{ sku.name }}"
-                                        data-stock="{{ sku.stock }}"
+                                        data-stock="{{ sku.effective_stock }}"
                                         data-price="{{ sku.rental_price }}"
                                         data-deposit="{{ sku.deposit }}">
-                                    {{ sku.name }} - ¥{{ sku.rental_price }} (库存: {{ sku.stock }})
+                                    {{ sku.name }} - ¥{{ sku.rental_price }} (库存: {{ sku.effective_stock }})
                                 </option>
                                 {% endfor %}
                             </select>

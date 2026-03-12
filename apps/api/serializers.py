@@ -4,7 +4,8 @@ REST API 序列化器
 from rest_framework import serializers
 from apps.core.models import (
     User, Order, OrderItem, SKU, Part, PurchaseOrder,
-    PurchaseOrderItem, PartsMovement, Transfer, SystemSettings, AuditLog
+    PurchaseOrderItem, PartsMovement, Transfer, SystemSettings, AuditLog,
+    FinanceTransaction, RiskEvent, ApprovalTask, TransferRecommendationLog,
 )
 
 
@@ -49,7 +50,7 @@ class OrderSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Order
-        fields = ['id', 'order_no', 'customer_name', 'customer_phone', 'customer_email',
+        fields = ['id', 'order_no', 'customer_name', 'customer_phone', 'customer_wechat', 'xianyu_order_no', 'customer_email',
                   'delivery_address', 'return_address', 'event_date', 'rental_days',
                   'ship_date', 'return_date', 'ship_tracking', 'return_tracking',
                   'total_amount', 'deposit_paid', 'balance', 'status', 'status_display',
@@ -62,6 +63,8 @@ class OrderCreateSerializer(serializers.Serializer):
     """创建订单序列化器"""
     customer_name = serializers.CharField(max_length=100)
     customer_phone = serializers.CharField(max_length=20)
+    customer_wechat = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    xianyu_order_no = serializers.CharField(max_length=100, required=False, allow_blank=True)
     customer_email = serializers.EmailField(required=False, allow_blank=True)
     delivery_address = serializers.CharField()
     return_address = serializers.CharField(required=False, allow_blank=True)
@@ -159,3 +162,109 @@ class AuditLogSerializer(serializers.ModelSerializer):
                   'target', 'details', 'ip_address', 'created_at']
         read_only_fields = ['id', 'created_at']
 
+
+class FinanceTransactionSerializer(serializers.ModelSerializer):
+    """资金流水序列化器"""
+    type_display = serializers.CharField(source='get_transaction_type_display', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.full_name', read_only=True)
+
+    class Meta:
+        model = FinanceTransaction
+        fields = ['id', 'order', 'transaction_type', 'type_display', 'amount', 'reference_no', 'notes', 'created_by', 'created_by_name', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
+class RiskEventSerializer(serializers.ModelSerializer):
+    """风险事件序列化器"""
+    level_display = serializers.CharField(source='get_level_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    type_display = serializers.CharField(source='get_event_type_display', read_only=True)
+    order_no = serializers.CharField(source='order.order_no', read_only=True)
+    assignee_name = serializers.SerializerMethodField()
+    detected_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RiskEvent
+        fields = [
+            'id', 'event_type', 'type_display', 'level', 'level_display', 'status', 'status_display',
+            'module', 'title', 'description', 'order', 'order_no', 'transfer',
+            'assignee', 'assignee_name', 'processing_note', 'detected_by', 'detected_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def _user_name(self, user):
+        if not user:
+            return ''
+        return user.full_name or user.username
+
+    def get_assignee_name(self, obj):
+        return self._user_name(obj.assignee)
+
+    def get_detected_by_name(self, obj):
+        return self._user_name(obj.detected_by)
+
+
+class ApprovalTaskSerializer(serializers.ModelSerializer):
+    """审批任务序列化器"""
+    requested_by_name = serializers.SerializerMethodField()
+    reviewed_by_name = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    review_progress = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ApprovalTask
+        fields = [
+            'id', 'task_no', 'action_code', 'module', 'target_type', 'target_id', 'target_label',
+            'summary', 'status', 'status_display',
+            'required_review_count', 'current_review_count', 'review_progress',
+            'requested_by', 'requested_by_name', 'reviewed_by', 'reviewed_by_name',
+            'review_note', 'remind_count', 'last_reminded_at',
+            'created_at', 'reviewed_at', 'executed_at',
+        ]
+        read_only_fields = ['id']
+
+    def _user_name(self, user):
+        if not user:
+            return ''
+        return user.full_name or user.username
+
+    def get_requested_by_name(self, obj):
+        return self._user_name(obj.requested_by)
+
+    def get_reviewed_by_name(self, obj):
+        return self._user_name(obj.reviewed_by)
+
+    def get_review_progress(self, obj):
+        required = max(int(obj.required_review_count or 1), 1)
+        current = int(obj.current_review_count or 0)
+        return f'{min(current, required)}/{required}'
+
+
+class TransferRecommendationLogSerializer(serializers.ModelSerializer):
+    """转寄推荐回放序列化器"""
+    trigger_type_display = serializers.CharField(source='get_trigger_type_display', read_only=True)
+    order_no = serializers.CharField(source='order.order_no', read_only=True)
+    customer_name = serializers.CharField(source='order.customer_name', read_only=True)
+    sku_code = serializers.CharField(source='sku.code', read_only=True)
+    sku_name = serializers.CharField(source='sku.name', read_only=True)
+    operator_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TransferRecommendationLog
+        fields = [
+            'id', 'order', 'order_no', 'customer_name',
+            'sku', 'sku_code', 'sku_name',
+            'trigger_type', 'trigger_type_display',
+            'target_event_date', 'target_address',
+            'before_source_order_ids',
+            'selected_source_order_id', 'selected_source_order_no',
+            'warehouse_needed', 'candidates', 'score_summary',
+            'operator', 'operator_name', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
+
+    def get_operator_name(self, obj):
+        if not obj.operator:
+            return ''
+        return obj.operator.full_name or obj.operator.username

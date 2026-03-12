@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+
+{% block title %}转寄推荐回放 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}转寄推荐回放{% endblock %}
+
+{% block content %}
+<div class="card mb-3">
+  <div class="card-body">
+    <form class="row g-2" method="get">
+      <div class="col-md-2">
+        <select class="form-select" name="trigger_type">
+          <option value="">全部触发类型</option>
+          <option value="recommend" {% if trigger_type == 'recommend' %}selected{% endif %}>转寄中心重推</option>
+          <option value="create" {% if trigger_type == 'create' %}selected{% endif %}>创建订单</option>
+          <option value="manual" {% if trigger_type == 'manual' %}selected{% endif %}>手工触发</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <select class="form-select" name="decision_type">
+          <option value="">全部决策</option>
+          <option value="transfer" {% if decision_type == 'transfer' %}selected{% endif %}>转寄命中</option>
+          <option value="warehouse" {% if decision_type == 'warehouse' %}selected{% endif %}>仓库补量</option>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <input class="form-control" type="text" name="keyword" value="{{ keyword }}" placeholder="订单号/客户/SKU">
+      </div>
+      <div class="col-md-4 d-flex gap-2">
+        <button class="btn btn-primary" type="submit">查询</button>
+        <a class="btn btn-secondary" href="{% url 'transfer_recommendation_logs' %}">重置</a>
+        <a class="btn btn-success" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}export=1">导出CSV</a>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>目标订单</th>
+          <th>SKU</th>
+          <th>触发类型</th>
+          <th>推荐前来源</th>
+          <th>推荐后来源</th>
+          <th>候选数</th>
+          <th>仓库补量</th>
+          <th>评分回放</th>
+          <th>操作人</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for log in logs %}
+        <tr>
+          <td>{{ log.created_at|date:"Y-m-d H:i" }}</td>
+          <td>{{ log.order.order_no }}<br><small class="text-muted">{{ log.order.customer_name }}</small></td>
+          <td>{{ log.sku.code }} - {{ log.sku.name }}</td>
+          <td>{{ log.get_trigger_type_display }}</td>
+          <td>{% if log.before_source_order_ids %}{{ log.before_source_order_ids|join:", " }}{% else %}<span class="text-muted">仓库发货</span>{% endif %}</td>
+          <td>{% if log.selected_source_order_no %}{{ log.selected_source_order_no }}{% else %}<span class="text-muted">仓库发货</span>{% endif %}</td>
+          <td>{{ log.score_summary.candidate_count|default:0 }}</td>
+          <td>{{ log.warehouse_needed }}</td>
+          <td>
+            <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#scoreReplay{{ log.id }}" aria-expanded="false">
+              查看评分
+            </button>
+          </td>
+          <td>{% if log.operator %}{{ log.operator.full_name|default:log.operator.username }}{% else %}-{% endif %}</td>
+        </tr>
+        <tr class="collapse bg-light" id="scoreReplay{{ log.id }}">
+          <td colspan="10">
+            {% if log.candidates %}
+              <div class="small text-muted mb-2">
+                决策说明：{{ log.score_summary.decision_reason|default:'-' }}；
+                权重（时间/可信度/距离）=
+                {{ log.score_summary.weights.date_gap|default:'100' }}/{{ log.score_summary.weights.confidence|default:'10' }}/{{ log.score_summary.weights.distance|default:'1' }}
+              </div>
+              <div class="table-responsive">
+                <table class="table table-sm table-bordered mb-0">
+                  <thead>
+                    <tr>
+                      <th>排名</th>
+                      <th>来源单</th>
+                      <th>时间差分</th>
+                      <th>可信度</th>
+                      <th>距离分</th>
+                      <th>总分</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for item in log.candidates %}
+                    <tr>
+                      <td>
+                        {{ item.score_rank|default:forloop.counter }}
+                        {% if log.selected_source_order_id and item.source_order_id == log.selected_source_order_id %}
+                          <span class="badge bg-success">命中</span>
+                        {% endif %}
+                      </td>
+                      <td>{{ item.source_order_no }}</td>
+                      <td>{{ item.date_gap_score }}</td>
+                      <td>{{ item.distance_confidence }} ({{ item.score_components.confidence_rank|default:'-' }})</td>
+                      <td>{{ item.distance_score }}{% if item.distance_mode == 'geo' %} km{% endif %}</td>
+                      <td>{{ item.score_total|default:'-' }}</td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <span class="text-muted small">无候选快照（仓库发货）</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="10" class="text-center">暂无推荐回放记录</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if logs_page.paginator.num_pages > 1 %}
+  <div class="card-body d-flex justify-content-end gap-2">
+    {% if logs_page.has_previous %}
+      <a class="btn btn-sm btn-outline-secondary" href="?{{ pagination_query }}&page={{ logs_page.previous_page_number }}">上一页</a>
+    {% endif %}
+    <span class="btn btn-sm btn-light disabled">{{ logs_page.number }}/{{ logs_page.paginator.num_pages }}</span>
+    {% if logs_page.has_next %}
+      <a class="btn btn-sm btn-outline-secondary" href="?{{ pagination_query }}&page={{ logs_page.next_page_number }}">下一页</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

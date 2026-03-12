@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+
+{% block title %}财务对账中心 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}财务对账中心{% endblock %}
+
+{% block content %}
+<div class="card mb-3">
+  <div class="card-body">
+    <form class="row g-2" method="get">
+      <div class="col-md-2">
+        <select class="form-select" name="status">
+          <option value="">全部状态</option>
+          <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>待处理</option>
+          <option value="confirmed" {% if status_filter == 'confirmed' %}selected{% endif %}>待发货</option>
+          <option value="delivered" {% if status_filter == 'delivered' %}selected{% endif %}>已发货</option>
+          <option value="returned" {% if status_filter == 'returned' %}selected{% endif %}>已归还</option>
+          <option value="completed" {% if status_filter == 'completed' %}selected{% endif %}>已完成</option>
+          <option value="cancelled" {% if status_filter == 'cancelled' %}selected{% endif %}>已取消</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <input class="form-control" type="text" name="keyword" value="{{ keyword }}" placeholder="订单号/客户/电话">
+      </div>
+      <div class="col-md-2">
+        <select class="form-select" name="mismatch_field">
+          <option value="">全部差异维度</option>
+          <option value="deposit" {% if mismatch_field == 'deposit' %}selected{% endif %}>押金差异</option>
+          <option value="balance" {% if mismatch_field == 'balance' %}selected{% endif %}>尾款差异</option>
+          <option value="refund" {% if mismatch_field == 'refund' %}selected{% endif %}>退押差异</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <input class="form-control" type="number" step="0.01" min="0" name="min_diff_amount" value="{{ min_diff_amount }}" placeholder="最小差异金额">
+      </div>
+      <div class="col-md-1 form-check d-flex align-items-center">
+        <input class="form-check-input me-2" type="checkbox" name="mismatch_only" id="mismatchOnly" value="1" {% if mismatch_only %}checked{% endif %}>
+        <label class="form-check-label" for="mismatchOnly">仅异常</label>
+      </div>
+      <div class="col-md-2 d-flex gap-2">
+        <button class="btn btn-primary" type="submit">查询</button>
+        <a class="btn btn-secondary" href="{% url 'finance_reconciliation' %}">重置</a>
+        <a class="btn btn-success" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}export=1">导出CSV</a>
+      </div>
+    </form>
+    <div class="mt-3 small text-muted">当前异常订单：{{ mismatch_count }}</div>
+  </div>
+</div>
+
+<div class="row g-2 mb-3">
+  <div class="col-md-2">
+    <div class="card"><div class="card-body py-2">
+      <div class="small text-muted">当前数据量</div>
+      <div class="h5 mb-0">{{ mismatch_stats.total }}</div>
+    </div></div>
+  </div>
+  <div class="col-md-2">
+    <div class="card"><div class="card-body py-2">
+      <div class="small text-muted">异常订单</div>
+      <div class="h5 mb-0 text-danger">{{ mismatch_stats.abnormal }}</div>
+    </div></div>
+  </div>
+  <div class="col-md-2">
+    <div class="card"><div class="card-body py-2">
+      <div class="small text-muted">押金差异</div>
+      <div class="h5 mb-0">{{ mismatch_stats.deposit_count }}</div>
+    </div></div>
+  </div>
+  <div class="col-md-2">
+    <div class="card"><div class="card-body py-2">
+      <div class="small text-muted">尾款差异</div>
+      <div class="h5 mb-0">{{ mismatch_stats.balance_count }}</div>
+    </div></div>
+  </div>
+  <div class="col-md-2">
+    <div class="card"><div class="card-body py-2">
+      <div class="small text-muted">退押差异</div>
+      <div class="h5 mb-0">{{ mismatch_stats.refund_count }}</div>
+    </div></div>
+  </div>
+  <div class="col-md-2">
+    <div class="card"><div class="card-body py-2">
+      <div class="small text-muted">最大差异金额</div>
+      <div class="h5 mb-0">￥{{ mismatch_stats.max_abs_diff }}</div>
+    </div></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>订单号</th>
+          <th>客户/状态</th>
+          <th>押金（应/实/差）</th>
+          <th>尾款（应/实/差）</th>
+          <th>退押（应/实/差）</th>
+          <th>扣罚</th>
+          <th>建议</th>
+          <th>结果</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td>{{ r.order.order_no }}</td>
+          <td>{{ r.order.customer_name }}<br><small class="text-muted">{{ r.order.get_status_display }}</small></td>
+          <td>￥{{ r.expected_deposit }} / ￥{{ r.tx_deposit_received }} / <span {% if r.deposit_diff != 0 %}class="text-danger"{% endif %}>￥{{ r.deposit_diff }}</span></td>
+          <td>￥{{ r.expected_balance_received }} / ￥{{ r.tx_balance_received }} / <span {% if r.balance_diff != 0 %}class="text-danger"{% endif %}>￥{{ r.balance_diff }}</span></td>
+          <td>￥{{ r.expected_refund }} / ￥{{ r.tx_deposit_refund }} / <span {% if r.refund_diff != 0 %}class="text-danger"{% endif %}>￥{{ r.refund_diff }}</span></td>
+          <td>￥{{ r.tx_penalty }}</td>
+          <td>
+            {% if r.suggestions %}
+              {% for s in r.suggestions %}
+                <div class="small text-muted">{{ s }}</div>
+              {% endfor %}
+            {% else %}
+              <span class="text-muted">-</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if r.has_mismatch %}
+              <span class="badge text-bg-danger">异常</span>
+              <form method="post" action="{% url 'finance_reconciliation_raise_risk' r.order.id %}" class="mt-1">
+                {% csrf_token %}
+                <input type="hidden" name="note" value="财务对账异常自动上报">
+                <button class="btn btn-sm btn-outline-danger" type="submit">生成风险事件</button>
+              </form>
+            {% else %}
+              <span class="badge text-bg-success">一致</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="8" class="text-center">暂无对账数据</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if rows_page.paginator.num_pages > 1 %}
+  <div class="card-body d-flex justify-content-end gap-2">
+    {% if rows_page.has_previous %}
+      <a class="btn btn-sm btn-outline-secondary" href="?{{ pagination_query }}&page={{ rows_page.previous_page_number }}">上一页</a>
+    {% endif %}
+    <span class="btn btn-sm btn-light disabled">{{ rows_page.number }}/{{ rows_page.paginator.num_pages }}</span>
+    {% if rows_page.has_next %}
+      <a class="btn btn-sm btn-outline-secondary" href="?{{ pagination_query }}&page={{ rows_page.next_page_number }}">下一页</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

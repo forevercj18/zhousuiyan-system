@@ -236,6 +236,10 @@
                     <option value="" {% if not anomaly_only %}selected{% endif %}>全部数据</option>
                     <option value="1" {% if anomaly_only %}selected{% endif %}>仅异常池</option>
                 </select>
+                <select class="form-select" style="max-width:180px;" name="part_issue_only">
+                    <option value="" {% if not part_issue_only %}selected{% endif %}>全部部件状态</option>
+                    <option value="1" {% if part_issue_only %}selected{% endif %}>仅部件异常</option>
+                </select>
                 <button type="submit" class="btn btn-primary">查询</button>
                 <a class="btn btn-secondary" href="{% url 'outbound_inventory_dashboard' %}">重置</a>
             </form>
@@ -252,6 +256,8 @@
                         <th>最近物流单号</th>
                         <th>最近节点</th>
                         <th>最近时间</th>
+                        <th>部件状态</th>
+                        <th>操作</th>
                         <th>健康度</th>
                         <th>预警</th>
                     </tr>
@@ -267,6 +273,32 @@
                         <td>{% if unit.latest_movement %}{{ unit.latest_movement.get_event_type_display }}{% else %}-{% endif %}</td>
                         <td>{% if unit.latest_movement %}{{ unit.latest_movement.event_time|date:"Y-m-d H:i" }}{% else %}-{% endif %}</td>
                         <td>
+                            {% if unit.part_summary.total > 0 %}
+                                {% if unit.part_summary.issue > 0 %}
+                                <span class="badge text-bg-warning">异常 {{ unit.part_summary.issue }}/{{ unit.part_summary.total }}</span>
+                                <small class="text-muted d-block">缺件{{ unit.part_summary.missing }} / 损坏{{ unit.part_summary.damaged }} / 丢失{{ unit.part_summary.lost }}</small>
+                                {% else %}
+                                <span class="badge text-bg-success">正常 {{ unit.part_summary.total }}</span>
+                                {% endif %}
+                            {% else %}
+                                <span class="text-muted">未配置BOM</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <div class="d-flex flex-wrap gap-2">
+                                {% if unit.part_summary.total > 0 %}
+                                <button type="button" class="btn btn-sm btn-outline-primary"
+                                        onclick="openUnitPartsModal('{{ unit.id }}', '{{ unit.unit_no|escapejs }}')">部件盘点</button>
+                                <button type="button" class="btn btn-sm btn-outline-warning"
+                                        onclick="openMaintenanceModal('{{ unit.id }}', '{{ unit.unit_no|escapejs }}')">维修换件</button>
+                                {% endif %}
+                                <button type="button" class="btn btn-sm btn-outline-info"
+                                        onclick="openDisposalModal('{{ unit.id }}', '{{ unit.unit_no|escapejs }}', 'disassemble')">拆解回件</button>
+                                <button type="button" class="btn btn-sm btn-outline-danger"
+                                        onclick="openDisposalModal('{{ unit.id }}', '{{ unit.unit_no|escapejs }}', 'scrap')">报废停用</button>
+                            </div>
+                        </td>
+                        <td>
                             {% if unit.health_level == '健康' %}
                             <span class="badge text-bg-success">{{ unit.health_level }} {{ unit.health_score }}</span>
                             {% elif unit.health_level == '关注' %}
@@ -278,7 +310,7 @@
                         <td>{% if unit.warn_reason %}<span class="badge text-bg-warning">{{ unit.warn_reason }}</span>{% else %}-{% endif %}</td>
                     </tr>
                     {% empty %}
-                    <tr><td colspan="9" class="text-center">暂无单套数据，先点击“初始化单套编号”</td></tr>
+                    <tr><td colspan="11" class="text-center">暂无单套数据，先点击“初始化单套编号”</td></tr>
                     {% endfor %}
                 </tbody>
             </table>
@@ -489,7 +521,211 @@
         {% endif %}
     </div>
 </div>
+<div class="form-section mt-3">
+    <h3>维修工单</h3>
+    <div class="table-responsive">
+        <table class="table table-hover table-striped align-middle data-table mb-0">
+            <thead>
+                <tr>
+                    <th>工单号</th>
+                    <th>单套编号</th>
+                    <th>SKU</th>
+                    <th>问题描述</th>
+                    <th>状态</th>
+                    <th>创建时间</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for work_order in maintenance_work_orders %}
+                <tr>
+                    <td>{{ work_order.work_order_no }}</td>
+                    <td>{{ work_order.unit.unit_no }}</td>
+                    <td>{{ work_order.sku.code }} - {{ work_order.sku.name }}</td>
+                    <td>{{ work_order.issue_desc|default:"-" }}</td>
+                    <td>{{ work_order.get_status_display }}</td>
+                    <td>{{ work_order.created_at|date:"Y-m-d H:i" }}</td>
+                    <td>
+                        {% if work_order.status == 'draft' %}
+                        <form method="post" action="{% url 'maintenance_work_order_complete' work_order.id %}" class="d-inline">
+                            {% csrf_token %}
+                            <input type="hidden" name="next" value="{% url 'outbound_inventory_dashboard' %}">
+                            <button type="submit" class="btn btn-sm btn-success">执行工单</button>
+                        </form>
+                        <form method="post" action="{% url 'maintenance_work_order_cancel' work_order.id %}" class="d-inline ms-1">
+                            {% csrf_token %}
+                            <input type="hidden" name="next" value="{% url 'outbound_inventory_dashboard' %}">
+                            <button type="submit" class="btn btn-sm btn-outline-danger">取消工单</button>
+                        </form>
+                        {% elif work_order.status == 'completed' %}
+                        <form method="post" action="{% url 'maintenance_work_order_reverse' work_order.id %}" class="d-inline">
+                            {% csrf_token %}
+                            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                            <button type="submit" class="btn btn-sm btn-outline-warning" onclick="return confirm('确认冲销该维修工单？')">冲销工单</button>
+                        </form>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="7" class="text-center">暂无维修工单</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+<div class="form-section mt-3">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <h3 class="mb-0">单套处置工单</h3>
+        <a href="{% url 'unit_disposal_orders_list' %}" class="btn btn-sm btn-outline-primary">查看全部</a>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-hover table-striped align-middle data-table mb-0">
+            <thead>
+                <tr>
+                    <th>工单号</th>
+                    <th>动作</th>
+                    <th>单套编号</th>
+                    <th>SKU</th>
+                    <th>状态</th>
+                    <th>原因说明</th>
+                    <th>创建时间</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for order in disposal_orders %}
+                <tr>
+                    <td>{{ order.disposal_no }}</td>
+                    <td>{{ order.get_action_type_display }}</td>
+                    <td>{{ order.unit.unit_no }}</td>
+                    <td>{{ order.sku.code }} - {{ order.sku.name }}</td>
+                    <td>{{ order.get_status_display }}</td>
+                    <td>{{ order.issue_desc|default:"-" }}</td>
+                    <td>{{ order.created_at|date:"Y-m-d H:i" }}</td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="7" class="text-center">暂无单套处置工单</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+<div class="modal fade" id="unitPartsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">单套部件盘点：<span id="unitPartsModalTitle"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <form method="post" id="unitPartsForm">
+                {% csrf_token %}
+                <div class="modal-body">
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th>部件</th>
+                                    <th>应有</th>
+                                    <th>实有</th>
+                                    <th>状态</th>
+                                    <th>备注</th>
+                                </tr>
+                            </thead>
+                            <tbody id="unitPartsTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">保存盘点</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+<div class="modal fade" id="maintenanceModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">维修换件工单：<span id="maintenanceModalTitle"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <form method="post" id="maintenanceForm">
+                {% csrf_token %}
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">问题描述</label>
+                        <textarea name="issue_desc" id="maintenance_issue_desc" class="form-control" rows="2" placeholder="如：主体背景件折损，需要更换"></textarea>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th>故障部件</th>
+                                    <th>替换部件</th>
+                                    <th>数量</th>
+                                    <th>备注</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody id="maintenanceItemsBody"></tbody>
+                        </table>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="addMaintenanceRow()">+ 添加换件明细</button>
+                    <div class="mt-3">
+                        <label class="form-label">工单备注</label>
+                        <textarea name="notes" id="maintenance_notes" class="form-control" rows="2"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-warning">创建工单</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+<div class="modal fade" id="disposalModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><span id="disposalModalActionLabel">单套处置</span>：<span id="disposalModalTitle"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <form method="post" id="disposalForm">
+                {% csrf_token %}
+                <input type="hidden" name="action_type" id="disposal_action_type">
+                <div class="modal-body">
+                    <div class="alert alert-info small mb-3" id="disposalHintText">
+                        拆解会将当前单套中记录的实有部件按数量回收入库；报废不会回收入库，只停用单套。
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">原因说明</label>
+                        <textarea name="issue_desc" id="disposal_issue_desc" class="form-control" rows="2" placeholder="如：部件老化严重 / 单套拆解回件"></textarea>
+                    </div>
+                    <div>
+                        <label class="form-label">备注</label>
+                        <textarea name="notes" id="disposal_notes" class="form-control" rows="2"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-danger">确认执行</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{{ unit_parts_map_json|json_script:"unitPartsMapData" }}
 <script>
+const UNIT_PARTS_MAP = JSON.parse(document.getElementById('unitPartsMapData').textContent || '{}');
+const MAINTENANCE_PART_OPTIONS = `
+    <option value="">请选择部件</option>
+    {% for part in parts_inventory %}
+    <option value="{{ part.id }}">{{ part.name }}{% if part.spec %}（{{ part.spec }}）{% endif %}</option>
+    {% endfor %}
+`;
 const __topologySelection = {
     graphId: null,
     nodeIndex: null,
@@ -720,6 +956,98 @@ document.addEventListener('DOMContentLoaded', function() {
     bindTopologyInteractions();
     resetTopologySelection();
 });
+
+function openUnitPartsModal(unitId, unitNo) {
+    const rows = UNIT_PARTS_MAP[String(unitId)] || [];
+    const tbody = document.getElementById('unitPartsTableBody');
+    const titleEl = document.getElementById('unitPartsModalTitle');
+    const formEl = document.getElementById('unitPartsForm');
+    if (!tbody || !titleEl || !formEl || !window.bootstrap) return;
+
+    titleEl.textContent = unitNo || '';
+    formEl.action = `/outbound-inventory/units/${unitId}/parts/update/`;
+    tbody.innerHTML = '';
+    rows.forEach((row) => {
+        const label = row.part_spec ? `${row.part_name}（${row.part_spec}）` : row.part_name;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td>
+                <input type="hidden" name="part_id[]" value="${row.part_id}">
+                ${label}
+            </td>
+            <td>${row.expected_quantity}</td>
+            <td><input type="number" name="actual_quantity[]" class="form-control form-control-sm" min="0" value="${row.actual_quantity}"></td>
+            <td>
+                <select name="status[]" class="form-select form-select-sm">
+                    <option value="normal" ${row.status === 'normal' ? 'selected' : ''}>正常</option>
+                    <option value="missing" ${row.status === 'missing' ? 'selected' : ''}>缺件</option>
+                    <option value="damaged" ${row.status === 'damaged' ? 'selected' : ''}>损坏</option>
+                    <option value="lost" ${row.status === 'lost' ? 'selected' : ''}>丢失</option>
+                </select>
+            </td>
+            <td><input type="text" name="notes[]" class="form-control form-control-sm" value="${row.notes || ''}" placeholder="备注"></td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    const modal = window.bootstrap.Modal.getOrCreateInstance(document.getElementById('unitPartsModal'));
+    modal.show();
+}
+
+function addMaintenanceRow(defaults) {
+    const tbody = document.getElementById('maintenanceItemsBody');
+    if (!tbody) return;
+    const row = defaults || {};
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+        <td><select name="old_part_id[]" class="form-select form-select-sm">${MAINTENANCE_PART_OPTIONS}</select></td>
+        <td><select name="new_part_id[]" class="form-select form-select-sm">${MAINTENANCE_PART_OPTIONS}</select></td>
+        <td><input type="number" name="replace_quantity[]" class="form-control form-control-sm" min="1" value="${row.qty || 1}"></td>
+        <td><input type="text" name="item_notes[]" class="form-control form-control-sm" value="${row.notes || ''}" placeholder="备注"></td>
+        <td><button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest('tr').remove()">删除</button></td>
+    `;
+    tbody.appendChild(tr);
+    if (row.oldPartId) tr.querySelector('select[name="old_part_id[]"]').value = String(row.oldPartId);
+    if (row.newPartId) tr.querySelector('select[name="new_part_id[]"]').value = String(row.newPartId);
+}
+
+function openMaintenanceModal(unitId, unitNo) {
+    const formEl = document.getElementById('maintenanceForm');
+    const titleEl = document.getElementById('maintenanceModalTitle');
+    const tbody = document.getElementById('maintenanceItemsBody');
+    if (!formEl || !titleEl || !tbody || !window.bootstrap) return;
+    formEl.action = `/outbound-inventory/units/${unitId}/maintenance/create/`;
+    titleEl.textContent = unitNo || '';
+    document.getElementById('maintenance_issue_desc').value = '';
+    document.getElementById('maintenance_notes').value = '';
+    tbody.innerHTML = '';
+    addMaintenanceRow();
+    const modal = window.bootstrap.Modal.getOrCreateInstance(document.getElementById('maintenanceModal'));
+    modal.show();
+}
+
+function openDisposalModal(unitId, unitNo, actionType) {
+    const formEl = document.getElementById('disposalForm');
+    const titleEl = document.getElementById('disposalModalTitle');
+    const actionEl = document.getElementById('disposal_action_type');
+    const actionLabelEl = document.getElementById('disposalModalActionLabel');
+    const hintEl = document.getElementById('disposalHintText');
+    if (!formEl || !titleEl || !actionEl || !actionLabelEl || !hintEl || !window.bootstrap) return;
+    formEl.action = `/outbound-inventory/units/${unitId}/dispose/`;
+    titleEl.textContent = unitNo || '';
+    actionEl.value = actionType || 'scrap';
+    document.getElementById('disposal_issue_desc').value = '';
+    document.getElementById('disposal_notes').value = '';
+    if (actionType === 'disassemble') {
+        actionLabelEl.textContent = '拆解回件';
+        hintEl.textContent = '拆解会将当前单套中记录的实有部件回收入库，并停用该单套。';
+    } else {
+        actionLabelEl.textContent = '报废停用';
+        hintEl.textContent = '报废不会回收入库，只停用该单套并保留处置记录。';
+    }
+    const modal = window.bootstrap.Modal.getOrCreateInstance(document.getElementById('disposalModal'));
+    modal.show();
+}
 </script>
 {% endblock %}
 

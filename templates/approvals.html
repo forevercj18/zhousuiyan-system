@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% load permission_tags %}
+
+{% block title %}审批中心 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}审批中心{% endblock %}
+
+{% block content %}
+<div class="card mb-3">
+  <div class="card-body">
+    <form class="row g-2" method="get">
+      <div class="col-md-2">
+        <select class="form-select" name="status">
+          <option value="">全部状态</option>
+          <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>待审批</option>
+          <option value="executed" {% if status_filter == 'executed' %}selected{% endif %}>已执行</option>
+          <option value="rejected" {% if status_filter == 'rejected' %}selected{% endif %}>已驳回</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <select class="form-select" name="action_code">
+          <option value="">全部动作</option>
+          <option value="order.force_cancel" {% if action_filter == 'order.force_cancel' %}selected{% endif %}>订单强制取消</option>
+          <option value="transfer.cancel_task" {% if action_filter == 'transfer.cancel_task' %}selected{% endif %}>转寄任务取消</option>
+          <option value="unit.dispose" {% if action_filter == 'unit.dispose' %}selected{% endif %}>单套处置</option>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <input class="form-control" type="text" name="keyword" value="{{ keyword }}" placeholder="审批单号/目标/摘要">
+      </div>
+      <div class="col-md-3 d-flex flex-wrap align-items-center gap-3">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="overdueOnly" name="overdue_only" value="1" {% if overdue_only %}checked{% endif %}>
+          <label class="form-check-label" for="overdueOnly">仅超时</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="mineOnly" name="mine_only" value="1" {% if mine_only %}checked{% endif %}>
+          <label class="form-check-label" for="mineOnly">仅我发起</label>
+        </div>
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="reviewableOnly" name="reviewable_only" value="1" {% if reviewable_only %}checked{% endif %}>
+          <label class="form-check-label" for="reviewableOnly">待我审批</label>
+        </div>
+      </div>
+      <div class="col-md-12 d-flex gap-2">
+        <button class="btn btn-primary" type="submit">查询</button>
+        <a class="btn btn-secondary" href="{% url 'approvals_list' %}">重置</a>
+        <a class="btn btn-outline-success" href="?{{ pagination_query }}&export=1">导出CSV</a>
+      </div>
+    </form>
+    <form method="post" action="{% url 'approval_remind_overdue' %}" class="m-0 mt-2">
+      {% csrf_token %}
+      <button class="btn btn-sm btn-outline-warning" type="submit">批量催办超时审批</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>审批单号</th>
+          <th>动作</th>
+          <th>目标</th>
+          <th>摘要</th>
+          <th>申请人</th>
+          <th>状态</th>
+          <th>进度</th>
+          <th>审批信息</th>
+          <th>时间</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in tasks %}
+        <tr>
+          <td>{{ t.task_no }}</td>
+          <td>{{ t.action_code }}</td>
+          <td>{{ t.target_label|default:'-' }}</td>
+          <td>{{ t.summary }}</td>
+          <td>{{ t.requested_by|default:'-' }}</td>
+          <td>{{ t.get_status_display }}</td>
+          <td><span class="badge text-bg-secondary">{{ t.review_progress_text }}</span></td>
+          <td>
+            {% if t.reviewed_by %}
+            <div>{{ t.reviewed_by }}</div>
+            <div class="text-muted small">{{ t.review_note|default:'-' }}</div>
+            {% else %}
+            <span class="text-muted">-</span>
+            {% endif %}
+          </td>
+              <td>
+                <div>申请：{{ t.created_at|date:"Y-m-d H:i" }}</div>
+                {% if t.is_overdue_pending %}
+                <div><span class="badge text-bg-danger">超时（>{{ approval_warn_hours }}h）</span></div>
+                {% endif %}
+                {% if t.remind_count %}
+                <div class="text-warning-emphasis small">催办：{{ t.remind_count }}次</div>
+                {% endif %}
+                {% if t.last_reminded_at %}
+                <div class="text-muted small">最近催办：{{ t.last_reminded_at|date:"Y-m-d H:i" }}</div>
+                {% endif %}
+                {% if t.reviewed_at %}
+                <div class="text-muted small">审批：{{ t.reviewed_at|date:"Y-m-d H:i" }}</div>
+                {% endif %}
+              </td>
+              <td>
+            {% if t.status == 'pending' and request.user|has_action_perm:'approval.review' and request.user.id != t.requested_by_id %}
+            <div class="d-flex flex-wrap gap-2">
+              <form method="post" action="{% url 'approval_task_approve' t.id %}" class="m-0">
+                {% csrf_token %}
+                <button class="btn btn-sm btn-success" type="submit">通过并执行</button>
+              </form>
+              <form method="post" action="{% url 'approval_task_reject' t.id %}" class="m-0">
+                {% csrf_token %}
+                <input type="hidden" name="note" value="审批驳回">
+                <button class="btn btn-sm btn-danger" type="submit">驳回</button>
+              </form>
+              <form method="post" action="{% url 'approval_task_remind' t.id %}" class="m-0">
+                {% csrf_token %}
+                <button class="btn btn-sm btn-warning" type="submit">催办</button>
+              </form>
+            </div>
+            {% else %}
+            <span class="text-muted">-</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="10" class="text-center">暂无审批任务</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if tasks_page.paginator.num_pages > 1 %}
+  <div class="card-body d-flex justify-content-end gap-2">
+    {% if tasks_page.has_previous %}
+      <a class="btn btn-sm btn-outline-secondary" href="?{{ pagination_query }}&page={{ tasks_page.previous_page_number }}">上一页</a>
+    {% endif %}
+    <span class="btn btn-sm btn-light disabled">{{ tasks_page.number }}/{{ tasks_page.paginator.num_pages }}</span>
+    {% if tasks_page.has_next %}
+      <a class="btn btn-sm btn-outline-secondary" href="?{{ pagination_query }}&page={{ tasks_page.next_page_number }}">下一页</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

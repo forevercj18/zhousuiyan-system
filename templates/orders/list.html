@@ -15,14 +15,26 @@
                     <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>待处理</option>
                     <option value="confirmed" {% if status_filter == 'confirmed' %}selected{% endif %}>待发货</option>
                     <option value="delivered" {% if status_filter == 'delivered' %}selected{% endif %}>已发货</option>
+                    <option value="returned" {% if status_filter == 'returned' %}selected{% endif %}>已归还</option>
                     <option value="completed" {% if status_filter == 'completed' %}selected{% endif %}>已完成</option>
                     <option value="cancelled" {% if status_filter == 'cancelled' %}selected{% endif %}>已取消</option>
                 </select>
             </div>
             <div class="filter-group">
                 <label>关键词：</label>
-                <input id="keywordInput" type="text" class="form-control" placeholder="订单号/客户/电话"
+                <input id="keywordInput" type="text" class="form-control" placeholder="订单号/客户/电话/微信号/闲鱼单号"
                        value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterOrders();}">
+            </div>
+            <div class="filter-group">
+                <label>发货时效：</label>
+                <select id="slaFilter" class="form-select" onchange="filterOrders()">
+                    <option value="">全部</option>
+                    <option value="overdue" {% if sla_filter == 'overdue' %}selected{% endif %}>已超时</option>
+                    <option value="warning" {% if sla_filter == 'warning' %}selected{% endif %}>7天内到期</option>
+                    <option value="normal" {% if sla_filter == 'normal' %}selected{% endif %}>正常时效</option>
+                    <option value="shipped" {% if sla_filter == 'shipped' %}selected{% endif %}>已发货</option>
+                    <option value="unknown" {% if sla_filter == 'unknown' %}selected{% endif %}>待补发货日期</option>
+                </select>
             </div>
             <button class="btn btn-secondary" type="button" onclick="filterOrders()">查询</button>
             <a class="btn btn-sm" href="{% url 'orders_list' %}">重置</a>
@@ -44,7 +56,12 @@
                     <th>订单号</th>
                     <th>客户姓名</th>
                     <th>联系电话</th>
+                    <th>微信号</th>
+                    <th>闲鱼订单号</th>
                     <th>预定日期</th>
+                    <th>发货日期</th>
+                    <th>距离发货剩余天数</th>
+                    <th>时效状态</th>
                     <th>送货地址</th>
                     <th>状态</th>
                     <th>转寄挂靠</th>
@@ -62,7 +79,18 @@
                     <td>{{ order.order_no }}</td>
                     <td>{{ order.customer_name }}</td>
                     <td>{{ order.customer_phone }}</td>
+                    <td>{{ order.customer_wechat|default:'-' }}</td>
+                    <td>{{ order.xianyu_order_no|default:'-' }}</td>
                     <td>{{ order.event_date }}</td>
+                    <td>{{ order.ship_date|default:'-' }}</td>
+                    <td>
+                        {% if order.shipping_remaining_days is None %}
+                        -
+                        {% else %}
+                        {{ order.shipping_remaining_days }}
+                        {% endif %}
+                    </td>
+                    <td><span class="badge {{ order.shipping_timeliness_badge_class }}">{{ order.shipping_timeliness_label }}</span></td>
                     <td class="text-truncate" title="{{ order.delivery_address }}">{{ order.delivery_address }}</td>
                     <td>
                         {% if order.status == 'pending' %}
@@ -71,6 +99,8 @@
                         <span class="badge text-bg-info">待发货</span>
                         {% elif order.status == 'delivered' %}
                         <span class="badge text-bg-primary">已发货</span>
+                        {% elif order.status == 'returned' %}
+                        <span class="badge text-bg-info">已归还</span>
                         {% elif order.status == 'completed' %}
                         <span class="badge text-bg-success">已完成</span>
                         {% elif order.status == 'cancelled' %}
@@ -115,7 +145,7 @@
                             {% elif request.user|has_action_perm:'order.mark_returned' %}
                             <button class="btn btn-sm btn-secondary" type="button" onclick="showTransferCenterTip('{{ order.order_no|escapejs }}')">转寄中心操作</button>
                             {% endif %}
-                            {% elif order.status == 'returned' %}
+                            {% elif order.status == 'returned' and request.user|has_action_perm:'order.mark_returned' %}
                             <button class="btn btn-sm btn-success" onclick="markCompleted({{ order.id }}, '{{ order.order_no|escapejs }}')">标记完成</button>
                             {% endif %}
                             {% if order.status == 'pending' and request.user|has_module_perm:'orders:delete' %}
@@ -126,7 +156,7 @@
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="13" class="text-center">暂无订单数据</td>
+                    <td colspan="18" class="text-center">暂无订单数据</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -187,9 +217,11 @@
 function filterOrders() {
     const status = document.getElementById('statusFilter').value;
     const keyword = (document.getElementById('keywordInput')?.value || '').trim();
+    const sla = document.getElementById('slaFilter')?.value || '';
     const params = new URLSearchParams();
     if (status) params.set('status', status);
     if (keyword) params.set('keyword', keyword);
+    if (sla) params.set('sla', sla);
     const q = params.toString();
     window.location.href = '{% url "orders_list" %}' + (q ? ('?' + q) : '');
 }

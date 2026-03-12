@@ -25,6 +25,7 @@ urlpatterns = [
     path('orders/<int:order_id>/mark-returned/', views.order_mark_returned, name='order_mark_returned'),
     path('orders/<int:order_id>/mark-completed/', views.order_mark_completed, name='order_mark_completed'),
     path('orders/<int:order_id>/cancel/', views.order_cancel, name='order_cancel'),
+    path('orders/<int:order_id>/finance/add/', views.order_finance_add, name='order_finance_add'),
     path('orders/<int:order_id>/', views.order_detail, name='order_detail'),
 
     # 日历排期
@@ -32,6 +33,7 @@ urlpatterns = [
 
     # 转寄中心
     path('transfers/', views.transfers_list, name='transfers_list'),
+    path('transfers/recommendation-logs/', views.transfer_recommendation_logs, name='transfer_recommendation_logs'),
     path('transfers/recommend/', views.transfer_recommend, name='transfer_recommend'),
     path('transfers/generate-tasks/', views.transfer_generate_tasks, name='transfer_generate_tasks'),
     path('transfers/create/', views.transfer_create, name='transfer_create'),
@@ -40,13 +42,28 @@ urlpatterns = [
 
     # 在外库存看板
     path('outbound-inventory/', views.outbound_inventory_dashboard, name='outbound_inventory_dashboard'),
+    path('outbound-inventory/part-issues/', views.part_issue_pool, name='part_issue_pool'),
+    path('outbound-inventory/maintenance/', views.maintenance_work_orders_list, name='maintenance_work_orders_list'),
+    path('outbound-inventory/maintenance/export/', views.maintenance_work_orders_export, name='maintenance_work_orders_export'),
+    path('outbound-inventory/disposals/', views.unit_disposal_orders_list, name='unit_disposal_orders_list'),
+    path('outbound-inventory/disposals/export/', views.unit_disposal_orders_export, name='unit_disposal_orders_export'),
     path('outbound-inventory/export/', views.outbound_inventory_export, name='outbound_inventory_export'),
     path('outbound-inventory/export-topology/', views.outbound_inventory_topology_export, name='outbound_inventory_topology_export'),
+    path('outbound-inventory/units/<int:unit_id>/parts/update/', views.outbound_inventory_unit_parts_update, name='outbound_inventory_unit_parts_update'),
+    path('outbound-inventory/units/<int:unit_id>/dispose/', views.unit_disposal_create, name='unit_disposal_create'),
+    path('outbound-inventory/units/<int:unit_id>/maintenance/create/', views.maintenance_work_order_create, name='maintenance_work_order_create'),
+    path('outbound-inventory/maintenance/<int:work_order_id>/complete/', views.maintenance_work_order_complete, name='maintenance_work_order_complete'),
+    path('outbound-inventory/maintenance/<int:work_order_id>/cancel/', views.maintenance_work_order_cancel, name='maintenance_work_order_cancel'),
+    path('outbound-inventory/maintenance/<int:work_order_id>/reverse/', views.maintenance_work_order_reverse, name='maintenance_work_order_reverse'),
 
     # SKU管理
     path('skus/', views.skus_list, name='skus_list'),
+    path('skus/assembly-orders/', views.assembly_orders_list, name='assembly_orders_list'),
+    path('skus/assembly-orders/export/', views.assembly_orders_export, name='assembly_orders_export'),
+    path('skus/assembly-orders/<int:assembly_id>/cancel/', views.assembly_order_cancel, name='assembly_order_cancel'),
     path('skus/create/', views.sku_create, name='sku_create'),
     path('skus/<int:sku_id>/edit/', views.sku_edit, name='sku_edit'),
+    path('skus/<int:sku_id>/assemble/', views.sku_assemble, name='sku_assemble'),
     path('skus/<int:sku_id>/delete/', views.sku_delete, name='sku_delete'),
     path('skus/bulk-delete/', views.skus_bulk_delete, name='skus_bulk_delete'),
 
@@ -60,6 +77,11 @@ urlpatterns = [
     path('procurement/purchase-orders/<int:po_id>/mark-arrived/', views.purchase_order_mark_arrived, name='purchase_order_mark_arrived'),
     path('procurement/purchase-orders/<int:po_id>/mark-stocked/', views.purchase_order_mark_stocked, name='purchase_order_mark_stocked'),
     path('procurement/parts-inventory/', views.parts_inventory_list, name='parts_inventory_list'),
+    path('procurement/part-recovery-inspections/', views.part_recovery_inspections_list, name='part_recovery_inspections_list'),
+    path('procurement/part-recovery-inspections/export/', views.part_recovery_inspections_export, name='part_recovery_inspections_export'),
+    path('procurement/part-recovery-inspections/<int:inspection_id>/process/', views.part_recovery_inspection_process, name='part_recovery_inspection_process'),
+    path('procurement/warehouse-reports/', views.warehouse_reports, name='warehouse_reports'),
+    path('procurement/warehouse-reports/export/', views.warehouse_reports_export, name='warehouse_reports_export'),
     path('procurement/parts/create/', views.part_create, name='part_create'),
     path('procurement/parts/<int:part_id>/edit/', views.part_edit, name='part_edit'),
     path('procurement/parts/<int:part_id>/delete/', views.part_delete, name='part_delete'),
@@ -70,6 +92,18 @@ urlpatterns = [
 
     # 系统设置
     path('settings/', views.settings_view, name='settings'),
+    path('finance-transactions/', views.finance_transactions_list, name='finance_transactions_list'),
+    path('finance-reconciliation/', views.finance_reconciliation, name='finance_reconciliation'),
+    path('finance-reconciliation/<int:order_id>/raise-risk/', views.finance_reconciliation_raise_risk, name='finance_reconciliation_raise_risk'),
+    path('ops-center/', views.ops_center, name='ops_center'),
+    path('approvals/', views.approvals_list, name='approvals_list'),
+    path('approvals/remind-overdue/', views.approval_remind_overdue, name='approval_remind_overdue'),
+    path('approvals/<int:task_id>/approve/', views.approval_task_approve, name='approval_task_approve'),
+    path('approvals/<int:task_id>/reject/', views.approval_task_reject, name='approval_task_reject'),
+    path('approvals/<int:task_id>/remind/', views.approval_task_remind, name='approval_task_remind'),
+    path('risk-events/', views.risk_events_list, name='risk_events_list'),
+    path('risk-events/<int:event_id>/claim/', views.risk_event_claim, name='risk_event_claim'),
+    path('risk-events/<int:event_id>/resolve/', views.risk_event_resolve, name='risk_event_resolve'),
     path('audit-logs/', views.audit_logs, name='audit_logs'),
 
     # 用户管理

@@ -8,17 +8,29 @@
     <!-- 统计卡片 -->
     <div class="stats-grid">
         {% for card in role_dashboard.focus_cards %}
+        {% if card.url_name %}
+        <a class="stat-card text-decoration-none" href="{% url card.url_name %}{% if card.query %}?{{ card.query }}{% endif %}">
+        {% else %}
         <div class="stat-card">
+        {% endif %}
             {% if card.key == 'pending_orders' %}
             <div class="stat-icon" style="background: #ff9800;">&#128203;</div>
             {% elif card.key == 'delivered_orders' %}
             <div class="stat-icon" style="background: #2196f3;">&#128666;</div>
             {% elif card.key == 'completed_orders' %}
             <div class="stat-icon" style="background: #10b981;">&#9989;</div>
+            {% elif card.key == 'due_within_7_days_count' %}
+            <div class="stat-icon" style="background: #f59e0b;">&#9200;</div>
             {% elif card.key == 'warehouse_available_stock' %}
             <div class="stat-icon" style="background: #4caf50;">&#9989;</div>
             {% elif card.key == 'low_stock_parts' %}
             <div class="stat-icon" style="background: #f44336;">&#9888;</div>
+            {% elif card.key == 'pending_recovery_inspections' %}
+            <div class="stat-icon" style="background: #8b5cf6;">&#129514;</div>
+            {% elif card.key == 'repair_recovery_inspections' %}
+            <div class="stat-icon" style="background: #f97316;">&#128736;</div>
+            {% elif card.key == 'draft_maintenance_work_orders' %}
+            <div class="stat-icon" style="background: #14b8a6;">&#128295;</div>
             {% elif card.key == 'total_revenue' %}
             <div class="stat-icon" style="background: #9c27b0;">&#128176;</div>
             {% elif card.key == 'pending_revenue' %}
@@ -40,13 +52,32 @@
                 <div class="stat-value">{{ card.value }}</div>
                 {% endif %}
             </div>
+            {% if card.url_name %}
+            <span class="small text-primary ms-auto align-self-end">查看详情</span>
+            {% endif %}
+        {% if card.url_name %}
+        </a>
+        {% else %}
         </div>
+        {% endif %}
         {% endfor %}
     </div>
 
     <div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
         <span class="badge text-bg-light border">当前角色：{{ request.user.get_role_display }}</span>
         <span class="badge text-bg-info">看板类型：{{ role_dashboard.view_type }}</span>
+        {% if role_view_options %}
+        <form method="get" class="d-flex align-items-center gap-2">
+            <label for="view_role" class="small text-muted mb-0">角色视图</label>
+            <select id="view_role" name="view_role" class="form-select form-select-sm" style="width: 170px;">
+                <option value="">默认（当前角色）</option>
+                {% for role_opt in role_view_options %}
+                <option value="{{ role_opt.value }}" {% if view_role == role_opt.value %}selected{% endif %}>{{ role_opt.label }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="btn btn-outline-secondary btn-sm">切换</button>
+        </form>
+        {% endif %}
         {% for risk in role_dashboard.risk_entries %}
             <a href="{% url risk.url_name %}{% if risk.query %}?{{ risk.query }}{% endif %}"
                class="badge text-decoration-none
@@ -55,6 +86,45 @@
             </a>
         {% endfor %}
     </div>
+
+    {% if role_dashboard.kpi_entries %}
+    <div class="mb-3 d-flex flex-wrap gap-2">
+        {% for kpi in role_dashboard.kpi_entries %}
+        <a href="{% url kpi.url_name %}{% if kpi.query %}?{{ kpi.query }}{% endif %}" class="badge text-bg-light border text-decoration-none px-3 py-2">
+            {{ kpi.label }}：<span class="fw-semibold">{{ kpi.value }}</span>
+        </a>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if role_dashboard.warehouse_insights %}
+    <div class="row g-3 mb-3">
+        {% for panel in role_dashboard.warehouse_insights %}
+        <div class="col-12 col-xl-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <h3 class="h6 mb-3">{{ panel.title }}</h3>
+                    <div class="d-flex flex-column gap-2">
+                        {% for item in panel.items %}
+                        <div class="d-flex justify-content-between align-items-center border rounded-3 px-3 py-2 gap-3">
+                            <a href="{% url item.url_name %}{% if item.query %}?{{ item.query }}{% endif %}"
+                               class="flex-grow-1 d-flex justify-content-between align-items-center text-decoration-none">
+                                <span class="text-body">{{ item.label }}</span>
+                                <span class="text-muted small">{{ item.value }}</span>
+                            </a>
+                            {% if item.detail_url_name %}
+                            <a href="{% url item.detail_url_name %}{% if item.detail_query %}?{{ item.detail_query }}{% endif %}"
+                               class="btn btn-sm btn-outline-secondary flex-shrink-0">明细</a>
+                            {% endif %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
 
     <!-- 快捷操作 -->
     <div class="quick-actions">
@@ -96,6 +166,8 @@
                             <span class="badge text-bg-info">待发货</span>
                             {% elif order.status == 'delivered' %}
                             <span class="badge text-bg-primary">已发货</span>
+                            {% elif order.status == 'returned' %}
+                            <span class="badge text-bg-info">已归还</span>
                             {% elif order.status == 'completed' %}
                             <span class="badge text-bg-success">已完成</span>
                             {% else %}

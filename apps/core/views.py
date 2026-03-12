@@ -14,15 +14,22 @@ from django.utils import timezone
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
+from urllib.parse import urlencode
 import csv
 import json
 
 from .models import (
     Order, OrderItem, SKU, Part, PurchaseOrder, PurchaseOrderItem, PartsMovement,
-    AuditLog, User, SystemSettings, Transfer, TransferAllocation, InventoryUnit, UnitMovement
+    AuditLog, User, SystemSettings, Transfer, TransferAllocation, InventoryUnit, UnitMovement,
+    SKUComponent, InventoryUnitPart, RiskEvent, ApprovalTask, FinanceTransaction, DataConsistencyCheckRun,
+    AssemblyOrder, MaintenanceWorkOrder, UnitDisposalOrder, PartRecoveryInspection,
+    TransferRecommendationLog,
 )
-from .services import OrderService, ProcurementService, PartsService, InventoryUnitService, AuditService
-from .permissions import require_permission, filter_queryset_by_permission, has_action_permission
+from .services import (
+    OrderService, ProcurementService, PartsService, InventoryUnitService, AuditService,
+    RiskEventService, ApprovalService, NotificationService, AssemblyService, MaintenanceService, UnitDisposalService
+)
+from .permissions import require_permission, filter_queryset_by_permission, has_action_permission, can_request_approval
 from .utils import (
     get_calendar_data,
     find_transfer_candidates,
@@ -34,6 +41,9 @@ from .utils import (
     get_system_settings,
     get_dashboard_stats_payload,
     get_role_dashboard_payload,
+    build_finance_reconciliation_rows,
+    run_data_consistency_checks,
+    persist_data_consistency_check_result,
 )
 
 
@@ -87,6 +97,57 @@ def _build_querystring(request, exclude_keys=None):
     for key in (exclude_keys or []):
         params.pop(key, None)
     return params.urlencode()
+
+
+def _get_page_size(setting_key=None, default=10, settings=None):
+    cfg = settings if settings is not None else get_system_settings()
+    base = cfg.get('page_size_default', default)
+    raw = cfg.get(setting_key, base) if setting_key else base
+    try:
+        size = int(raw)
+    except (TypeError, ValueError):
+        size = int(default)
+    return max(1, min(size, 100))
+
+
+def _build_recent_day_buckets(days=7):
+    today = timezone.localdate()
+    day_list = [today - timedelta(days=offset) for offset in range(days - 1, -1, -1)]
+    return {day: 0 for day in day_list}
+
+
+def _to_local_date(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        if timezone.is_naive(value):
+            return value.date()
+        return timezone.localtime(value).date()
+    return value
+
+
+def _count_by_day(queryset, field_name, days=7):
+    buckets = _build_recent_day_buckets(days)
+    for value in queryset.values_list(field_name, flat=True):
+        day = _to_local_date(value)
+        if day in buckets:
+            buckets[day] += 1
+    return [
+        {'date': day.strftime('%m-%d'), 'value': count}
+        for day, count in buckets.items()
+    ]
+
+
+def _build_distribution(rows):
+    total = sum(item['value'] for item in rows) or 0
+    result = []
+    for item in rows:
+        percent = round((item['value'] / total) * 100, 1) if total else 0
+        result.append({
+            **item,
+            'percent': percent,
+        })
+    return result
 
 
 def _parse_audit_details(log):
@@ -155,6 +216,64 @@ def _is_transfer_source_order_active(order):
     ).exists()
 
 
+def _consume_transfer_allocations_for_transfer(transfer, operator=None):
+    """
+    精确消耗转寄挂靠锁：
+    - 仅消耗当前 transfer 的 source->target->sku 对应 locked 记录
+    - 支持部分消耗（拆分数量，保留剩余 locked）
+    Returns:
+        (consumed_qty, shortfall_qty)
+    """
+    required_qty = max(int(transfer.quantity or 0), 0)
+    if required_qty <= 0:
+        return 0, 0
+
+    consumed_qty = 0
+    remaining = required_qty
+    allocations = list(
+        TransferAllocation.objects.select_for_update().filter(
+            source_order_id=transfer.order_from_id,
+            target_order_id=transfer.order_to_id,
+            sku_id=transfer.sku_id,
+            status='locked',
+        ).order_by('created_at', 'id')
+    )
+
+    for alloc in allocations:
+        if remaining <= 0:
+            break
+        alloc_qty = int(alloc.quantity or 0)
+        if alloc_qty <= 0:
+            continue
+
+        if alloc_qty <= remaining:
+            alloc.status = 'consumed'
+            alloc.save(update_fields=['status', 'updated_at'])
+            consumed_qty += alloc_qty
+            remaining -= alloc_qty
+            continue
+
+        # 发生部分消耗时，拆分为 consumed + locked 两段，避免误消耗超额数量
+        TransferAllocation.objects.create(
+            source_order=alloc.source_order,
+            target_order=alloc.target_order,
+            sku=alloc.sku,
+            quantity=remaining,
+            target_event_date=alloc.target_event_date,
+            window_start=alloc.window_start,
+            window_end=alloc.window_end,
+            distance_score=alloc.distance_score,
+            status='consumed',
+            created_by=operator or alloc.created_by,
+        )
+        alloc.quantity = alloc_qty - remaining
+        alloc.save(update_fields=['quantity', 'updated_at'])
+        consumed_qty += remaining
+        remaining = 0
+
+    return consumed_qty, remaining
+
+
 def _log_transfer_action(user, action, target, details):
     AuditService.log_with_diff(
         user=user,
@@ -164,6 +283,251 @@ def _log_transfer_action(user, action, target, details):
         summary=details,
         before={},
         after={},
+    )
+
+
+def _request_high_risk_approval(request, *, action_code, module, target_type, target_id, target_label, summary, payload):
+    settings = get_system_settings()
+    required_count = int(settings.get('approval_required_count_default', 1) or 1)
+    if action_code == 'order.force_cancel':
+        required_count = int(settings.get('approval_required_count_order_force_cancel', required_count) or required_count)
+    elif action_code == 'transfer.cancel_task':
+        required_count = int(settings.get('approval_required_count_transfer_cancel_task', required_count) or required_count)
+    elif action_code == 'unit.dispose':
+        required_count = int(settings.get('approval_required_count_unit_dispose', required_count) or required_count)
+        action_type = (payload or {}).get('action_type')
+        if action_type == 'disassemble':
+            required_count = int(settings.get('approval_required_count_unit_disassemble', required_count) or required_count)
+        elif action_type == 'scrap':
+            required_count = int(settings.get('approval_required_count_unit_scrap', required_count) or required_count)
+    raw_map = settings.get('approval_required_count_map', '{}')
+    if isinstance(raw_map, str):
+        try:
+            rule_map = json.loads(raw_map) if raw_map.strip() else {}
+        except Exception:
+            rule_map = {}
+    elif isinstance(raw_map, dict):
+        rule_map = raw_map
+    else:
+        rule_map = {}
+    if action_code == 'unit.dispose':
+        action_type = (payload or {}).get('action_type')
+        scoped_key = f'{action_code}.{action_type}' if action_type in ['disassemble', 'scrap'] else ''
+        scoped_count = rule_map.get(scoped_key)
+        try:
+            if scoped_count is not None:
+                required_count = int(scoped_count)
+        except (TypeError, ValueError):
+            pass
+    mapped_count = rule_map.get(action_code)
+    try:
+        if mapped_count is not None:
+            required_count = int(mapped_count)
+    except (TypeError, ValueError):
+        pass
+    required_count = min(max(int(required_count or 1), 1), 5)
+    task, created = ApprovalService.create_or_get_pending(
+        action_code=action_code,
+        module=module,
+        target_type=target_type,
+        target_id=target_id,
+        target_label=target_label,
+        summary=summary,
+        payload=payload,
+        requested_by=request.user,
+        required_review_count=required_count,
+    )
+    AuditService.log_with_diff(
+        user=request.user,
+        action='create',
+        module='审批',
+        target=task.task_no,
+        summary='提交审批申请',
+        before={},
+        after={
+            'task_no': task.task_no,
+            'action_code': action_code,
+            'target_type': target_type,
+            'target_id': target_id,
+            'status': task.status,
+        },
+        extra={
+            'created': created,
+            'module': module,
+            'target_label': target_label,
+            'payload': payload,
+        },
+    )
+    if created:
+        messages.success(request, f'已提交审批申请：{task.task_no}')
+    else:
+        messages.warning(request, f'已存在待审批单：{task.task_no}')
+    return task, created
+
+
+def _execute_order_cancel(order, reason, operator):
+    pre_status = order.status
+    OrderService.cancel_order(order.id, reason, operator)
+    if pre_status in ['delivered', 'in_use', 'returned']:
+        RiskEventService.create_event(
+            event_type='delivered_order_cancel',
+            level='high',
+            module='订单',
+            title='已履约订单被取消',
+            description=f'订单 {order.order_no} 在状态 {dict(Order.STATUS_CHOICES).get(pre_status, pre_status)} 下被取消',
+            event_data={
+                'order_id': order.id,
+                'order_no': order.order_no,
+                'pre_status': pre_status,
+                'reason': reason,
+            },
+            order=order,
+            detected_by=operator,
+        )
+    _maybe_create_frequent_cancel_risk(operator)
+    return pre_status
+
+
+def _execute_transfer_cancel(transfer, operator, reason='手动取消'):
+    if transfer.status != 'pending':
+        raise ValueError('仅待执行任务可取消')
+    before_transfer = _snapshot_transfer_audit(transfer)
+    transfer.status = 'cancelled'
+    transfer.notes = (transfer.notes + '\n' if transfer.notes else '') + reason
+    transfer.save(update_fields=['status', 'notes', 'updated_at'])
+    AuditService.log_with_diff(
+        user=operator,
+        action='status_change',
+        module='转寄',
+        target=f'任务#{transfer.id}',
+        summary='取消转寄任务',
+        before=before_transfer,
+        after=_snapshot_transfer_audit(transfer),
+        extra={'reason': reason},
+    )
+
+
+def _save_transfer_recommendation_log(order, sku_id, before_source_ids, plan, operator, trigger_type='recommend'):
+    sku = SKU.objects.filter(id=sku_id).first()
+    if not sku:
+        return
+    settings = get_system_settings()
+    weight_date = int(settings.get('transfer_score_weight_date', 100) or 100)
+    weight_conf = int(settings.get('transfer_score_weight_confidence', 10) or 10)
+    weight_distance = int(settings.get('transfer_score_weight_distance', 1) or 1)
+    selected_alloc = (plan.get('allocations') or [])
+    selected_source_id = None
+    selected_source_no = ''
+    if selected_alloc:
+        selected_source_id = selected_alloc[0].get('source_order_id')
+        selected_source_no = selected_alloc[0].get('source_order_no') or ''
+    confidence_rank_map = {'high': 0, 'medium': 1, 'low': 2}
+    candidates = []
+    selected_rank = None
+    selected_score_total = None
+    for idx, c in enumerate((plan.get('candidates') or []), start=1):
+        source = c.get('source_order')
+        if not source:
+            continue
+        date_gap_score = int(c.get('date_gap_score') or 0)
+        distance_raw = c.get('distance_score') or 0
+        try:
+            distance_value = float(distance_raw)
+        except (TypeError, ValueError):
+            distance_value = 0.0
+        distance_mode = c.get('distance_mode') or ''
+        distance_confidence = c.get('distance_confidence') or 'low'
+        confidence_rank = confidence_rank_map.get(distance_confidence, 2)
+        score_date = date_gap_score * weight_date
+        score_confidence = confidence_rank * weight_conf
+        score_distance = distance_value * weight_distance
+        score_total = round(score_date + score_confidence + score_distance, 4)
+        candidates.append({
+            'source_order_id': source.id,
+            'source_order_no': source.order_no,
+            'source_event_date': source.event_date.strftime('%Y-%m-%d') if source.event_date else '',
+            'available_qty': int(c.get('available_qty') or 0),
+            'distance_score': str(distance_raw),
+            'date_gap_score': date_gap_score,
+            'distance_mode': distance_mode,
+            'distance_confidence': distance_confidence,
+            'score_rank': idx,
+            'score_total': score_total,
+            'score_components': {
+                'date_gap_weighted': score_date,
+                'confidence_weighted': score_confidence,
+                'distance_weighted': round(score_distance, 4),
+                'date_gap_score': date_gap_score,
+                'distance_score': distance_value,
+                'confidence_rank': confidence_rank,
+            },
+            'source_city': c.get('source_city') or '',
+            'target_city': c.get('target_city') or '',
+        })
+        if selected_source_id and selected_source_id == source.id and selected_rank is None:
+            selected_rank = idx
+            selected_score_total = score_total
+    decision_reason = '无可用候选，仓库补量'
+    if selected_source_id:
+        if selected_rank == 1:
+            decision_reason = '命中最优候选（评分第1）'
+        elif selected_rank:
+            decision_reason = f'命中候选（评分第{selected_rank}）'
+        else:
+            decision_reason = '命中候选（评分快照缺失）'
+    TransferRecommendationLog.objects.create(
+        order=order,
+        sku=sku,
+        trigger_type=trigger_type,
+        target_event_date=order.event_date,
+        target_address=order.delivery_address or '',
+        before_source_order_ids=[int(x) for x in (before_source_ids or []) if x],
+        selected_source_order_id=selected_source_id,
+        selected_source_order_no=selected_source_no,
+        warehouse_needed=int(plan.get('warehouse_needed') or 0),
+        candidates=candidates,
+        score_summary={
+            'candidate_count': len(candidates),
+            'buffer_days': int(plan.get('buffer_days') or 0),
+            'selected_rank': selected_rank,
+            'selected_score_total': selected_score_total,
+            'weights': {
+                'date_gap': weight_date,
+                'confidence': weight_conf,
+                'distance': weight_distance,
+            },
+            'decision_reason': decision_reason,
+        },
+        operator=operator,
+    )
+
+
+def _maybe_create_frequent_cancel_risk(user):
+    now = timezone.now()
+    window_start = now - timedelta(hours=24)
+    cancel_count = AuditLog.objects.filter(
+        user=user,
+        module='订单',
+        action='status_change',
+        created_at__gte=window_start,
+        details__icontains='取消订单',
+    ).count()
+    threshold = 3
+    if cancel_count < threshold:
+        return
+    RiskEventService.create_event(
+        event_type='frequent_cancel',
+        level='medium',
+        module='订单',
+        title='高频取消预警',
+        description=f'用户 {user.username} 在24小时内已执行 {cancel_count} 次取消操作',
+        event_data={
+            'username': user.username,
+            'window_hours': 24,
+            'cancel_count': cancel_count,
+            'threshold': threshold,
+        },
+        detected_by=user,
     )
 
 
@@ -234,6 +598,8 @@ def _compute_unit_health(unit_status, hop_count, outbound_days, warn_reason='', 
         score -= 8
     if '异常节点' in reason:
         score -= 12
+    if '部件异常' in reason:
+        score -= 12
 
     if latest_event_type == 'EXCEPTION':
         score -= 10
@@ -262,6 +628,83 @@ def _build_unit_chain_text(unit):
         else:
             chain.append(label)
     return " -> ".join(chain) if chain else "-"
+
+
+def _parse_sku_components_post(request):
+    """解析SKU BOM表单数据"""
+    part_ids = request.POST.getlist('component_part_id[]')
+    qty_list = request.POST.getlist('component_qty[]')
+    notes_list = request.POST.getlist('component_notes[]')
+    max_len = max(len(part_ids), len(qty_list), len(notes_list), 0)
+    parsed = []
+    for idx in range(max_len):
+        part_id_raw = (part_ids[idx] if idx < len(part_ids) else '').strip()
+        qty_raw = (qty_list[idx] if idx < len(qty_list) else '').strip()
+        notes = (notes_list[idx] if idx < len(notes_list) else '').strip()
+        if not part_id_raw:
+            continue
+        if not part_id_raw.isdigit():
+            raise ValueError('部件组成存在非法部件ID')
+        qty = int(qty_raw or '1')
+        if qty <= 0:
+            raise ValueError('部件组成单套用量必须大于0')
+        parsed.append({
+            'part_id': int(part_id_raw),
+            'quantity_per_set': qty,
+            'notes': notes[:200],
+        })
+
+    if not parsed:
+        return []
+
+    part_ids = [item['part_id'] for item in parsed]
+    valid_ids = set(
+        Part.objects.filter(id__in=part_ids, is_active=True).values_list('id', flat=True)
+    )
+    invalid_ids = [str(pid) for pid in part_ids if pid not in valid_ids]
+    if invalid_ids:
+        raise ValueError(f"部件不存在或已停用：{', '.join(invalid_ids)}")
+
+    # 同一个部件去重聚合（用量累加）
+    merged = {}
+    for row in parsed:
+        pid = row['part_id']
+        if pid not in merged:
+            merged[pid] = row
+            continue
+        merged[pid]['quantity_per_set'] += row['quantity_per_set']
+        if row['notes'] and not merged[pid]['notes']:
+            merged[pid]['notes'] = row['notes']
+    return list(merged.values())
+
+
+def _parse_maintenance_items_post(request):
+    """解析维修换件工单明细"""
+    old_part_ids = request.POST.getlist('old_part_id[]')
+    new_part_ids = request.POST.getlist('new_part_id[]')
+    qty_list = request.POST.getlist('replace_quantity[]')
+    notes_list = request.POST.getlist('item_notes[]')
+    max_len = max(len(old_part_ids), len(new_part_ids), len(qty_list), len(notes_list), 0)
+    parsed = []
+    for idx in range(max_len):
+        old_raw = (old_part_ids[idx] if idx < len(old_part_ids) else '').strip()
+        new_raw = (new_part_ids[idx] if idx < len(new_part_ids) else '').strip()
+        qty_raw = (qty_list[idx] if idx < len(qty_list) else '').strip()
+        notes = (notes_list[idx] if idx < len(notes_list) else '').strip()
+        if not old_raw and not new_raw:
+            continue
+        if not old_raw.isdigit() or not new_raw.isdigit():
+            raise ValueError('维修明细存在非法部件ID')
+        qty = int(qty_raw or '0')
+        if qty <= 0:
+            raise ValueError('维修明细更换数量必须大于 0')
+        parsed.append({
+            'old_part_id': int(old_raw),
+            'new_part_id': int(new_raw),
+            'replace_quantity': qty,
+            'notes': notes[:200],
+        })
+    return parsed
 
 
 def login_view(request):
@@ -294,7 +737,10 @@ def logout_view(request):
 def dashboard(request):
     """工作台首页"""
     stats = get_dashboard_stats_payload(include_transfer_available=True)
-    role_dashboard = get_role_dashboard_payload(request.user)
+    view_role = ''
+    if request.user.role in ['admin', 'manager']:
+        view_role = (request.GET.get('view_role') or '').strip()
+    role_dashboard = get_role_dashboard_payload(request.user, view_role=view_role or None)
 
     # 最近订单
     recent_orders = Order.objects.select_related('created_by').prefetch_related(
@@ -314,6 +760,14 @@ def dashboard(request):
         'role_dashboard': role_dashboard,
         'recent_orders': recent_orders,
         'low_stock_parts': low_stock_parts,
+        'view_role': view_role,
+        'role_view_options': [
+            {'value': 'admin', 'label': '超级管理员'},
+            {'value': 'manager', 'label': '业务经理'},
+            {'value': 'warehouse_manager', 'label': '仓库主管'},
+            {'value': 'warehouse_staff', 'label': '仓库操作员'},
+            {'value': 'customer_service', 'label': '客服'},
+        ] if request.user.role in ['admin', 'manager'] else [],
     }
     return render(request, 'dashboard.html', context)
 
@@ -342,6 +796,7 @@ def orders_list(request):
     # 筛选
     status_filter = request.GET.get('status', '')
     keyword = request.GET.get('keyword', '')
+    sla_filter = (request.GET.get('sla', '') or '').strip()
 
     if status_filter:
         orders = orders.filter(status=status_filter)
@@ -350,11 +805,82 @@ def orders_list(request):
         orders = orders.filter(
             Q(order_no__icontains=keyword) |
             Q(customer_name__icontains=keyword) |
-            Q(customer_phone__icontains=keyword)
+            Q(customer_phone__icontains=keyword) |
+            Q(customer_wechat__icontains=keyword) |
+            Q(xianyu_order_no__icontains=keyword)
         )
 
-    orders = orders.order_by('-created_at')
-    orders_page = Paginator(orders, 10).get_page(request.GET.get('page'))
+    today = timezone.localdate()
+    orders_list = list(orders)
+
+    def _timeliness_for_order(order):
+        shipped = bool(order.ship_tracking) or order.status in ['delivered', 'in_use', 'returned', 'completed']
+        if order.ship_date:
+            remaining_days = 0 if (order.ship_date < today and shipped) else (order.ship_date - today).days
+        else:
+            remaining_days = None
+        if shipped:
+            return {
+                'remaining_days': remaining_days if remaining_days is not None else 0,
+                'code': 'shipped',
+                'label': '🟢 已发货',
+                'badge_class': 'text-bg-primary',
+                'priority': 3,
+            }
+        if remaining_days is None:
+            return {
+                'remaining_days': None,
+                'code': 'unknown',
+                'label': '⚪ 待补发货日期',
+                'badge_class': 'text-bg-secondary',
+                'priority': 4,
+            }
+        if remaining_days <= 0:
+            return {
+                'remaining_days': remaining_days,
+                'code': 'overdue',
+                'label': '🔴 已超时，请尽快发货',
+                'badge_class': 'text-bg-danger',
+                'priority': 0,
+            }
+        if remaining_days <= 7:
+            return {
+                'remaining_days': remaining_days,
+                'code': 'warning',
+                'label': '🟠 即将超时（7天内）',
+                'badge_class': 'text-bg-warning',
+                'priority': 1,
+            }
+        return {
+            'remaining_days': remaining_days,
+            'code': 'normal',
+            'label': '🟢 正常时效',
+            'badge_class': 'text-bg-success',
+            'priority': 2,
+        }
+
+    enriched_orders = []
+    for order in orders_list:
+        t = _timeliness_for_order(order)
+        order.shipping_remaining_days = t['remaining_days']
+        order.shipping_timeliness_code = t['code']
+        order.shipping_timeliness_label = t['label']
+        order.shipping_timeliness_badge_class = t['badge_class']
+        order.shipping_timeliness_priority = t['priority']
+        enriched_orders.append(order)
+
+    if sla_filter in ['overdue', 'warning', 'normal', 'shipped', 'unknown']:
+        enriched_orders = [o for o in enriched_orders if o.shipping_timeliness_code == sla_filter]
+
+    enriched_orders.sort(
+        key=lambda o: (
+            int(getattr(o, 'shipping_timeliness_priority', 9)),
+            int(getattr(o, 'shipping_remaining_days', 99999) if getattr(o, 'shipping_remaining_days', None) is not None else 99999),
+            -(o.created_at.timestamp() if o.created_at else 0),
+        )
+    )
+
+    orders_page = Paginator(enriched_orders, _get_page_size('page_size_orders')).get_page(request.GET.get('page'))
     _attach_transfer_allocations_display(orders_page.object_list)
     current_ids = [o.id for o in orders_page.object_list]
     source_blocked_ids = set(
@@ -385,6 +911,7 @@ def orders_list(request):
         'orders_page': orders_page,
         'status_filter': status_filter,
         'keyword': keyword,
+        'sla_filter': sla_filter,
         'pagination_query': _build_querystring(request, ['page']),
     }
     return render(request, 'orders/list.html', context)
@@ -426,6 +953,8 @@ def order_create(request):
             data = {
                 'customer_name': request.POST.get('customer_name'),
                 'customer_phone': request.POST.get('customer_phone'),
+                'customer_wechat': request.POST.get('customer_wechat', ''),
+                'xianyu_order_no': request.POST.get('xianyu_order_no', ''),
                 'customer_email': request.POST.get('customer_email', ''),
                 'delivery_address': request.POST.get('delivery_address'),
                 'return_address': request.POST.get('return_address', ''),
@@ -500,6 +1029,8 @@ def order_edit(request, order_id):
             data = {
                 'customer_name': request.POST.get('customer_name'),
                 'customer_phone': request.POST.get('customer_phone'),
+                'customer_wechat': request.POST.get('customer_wechat', ''),
+                'xianyu_order_no': request.POST.get('xianyu_order_no', ''),
                 'customer_email': request.POST.get('customer_email', ''),
                 'delivery_address': request.POST.get('delivery_address'),
                 'return_address': request.POST.get('return_address', ''),
@@ -553,19 +1084,72 @@ def order_detail(request, order_id):
     for alloc in allocations_qs:
         transfer_allocations_by_sku[alloc.sku_id].append(alloc)
     item_rows = []
+    expected_deposit_total = Decimal('0.00')
     for item in order.items.all():
+        expected_deposit_total += (item.deposit or Decimal('0.00')) * int(item.quantity or 0)
         item_rows.append({
             'item': item,
             'allocations': transfer_allocations_by_sku.get(item.sku_id, []),
         })
+    finance_transactions = list(
+        order.finance_transactions.select_related('created_by').order_by('-created_at', '-id')
+    )
+    order.can_mark_returned_in_orders_center = not _is_transfer_source_order_active(order)
+    order.active_as_source_count = TransferAllocation.objects.filter(
+        source_order=order,
+        status__in=['locked', 'consumed'],
+        target_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
+    ).count()
 
     context = {
         'order': order,
         'transfer_allocations_by_sku': dict(transfer_allocations_by_sku),
         'target_transfer_allocations': list(allocations_qs),
         'item_rows': item_rows,
+        'finance_transactions': finance_transactions,
+        'expected_deposit_total': expected_deposit_total,
     }
     return render(request, 'orders/detail.html', context)
+
+
+@login_required
+@require_permission('orders', 'update')
+def order_finance_add(request, order_id):
+    """订单详情：手工新增财务流水"""
+    if request.method == 'POST':
+        if not has_action_permission(request.user, 'finance.manual_adjust'):
+            messages.error(request, '您没有执行此操作的权限（finance.manual_adjust）')
+            return redirect('order_detail', order_id=order_id)
+        try:
+            order = get_object_or_404(Order, id=order_id)
+            tx_type = (request.POST.get('transaction_type') or '').strip()
+            amount = Decimal(request.POST.get('amount', '0') or '0')
+            notes = (request.POST.get('notes') or '').strip()
+            tx = OrderService.record_manual_finance(
+                order=order,
+                transaction_type=tx_type,
+                amount=amount,
+                user=request.user,
+                notes=notes or '手工记账',
+            )
+            AuditService.log_with_diff(
+                user=request.user,
+                action='create',
+                module='财务',
+                target=f'{order.order_no}#{tx.id}',
+                summary='手工新增财务流水',
+                before={},
+                after={
+                    'order_no': order.order_no,
+                    'transaction_type': tx.transaction_type,
+                    'amount': str(tx.amount),
+                    'notes': tx.notes,
+                },
+            )
+            messages.success(request, '已新增财务流水')
+        except Exception as e:
+            messages.error(request, f'新增失败：{str(e)}')
+    return redirect('order_detail', order_id=order_id)
 
 
 @login_required
@@ -708,8 +1292,8 @@ def transfers_list(request):
     if candidate_action_filter == 'generatable':
         candidates = [c for c in candidates if c.get('can_generate_task')]
 
-    candidates_page = Paginator(candidates, 5).get_page(request.GET.get('candidate_page'))
-    tasks_page = Paginator(tasks, 10).get_page(request.GET.get('task_page'))
+    candidates_page = Paginator(candidates, _get_page_size('page_size_transfer_candidates', 5)).get_page(request.GET.get('candidate_page'))
+    tasks_page = Paginator(tasks, _get_page_size('page_size_transfer_tasks')).get_page(request.GET.get('task_page'))
 
     task_ids = [t.id for t in tasks_page.object_list]
     completed_unit_map = defaultdict(list)
@@ -809,6 +1393,69 @@ def transfers_list(request):
 
 
 @login_required
+@require_permission('transfers', 'view')
+def transfer_recommendation_logs(request):
+    """转寄推荐回放列表"""
+    logs = TransferRecommendationLog.objects.select_related('order', 'sku', 'operator').all()
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    trigger_type = (request.GET.get('trigger_type', '') or '').strip()
+    decision_type = (request.GET.get('decision_type', '') or '').strip()
+    export_flag = (request.GET.get('export') or '').strip() == '1'
+    if keyword:
+        logs = logs.filter(
+            Q(order__order_no__icontains=keyword) |
+            Q(order__customer_name__icontains=keyword) |
+            Q(sku__code__icontains=keyword) |
+            Q(sku__name__icontains=keyword)
+        )
+    if trigger_type in ['recommend', 'create', 'manual']:
+        logs = logs.filter(trigger_type=trigger_type)
+    if decision_type == 'transfer':
+        logs = logs.filter(selected_source_order_id__isnull=False)
+    elif decision_type == 'warehouse':
+        logs = logs.filter(Q(selected_source_order_id__isnull=True) | Q(selected_source_order_id=0))
+
+    logs = logs.order_by('-created_at', '-id')
+    if export_flag:
+        response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+        response['Content-Disposition'] = 'attachment; filename="transfer_recommendation_logs.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            '时间', '目标订单号', '目标客户', 'SKU编码', 'SKU名称', '触发类型',
+            '推荐前来源单ID', '推荐后来源单号', '仓库补量', '候选数', '命中排名', '命中总分', '决策说明', '操作人'
+        ])
+        for log in logs:
+            summary = log.score_summary or {}
+            writer.writerow([
+                log.created_at.strftime('%Y-%m-%d %H:%M:%S') if log.created_at else '',
+                log.order.order_no if log.order else '',
+                log.order.customer_name if log.order else '',
+                log.sku.code if log.sku else '',
+                log.sku.name if log.sku else '',
+                log.get_trigger_type_display(),
+                ','.join(str(i) for i in (log.before_source_order_ids or [])),
+                log.selected_source_order_no or '',
+                int(log.warehouse_needed or 0),
+                int(summary.get('candidate_count', 0)),
+                summary.get('selected_rank') or '',
+                summary.get('selected_score_total') or '',
+                summary.get('decision_reason') or '',
+                (log.operator.full_name if log.operator and log.operator.full_name else (log.operator.username if log.operator else '')),
+            ])
+        return response
+    logs_page = Paginator(logs, _get_page_size('page_size_transfer_logs')).get_page(request.GET.get('page'))
+    context = {
+        'logs': logs_page,
+        'logs_page': logs_page,
+        'keyword': keyword,
+        'trigger_type': trigger_type,
+        'decision_type': decision_type,
+        'pagination_query': _build_querystring(request, ['page']),
+    }
+    return render(request, 'transfer_recommendation_logs.html', context)
+
+
+@login_required
 @require_permission('transfers', 'update')
 def transfer_recommend(request):
     """批量/单条重新推荐转寄来源"""
@@ -849,6 +1496,14 @@ def transfer_recommend(request):
             skipped_pending_task += 1
             continue
 
+        before_source_ids = list(
+            TransferAllocation.objects.filter(
+                target_order=order,
+                sku_id=sku_id,
+                status='locked',
+            ).values_list('source_order_id', flat=True)
+        )
+
         TransferAllocation.objects.filter(
             target_order=order,
             sku_id=sku_id,
@@ -884,12 +1539,44 @@ def transfer_recommend(request):
             order.order_no,
             f'重新推荐挂靠：SKU#{sku_id} -> {alloc_text}'
         )
+        after_source_ids = list(
+            TransferAllocation.objects.filter(
+                target_order=order,
+                sku_id=sku_id,
+                status='locked',
+            ).values_list('source_order_id', flat=True)
+        )
+        if order.status == 'delivered' and before_source_ids != after_source_ids:
+            RiskEventService.create_event(
+                event_type='delivered_recommend_change',
+                level='high',
+                module='转寄',
+                title='已发货订单重新调整挂靠来源',
+                description=f'订单 {order.order_no}（SKU#{sku_id}）挂靠来源发生变更',
+                event_data={
+                    'order_id': order.id,
+                    'order_no': order.order_no,
+                    'sku_id': sku_id,
+                    'before_source_ids': before_source_ids,
+                    'after_source_ids': after_source_ids,
+                },
+                order=order,
+                detected_by=request.user,
+            )
+        _save_transfer_recommendation_log(
+            order=order,
+            sku_id=sku_id,
+            before_source_ids=before_source_ids,
+            plan=plan,
+            operator=request.user,
+            trigger_type='recommend',
+        )
         success += 1
 
     if success:
         messages.success(request, f'重新推荐完成：成功 {success} 条（仅更新挂靠，不生成任务）')
     if skipped_pending_task:
-        messages.warning(request, f'跳过 {skipped_pending_task} 条：存在未取消转寄任务，不可重推')
+        messages.warning(request, f'跳过 {skipped_pending_task} 条：已存在转寄任务（待执行或已完成），不可重推')
     if skipped_invalid:
         messages.warning(request, f'跳过 {skipped_invalid} 条：数据无效或状态不允许')
     return redirect('transfers_list')
@@ -1018,7 +1705,7 @@ def transfer_generate_tasks(request):
     if skipped_not_delivered:
         messages.warning(request, f'跳过 {skipped_not_delivered} 条：仅“已发货”订单可生成转寄任务')
     if skipped_exists:
-        messages.warning(request, f'跳过 {skipped_exists} 条：已存在未取消转寄任务')
+        messages.warning(request, f'跳过 {skipped_exists} 条：已存在转寄任务（待执行或已完成）')
     if skipped_invalid:
         messages.warning(request, f'跳过 {skipped_invalid} 条：数据无效或状态不允许')
     return redirect('transfers_list')
@@ -1077,6 +1764,7 @@ def transfer_complete(request, transfer_id):
                 source_order = transfer.order_from
                 before_target_order = _snapshot_order_audit(target_order)
                 before_source_order = _snapshot_order_audit(source_order)
+                source_completed_now = False
 
                 # 1) 新单：写入发货单号并推进至已发货
                 target_order.ship_tracking = tracking_no
@@ -1084,12 +1772,10 @@ def transfer_complete(request, transfer_id):
                     target_order.status = 'delivered'
                 target_order.save(update_fields=['ship_tracking', 'status', 'updated_at'])
 
-                # 对应目标单转寄锁标记为已消耗
-                TransferAllocation.objects.filter(
-                    target_order=target_order,
-                    sku_id=transfer.sku_id,
-                    status='locked'
-                ).update(status='consumed')
+                consumed_qty, shortfall_qty = _consume_transfer_allocations_for_transfer(
+                    transfer,
+                    operator=request.user,
+                )
 
                 # 2) 来源单：写入回收单号并推进至已完成（归还 -> 完成）
                 source_order.return_tracking = tracking_no
@@ -1098,14 +1784,18 @@ def transfer_complete(request, transfer_id):
                     source_order.save(update_fields=['return_tracking', 'status', 'updated_at'])
                     source_order.status = 'completed'
                     source_order.save(update_fields=['status', 'updated_at'])
+                    source_completed_now = True
                 elif source_order.status == 'returned':
                     source_order.save(update_fields=['return_tracking', 'updated_at'])
                     source_order.status = 'completed'
                     source_order.save(update_fields=['status', 'updated_at'])
+                    source_completed_now = True
                 elif source_order.status == 'completed':
                     source_order.save(update_fields=['return_tracking', 'updated_at'])
                 else:
                     raise ValueError(f'来源单状态为 {source_order.get_status_display()}，无法执行归还完成')
+                if source_completed_now:
+                    OrderService.record_deposit_refund(source_order, request.user, notes='转寄闭环完成后退还来源单押金')
 
                 InventoryUnitService.transfer_to_target(
                     source_order=source_order,
@@ -1121,6 +1811,8 @@ def transfer_complete(request, transfer_id):
                 transfer.notes = (transfer.notes + '\n' if transfer.notes else '') + (
                     f'完成闭环：快递单号={tracking_no}'
                 )
+                if shortfall_qty > 0:
+                    transfer.notes += f'；分配锁不足{shortfall_qty}'
                 transfer.save(update_fields=['status', 'notes', 'updated_at'])
 
                 AuditService.log_with_diff(
@@ -1139,9 +1831,15 @@ def transfer_complete(request, transfer_id):
                         'target_order': _snapshot_order_audit(target_order),
                         'source_order': _snapshot_order_audit(source_order),
                     },
-                    extra={'tracking_no': tracking_no},
+                    extra={
+                        'tracking_no': tracking_no,
+                        'allocation_consumed_qty': consumed_qty,
+                        'allocation_shortfall_qty': shortfall_qty,
+                    },
                 )
             messages.success(request, '转寄任务已完成')
+            if shortfall_qty > 0:
+                messages.warning(request, f'已完成任务，但挂靠锁不足 {shortfall_qty} 套（请检查历史数据）')
         except Exception as e:
             messages.error(request, f'操作失败：{str(e)}')
     return redirect('transfers_list')
@@ -1152,27 +1850,28 @@ def transfer_complete(request, transfer_id):
 def transfer_cancel(request, transfer_id):
     """取消转寄任务"""
     if request.method == 'POST':
-        if not has_action_permission(request.user, 'transfer.cancel_task'):
-            messages.error(request, '您没有执行此操作的权限（transfer.cancel_task）')
-            return redirect('transfers_list')
         try:
             transfer = get_object_or_404(Transfer, id=transfer_id)
-            if transfer.status != 'pending':
-                raise ValueError('仅待执行任务可取消')
-            before_transfer = _snapshot_transfer_audit(transfer)
-            transfer.status = 'cancelled'
-            transfer.notes = (transfer.notes + '\n' if transfer.notes else '') + '手动取消'
-            transfer.save(update_fields=['status', 'notes', 'updated_at'])
-            AuditService.log_with_diff(
-                user=request.user,
-                action='status_change',
-                module='转寄',
-                target=f'任务#{transfer.id}',
-                summary='取消转寄任务',
-                before=before_transfer,
-                after=_snapshot_transfer_audit(transfer),
-            )
-            messages.success(request, '转寄任务已取消')
+            reason = (request.POST.get('reason') or '手动取消').strip() or '手动取消'
+            if has_action_permission(request.user, 'transfer.cancel_task'):
+                _execute_transfer_cancel(transfer, request.user, reason)
+                messages.success(request, '转寄任务已取消')
+            elif can_request_approval(request.user):
+                _request_high_risk_approval(
+                    request,
+                    action_code='transfer.cancel_task',
+                    module='转寄',
+                    target_type='transfer',
+                    target_id=transfer.id,
+                    target_label=f'任务#{transfer.id}',
+                    summary=f'申请取消转寄任务 #{transfer.id}',
+                    payload={
+                        'transfer_id': transfer.id,
+                        'reason': reason,
+                    },
+                )
+            else:
+                messages.error(request, '您没有执行此操作的权限（transfer.cancel_task）')
         except Exception as e:
             messages.error(request, f'操作失败：{str(e)}')
     return redirect('transfers_list')
@@ -1214,6 +1913,7 @@ def outbound_inventory_dashboard(request):
     status = (request.GET.get('status') or '').strip()
     event_type = (request.GET.get('event_type') or '').strip()
     anomaly_only = (request.GET.get('anomaly_only') or '').strip() == '1'
+    part_issue_only = (request.GET.get('part_issue_only') or '').strip() == '1'
     topology_sku_id = (request.GET.get('topology_sku_id') or '').strip()
     topology_unit_no = (request.GET.get('topology_unit_no') or '').strip()
 
@@ -1247,12 +1947,23 @@ def outbound_inventory_dashboard(request):
     # 业务总览卡片
     outbound_total = InventoryUnit.objects.filter(is_active=True).exclude(status='in_warehouse').count()
     transfer_in_transit = 0
-    exception_nodes = 0
+    exception_unit_ids = set()
+    part_issue_by_unit = {
+        row['unit_id']: int(row['cnt'] or 0)
+        for row in InventoryUnitPart.objects.filter(
+            unit_id__in=all_active_ids,
+            is_active=True,
+            status__in=['missing', 'damaged', 'lost']
+        ).values('unit_id').annotate(cnt=Count('id'))
+    }
     for unit_id, mv in latest_by_unit.items():
         if mv.event_type in ['TRANSFER_PENDING', 'TRANSFER_SHIPPED']:
             transfer_in_transit += 1
         if mv.status in ['warning', 'timeout'] or mv.event_type == 'EXCEPTION':
-            exception_nodes += 1
+            exception_unit_ids.add(unit_id)
+    for unit_id, cnt in part_issue_by_unit.items():
+        if int(cnt or 0) > 0:
+            exception_unit_ids.add(unit_id)
     today_out = UnitMovement.objects.filter(event_type='WAREHOUSE_OUT', event_time__date=today).count()
     today_returned = UnitMovement.objects.filter(event_type='RETURNED_WAREHOUSE', event_time__date=today).count()
 
@@ -1261,7 +1972,7 @@ def outbound_inventory_dashboard(request):
         'transfer_in_transit': transfer_in_transit,
         'today_out': today_out,
         'today_returned': today_returned,
-        'exception_nodes': exception_nodes,
+        'exception_nodes': len(exception_unit_ids),
     }
 
     hop_counts = {
@@ -1289,6 +2000,9 @@ def outbound_inventory_dashboard(request):
                 warn_reason = (warn_reason + '；' if warn_reason else '') + f'转寄在途>{shipped_timeout_days}天'
         elif latest_mv and latest_mv.event_type == 'EXCEPTION':
             warn_reason = (warn_reason + '；' if warn_reason else '') + '异常节点'
+        part_issue_cnt = int(part_issue_by_unit.get(unit_id, 0) or 0)
+        if part_issue_cnt > 0:
+            warn_reason = (warn_reason + '；' if warn_reason else '') + f'部件异常{part_issue_cnt}项'
         if warn_reason:
             warn_reason_by_unit[unit_id] = warn_reason
 
@@ -1314,6 +2028,8 @@ def outbound_inventory_dashboard(request):
 
     if anomaly_only:
         units = units.filter(id__in=list(warn_reason_by_unit.keys()))
+    if part_issue_only:
+        units = units.filter(id__in=[uid for uid, cnt in part_issue_by_unit.items() if int(cnt or 0) > 0])
 
     # SKU总表增强：最长在途天数/转寄在途/异常数
     unit_brief = all_active_units
@@ -1405,7 +2121,7 @@ def outbound_inventory_dashboard(request):
         )
     )
 
-    units_page = Paginator(enriched, 10).get_page(request.GET.get('page'))
+    units_page = Paginator(enriched, _get_page_size('page_size_outbound_units')).get_page(request.GET.get('page'))
     page_units = []
     for unit, latest_mv, hop_count, outbound_days, warn_reason, severity, health_score, health_level in units_page.object_list:
         unit.latest_movement = latest_mv
@@ -1417,11 +2133,40 @@ def outbound_inventory_dashboard(request):
         unit.health_level = health_level
         page_units.append(unit)
     units_page.object_list = page_units
+
+    unit_ids_on_page = [u.id for u in units_page.object_list]
+    parts_rows = list(
+        InventoryUnitPart.objects.filter(unit_id__in=unit_ids_on_page, is_active=True).select_related('part').values(
+            'unit_id', 'part_id', 'part__name', 'part__spec', 'status', 'expected_quantity', 'actual_quantity', 'notes', 'last_checked_at'
+        )
+    )
+    part_summary_map = defaultdict(lambda: {'total': 0, 'missing': 0, 'damaged': 0, 'lost': 0, 'issue': 0})
+    part_rows_map = defaultdict(list)
+    for row in parts_rows:
+        summary = part_summary_map[row['unit_id']]
+        summary['total'] += 1
+        status_val = row['status']
+        if status_val in ['missing', 'damaged', 'lost']:
+            summary[status_val] += 1
+            summary['issue'] += 1
+        part_rows_map[row['unit_id']].append({
+            'part_id': row['part_id'],
+            'part_name': row['part__name'],
+            'part_spec': row['part__spec'] or '',
+            'status': row['status'],
+            'expected_quantity': int(row['expected_quantity'] or 0),
+            'actual_quantity': int(row['actual_quantity'] or 0),
+            'notes': row['notes'] or '',
+            'last_checked_at': row['last_checked_at'].strftime('%Y-%m-%d %H:%M') if row['last_checked_at'] else '',
+        })
+
     for unit in units_page.object_list:
         unit.latest_movement = latest_by_unit.get(unit.id)
         unit.hop_count = hop_counts.get(unit.id, getattr(unit, 'hop_count', 0))
         unit.outbound_days = getattr(unit, 'outbound_days', (now - unit.latest_movement.event_time).days if (unit.latest_movement and unit.status != 'in_warehouse') else 0)
         unit.warn_reason = getattr(unit, 'warn_reason', warn_reason_by_unit.get(unit.id, ''))
+        unit.part_summary = part_summary_map.get(unit.id, {'total': 0, 'missing': 0, 'damaged': 0, 'lost': 0, 'issue': 0})
+        unit.part_rows = part_rows_map.get(unit.id, [])
         if not hasattr(unit, 'health_score') or not hasattr(unit, 'health_level'):
             score, level = _compute_unit_health(
                 unit_status=unit.status,
@@ -1441,7 +2186,7 @@ def outbound_inventory_dashboard(request):
         timeline_qs = timeline_qs.filter(event_type=event_type)
     if sku_id.isdigit():
         timeline_qs = timeline_qs.filter(unit__sku_id=int(sku_id))
-    timeline_page = Paginator(timeline_qs, 10).get_page(request.GET.get('timeline_page'))
+    timeline_page = Paginator(timeline_qs, _get_page_size('page_size_outbound_timeline')).get_page(request.GET.get('timeline_page'))
 
     # 拓扑文本视图（按单套串联节点）
     topology_rows = []
@@ -1452,7 +2197,7 @@ def outbound_inventory_dashboard(request):
         topology_units_qs = topology_units_qs.filter(unit_no__icontains=topology_unit_no)
     if anomaly_only:
         topology_units_qs = topology_units_qs.filter(id__in=list(warn_reason_by_unit.keys()))
-    topology_units_page = Paginator(topology_units_qs, 5).get_page(request.GET.get('topology_page'))
+    topology_units_page = Paginator(topology_units_qs, _get_page_size('page_size_outbound_topology_units', 5)).get_page(request.GET.get('topology_page'))
     topology_units = list(topology_units_page.object_list)
     topology_graphs = []
     for unit in topology_units:
@@ -1553,6 +2298,7 @@ def outbound_inventory_dashboard(request):
         'keyword': keyword,
         'event_type_filter': event_type,
         'anomaly_only': anomaly_only,
+        'part_issue_only': part_issue_only,
         'status_choices': InventoryUnit.STATUS_CHOICES,
         'event_type_choices': UnitMovement.EVENT_CHOICES,
         'skus': SKU.objects.filter(is_active=True).order_by('code'),
@@ -1563,8 +2309,940 @@ def outbound_inventory_dashboard(request):
         'pagination_query': _build_querystring(request, ['page']),
         'timeline_pagination_query': _build_querystring(request, ['timeline_page']),
         'topology_pagination_query': _build_querystring(request, ['topology_page']),
+        'unit_parts_map_json': json.dumps({
+            str(unit.id): getattr(unit, 'part_rows', []) for unit in units_page.object_list
+        }, ensure_ascii=False),
+        'parts_inventory': Part.objects.filter(is_active=True).order_by('name'),
+        'maintenance_work_orders': MaintenanceWorkOrder.objects.select_related('unit', 'sku').order_by('-created_at')[:20],
+        'disposal_orders': UnitDisposalOrder.objects.select_related('unit', 'sku').order_by('-created_at')[:20],
     }
     return render(request, 'outbound_inventory.html', context)
+
+
+@login_required
+@require_permission('outbound_inventory', 'update')
+def outbound_inventory_unit_parts_update(request, unit_id):
+    """更新单套部件状态盘点结果"""
+    if request.method != 'POST':
+        return redirect('outbound_inventory_dashboard')
+
+    unit = get_object_or_404(InventoryUnit, id=unit_id, is_active=True)
+    part_ids = request.POST.getlist('part_id[]')
+    statuses = request.POST.getlist('status[]')
+    actual_qtys = request.POST.getlist('actual_quantity[]')
+    notes_list = request.POST.getlist('notes[]')
+
+    try:
+        updated = 0
+        before_rows = []
+        after_rows = []
+        with transaction.atomic():
+            for idx, part_id_raw in enumerate(part_ids):
+                part_id_raw = (part_id_raw or '').strip()
+                if not part_id_raw.isdigit():
+                    continue
+                status_val = (statuses[idx] if idx < len(statuses) else 'normal').strip() or 'normal'
+                if status_val not in ['normal', 'missing', 'damaged', 'lost']:
+                    status_val = 'normal'
+                qty_raw = (actual_qtys[idx] if idx < len(actual_qtys) else '').strip()
+                notes = (notes_list[idx] if idx < len(notes_list) else '').strip()
+                actual_qty = int(qty_raw or '0')
+                if actual_qty < 0:
+                    actual_qty = 0
+
+                row = InventoryUnitPart.objects.filter(
+                    unit=unit,
+                    part_id=int(part_id_raw),
+                    is_active=True
+                ).first()
+                if not row:
+                    continue
+                before_rows.append({
+                    'part_id': row.part_id,
+                    'status': row.status,
+                    'actual_quantity': int(row.actual_quantity or 0),
+                    'notes': row.notes or '',
+                })
+                row.status = status_val
+                row.actual_quantity = actual_qty
+                row.notes = notes[:200]
+                row.last_checked_at = timezone.now()
+                row.save(update_fields=['status', 'actual_quantity', 'notes', 'last_checked_at', 'updated_at'])
+                after_rows.append({
+                    'part_id': row.part_id,
+                    'status': row.status,
+                    'actual_quantity': int(row.actual_quantity or 0),
+                    'notes': row.notes or '',
+                })
+                updated += 1
+
+        if updated > 0:
+            AuditService.log_with_diff(
+                user=request.user,
+                action='update',
+                module='在外库存',
+                target=unit.unit_no,
+                summary='更新单套部件盘点',
+                before={'items': before_rows},
+                after={'items': after_rows},
+                extra={'unit_id': unit.id, 'updated_count': updated},
+            )
+
+        messages.success(request, f'单套 {unit.unit_no} 部件盘点已保存（{updated} 项）')
+    except Exception as e:
+        messages.error(request, f'保存失败：{str(e)}')
+
+    return redirect('outbound_inventory_dashboard')
+
+
+@login_required
+@require_permission('outbound_inventory', 'update')
+def maintenance_work_order_create(request, unit_id):
+    """创建维修换件工单"""
+    if request.method != 'POST':
+        return redirect('outbound_inventory_dashboard')
+    unit = get_object_or_404(InventoryUnit, id=unit_id, is_active=True)
+    try:
+        items = _parse_maintenance_items_post(request)
+        issue_desc = (request.POST.get('issue_desc') or '').strip()
+        notes = (request.POST.get('notes') or '').strip()
+        work_order = MaintenanceService.create_work_order(
+            unit=unit,
+            issue_desc=issue_desc,
+            items=items,
+            notes=notes,
+            user=request.user,
+        )
+        messages.success(request, f'维修工单已创建：{work_order.work_order_no}')
+    except Exception as e:
+        messages.error(request, f'创建维修工单失败：{str(e)}')
+    return redirect('outbound_inventory_dashboard')
+
+
+@login_required
+@require_permission('outbound_inventory', 'update')
+def maintenance_work_order_complete(request, work_order_id):
+    """执行维修换件工单"""
+    if request.method != 'POST':
+        return redirect('outbound_inventory_dashboard')
+    work_order = get_object_or_404(MaintenanceWorkOrder.objects.select_related('unit', 'sku'), id=work_order_id)
+    try:
+        MaintenanceService.complete_work_order(work_order=work_order, user=request.user)
+        messages.success(request, f'维修工单 {work_order.work_order_no} 已完成')
+    except Exception as e:
+        messages.error(request, f'执行维修工单失败：{str(e)}')
+    return redirect('outbound_inventory_dashboard')
+
+
+@login_required
+@require_permission('outbound_inventory', 'update')
+def maintenance_work_order_cancel(request, work_order_id):
+    """取消维修换件工单"""
+    if request.method != 'POST':
+        return redirect('maintenance_work_orders_list')
+    work_order = get_object_or_404(MaintenanceWorkOrder.objects.select_related('unit', 'sku'), id=work_order_id)
+    try:
+        MaintenanceService.cancel_work_order(work_order=work_order, user=request.user)
+        messages.success(request, f'维修工单 {work_order.work_order_no} 已取消')
+    except Exception as e:
+        messages.error(request, f'取消维修工单失败：{str(e)}')
+    next_url = request.POST.get('next') or reverse('maintenance_work_orders_list')
+    return redirect(next_url)
+
+
+@login_required
+@require_permission('outbound_inventory', 'update')
+def maintenance_work_order_reverse(request, work_order_id):
+    """冲销已完成维修工单"""
+    if request.method != 'POST':
+        return redirect('maintenance_work_orders_list')
+    work_order = get_object_or_404(MaintenanceWorkOrder.objects.select_related('unit', 'sku'), id=work_order_id)
+    try:
+        MaintenanceService.reverse_work_order(work_order=work_order, user=request.user)
+        messages.success(request, f'维修工单 {work_order.work_order_no} 已冲销')
+    except Exception as e:
+        messages.error(request, f'维修工单冲销失败：{str(e)}')
+    next_url = request.POST.get('next') or reverse('maintenance_work_orders_list')
+    return redirect(next_url)
+
+
+@login_required
+@require_permission('outbound_inventory', 'view')
+def maintenance_work_orders_list(request):
+    """维修工单列表"""
+    orders = MaintenanceWorkOrder.objects.select_related(
+        'unit', 'sku', 'created_by', 'completed_by'
+    ).prefetch_related('items__old_part', 'items__new_part').order_by('-created_at')
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    status_filter = (request.GET.get('status') or '').strip()
+    sku_filter = (request.GET.get('sku_id') or '').strip()
+    part_filter = (request.GET.get('part_id') or '').strip()
+    from_report = (request.GET.get('from_report') or '').strip() == '1'
+    range_filter = (request.GET.get('range') or '').strip()
+    if keyword:
+        orders = orders.filter(
+            Q(work_order_no__icontains=keyword) |
+            Q(unit__unit_no__icontains=keyword) |
+            Q(sku__code__icontains=keyword) |
+            Q(sku__name__icontains=keyword) |
+            Q(unit__current_order__order_no__icontains=keyword) |
+            Q(issue_desc__icontains=keyword) |
+            Q(created_by__username__icontains=keyword) |
+            Q(items__old_part__name__icontains=keyword) |
+            Q(items__new_part__name__icontains=keyword)
+        ).distinct()
+    if status_filter:
+        orders = orders.filter(status=status_filter)
+    if sku_filter:
+        orders = orders.filter(sku_id=sku_filter)
+    if part_filter:
+        orders = orders.filter(
+            Q(items__old_part_id=part_filter) | Q(items__new_part_id=part_filter)
+        ).distinct()
+    page = Paginator(orders, _get_page_size('page_size_maintenance_orders')).get_page(request.GET.get('page'))
+    for order in page.object_list:
+        order.items_summary = '，'.join([
+            f"{item.old_part.name}->{item.new_part.name} x{item.replace_quantity}" for item in order.items.all()[:4]
+        ]) or '-'
+    context = {
+        'maintenance_orders': page,
+        'maintenance_orders_page': page,
+        'keyword': keyword,
+        'status_filter': status_filter,
+        'sku_filter': sku_filter,
+        'part_filter': part_filter,
+        'from_report': from_report,
+        'report_back_query': urlencode({
+            key: value for key, value in {
+                'range': range_filter,
+                'sku_id': sku_filter,
+                'part_id': part_filter,
+            }.items() if value not in ['', None]
+        }),
+        'status_choices': MaintenanceWorkOrder.STATUS_CHOICES,
+        'sku_choices': SKU.objects.filter(is_active=True).order_by('code'),
+        'part_choices': Part.objects.filter(is_active=True).order_by('name'),
+        'pagination_query': _build_querystring(request, ['page']),
+        'summary': {
+            'total_count': orders.count(),
+            'draft_count': orders.filter(status='draft').count(),
+            'completed_count': orders.filter(status='completed').count(),
+            'reversed_count': orders.filter(status='reversed').count(),
+        },
+    }
+    return render(request, 'procurement/maintenance_work_orders.html', context)
+
+
+@login_required
+@require_permission('outbound_inventory', 'view')
+def maintenance_work_orders_export(request):
+    """导出维修工单CSV"""
+    orders = MaintenanceWorkOrder.objects.select_related(
+        'unit', 'sku', 'created_by', 'completed_by'
+    ).prefetch_related('items__old_part', 'items__new_part').order_by('-created_at')
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    status_filter = (request.GET.get('status') or '').strip()
+    sku_filter = (request.GET.get('sku_id') or '').strip()
+    part_filter = (request.GET.get('part_id') or '').strip()
+    if keyword:
+        orders = orders.filter(
+            Q(work_order_no__icontains=keyword) |
+            Q(unit__unit_no__icontains=keyword) |
+            Q(sku__code__icontains=keyword) |
+            Q(sku__name__icontains=keyword) |
+            Q(unit__current_order__order_no__icontains=keyword) |
+            Q(issue_desc__icontains=keyword) |
+            Q(created_by__username__icontains=keyword) |
+            Q(items__old_part__name__icontains=keyword) |
+            Q(items__new_part__name__icontains=keyword)
+        ).distinct()
+    if status_filter:
+        orders = orders.filter(status=status_filter)
+    if sku_filter:
+        orders = orders.filter(sku_id=sku_filter)
+    if part_filter:
+        orders = orders.filter(
+            Q(items__old_part_id=part_filter) | Q(items__new_part_id=part_filter)
+        ).distinct()
+
+    resp = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+    resp['Content-Disposition'] = 'attachment; filename="maintenance_work_orders.csv"'
+    writer = csv.writer(resp)
+    writer.writerow([
+        '工单号', '单套编号', 'SKU编码', 'SKU名称', '换件明细', '问题描述',
+        '状态', '创建人', '创建时间', '完成人', '完成时间'
+    ])
+    for order in orders:
+        items_summary = '，'.join([
+            f"{item.old_part.name}->{item.new_part.name} x{item.replace_quantity}" for item in order.items.all()
+        ]) or '-'
+        writer.writerow([
+            order.work_order_no,
+            order.unit.unit_no if order.unit else '',
+            order.sku.code if order.sku else '',
+            order.sku.name if order.sku else '',
+            items_summary,
+            order.issue_desc or '',
+            order.get_status_display(),
+            order.created_by.username if order.created_by else '',
+            order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else '',
+            order.completed_by.username if order.completed_by else '',
+            order.completed_at.strftime('%Y-%m-%d %H:%M:%S') if order.completed_at else '',
+        ])
+    return resp
+
+
+@login_required
+@require_permission('outbound_inventory', 'view')
+def part_issue_pool(request):
+    """部件折损池 / 待维修池"""
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    status_filter = (request.GET.get('status') or '').strip()
+    sku_filter = (request.GET.get('sku_id') or '').strip()
+    part_filter = (request.GET.get('part_id') or '').strip()
+    from_report = (request.GET.get('from_report') or '').strip() == '1'
+    range_filter = (request.GET.get('range') or '').strip()
+    anomaly_qs = InventoryUnitPart.objects.select_related(
+        'unit', 'unit__sku', 'unit__current_order', 'part'
+    ).filter(
+        is_active=True,
+        status__in=['missing', 'damaged', 'lost']
+    ).order_by('-updated_at', 'unit__unit_no', 'part__name')
+    if keyword:
+        anomaly_qs = anomaly_qs.filter(
+            Q(unit__unit_no__icontains=keyword) |
+            Q(unit__sku__code__icontains=keyword) |
+            Q(unit__sku__name__icontains=keyword) |
+            Q(part__name__icontains=keyword) |
+            Q(unit__current_order__order_no__icontains=keyword) |
+            Q(notes__icontains=keyword)
+        )
+    if status_filter in ['missing', 'damaged', 'lost']:
+        anomaly_qs = anomaly_qs.filter(status=status_filter)
+    if sku_filter:
+        anomaly_qs = anomaly_qs.filter(unit__sku_id=sku_filter)
+    if part_filter:
+        anomaly_qs = anomaly_qs.filter(part_id=part_filter)
+
+    maintenance_qs = MaintenanceWorkOrder.objects.select_related(
+        'unit', 'sku', 'created_by'
+    ).prefetch_related('items__old_part', 'items__new_part').filter(status='draft').order_by('-created_at')
+    if keyword:
+        maintenance_qs = maintenance_qs.filter(
+            Q(work_order_no__icontains=keyword) |
+            Q(unit__unit_no__icontains=keyword) |
+            Q(sku__code__icontains=keyword) |
+            Q(sku__name__icontains=keyword) |
+            Q(unit__current_order__order_no__icontains=keyword) |
+            Q(issue_desc__icontains=keyword) |
+            Q(items__old_part__name__icontains=keyword) |
+            Q(items__new_part__name__icontains=keyword)
+        ).distinct()
+    if sku_filter:
+        maintenance_qs = maintenance_qs.filter(sku_id=sku_filter)
+    if part_filter:
+        maintenance_qs = maintenance_qs.filter(
+            Q(items__old_part_id=part_filter) | Q(items__new_part_id=part_filter)
+        ).distinct()
+
+    anomaly_page = Paginator(anomaly_qs, _get_page_size('page_size_part_issue_pool')).get_page(request.GET.get('anomaly_page'))
+    maintenance_page = Paginator(maintenance_qs, _get_page_size('page_size_part_issue_maintenance')).get_page(request.GET.get('maintenance_page'))
+
+    summary = {
+        'issue_units': anomaly_qs.values('unit_id').distinct().count(),
+        'issue_rows': anomaly_qs.count(),
+        'draft_maintenance': maintenance_qs.count(),
+        'damaged_count': anomaly_qs.filter(status='damaged').count(),
+    }
+    for order in maintenance_page.object_list:
+        order.items_summary = '，'.join([
+            f"{item.old_part.name}->{item.new_part.name} x{item.replace_quantity}" for item in order.items.all()[:4]
+        ]) or '-'
+
+    context = {
+        'keyword': keyword,
+        'status_filter': status_filter,
+        'sku_filter': sku_filter,
+        'part_filter': part_filter,
+        'from_report': from_report,
+        'report_back_query': urlencode({
+            key: value for key, value in {
+                'range': range_filter,
+                'sku_id': sku_filter,
+                'part_id': part_filter,
+            }.items() if value not in ['', None]
+        }),
+        'status_choices': InventoryUnitPart.STATUS_CHOICES,
+        'sku_choices': SKU.objects.filter(is_active=True).order_by('code'),
+        'part_choices': Part.objects.filter(is_active=True).order_by('name'),
+        'summary': summary,
+        'anomaly_rows': anomaly_page,
+        'anomaly_page': anomaly_page,
+        'maintenance_orders': maintenance_page,
+        'maintenance_page': maintenance_page,
+        'anomaly_pagination_query': _build_querystring(request, ['anomaly_page']),
+        'maintenance_pagination_query': _build_querystring(request, ['maintenance_page']),
+    }
+    return render(request, 'procurement/part_issue_pool.html', context)
+
+
+@login_required
+@require_permission('parts', 'view')
+def part_recovery_inspections_list(request):
+    """拆解回件质检池"""
+    inspections = PartRecoveryInspection.objects.select_related(
+        'disposal_order', 'disposal_item', 'unit', 'sku', 'part', 'processed_by'
+    ).order_by('-created_at')
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    status_filter = (request.GET.get('status') or '').strip()
+    sku_filter = (request.GET.get('sku_id') or '').strip()
+    part_filter = (request.GET.get('part_id') or '').strip()
+    from_report = (request.GET.get('from_report') or '').strip() == '1'
+    range_filter = (request.GET.get('range') or '').strip()
+    if keyword:
+        inspections = inspections.filter(
+            Q(disposal_order__disposal_no__icontains=keyword)
+            | Q(unit__unit_no__icontains=keyword)
+            | Q(sku__code__icontains=keyword)
+            | Q(sku__name__icontains=keyword)
+            | Q(part__name__icontains=keyword)
+            | Q(unit__current_order__order_no__icontains=keyword)
+            | Q(notes__icontains=keyword)
+        ).distinct()
+    if status_filter:
+        inspections = inspections.filter(status=status_filter)
+    if sku_filter:
+        inspections = inspections.filter(sku_id=sku_filter)
+    if part_filter:
+        inspections = inspections.filter(part_id=part_filter)
+
+    page = Paginator(
+        inspections,
+        _get_page_size('page_size_part_recovery_inspections')
+    ).get_page(request.GET.get('page'))
+    context = {
+        'inspections': page,
+        'inspections_page': page,
+        'keyword': keyword,
+        'status_filter': status_filter,
+        'sku_filter': sku_filter,
+        'part_filter': part_filter,
+        'from_report': from_report,
+        'report_back_query': urlencode({
+            key: value for key, value in {
+                'range': range_filter,
+                'sku_id': sku_filter,
+                'part_id': part_filter,
+            }.items() if value not in ['', None]
+        }),
+        'status_choices': PartRecoveryInspection.STATUS_CHOICES,
+        'sku_choices': SKU.objects.filter(is_active=True).order_by('code'),
+        'part_choices': Part.objects.filter(is_active=True).order_by('name'),
+        'pagination_query': _build_querystring(request, ['page']),
+        'summary': {
+            'pending_count': inspections.filter(status='pending').count(),
+            'returned_count': inspections.filter(status='returned').count(),
+            'repair_count': inspections.filter(status='repair').count(),
+            'scrapped_count': inspections.filter(status='scrapped').count(),
+        },
+    }
+    return render(request, 'procurement/part_recovery_inspections.html', context)
+
+
+@login_required
+@require_permission('parts', 'view')
+def part_recovery_inspections_export(request):
+    """导出拆解回件质检池CSV"""
+    inspections = PartRecoveryInspection.objects.select_related(
+        'disposal_order', 'unit', 'sku', 'part', 'processed_by'
+    ).order_by('-created_at')
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    status_filter = (request.GET.get('status') or '').strip()
+    sku_filter = (request.GET.get('sku_id') or '').strip()
+    part_filter = (request.GET.get('part_id') or '').strip()
+    if keyword:
+        inspections = inspections.filter(
+            Q(disposal_order__disposal_no__icontains=keyword)
+            | Q(unit__unit_no__icontains=keyword)
+            | Q(sku__code__icontains=keyword)
+            | Q(sku__name__icontains=keyword)
+            | Q(part__name__icontains=keyword)
+            | Q(unit__current_order__order_no__icontains=keyword)
+            | Q(notes__icontains=keyword)
+        ).distinct()
+    if status_filter:
+        inspections = inspections.filter(status=status_filter)
+    if sku_filter:
+        inspections = inspections.filter(sku_id=sku_filter)
+    if part_filter:
+        inspections = inspections.filter(part_id=part_filter)
+
+    resp = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+    resp['Content-Disposition'] = 'attachment; filename="part_recovery_inspections.csv"'
+    writer = csv.writer(resp)
+    writer.writerow([
+        '来源处置单', '单套编号', 'SKU编码', 'SKU名称', '部件', '数量',
+        '状态', '处理人', '处理时间', '备注', '创建时间'
+    ])
+    for inspection in inspections:
+        writer.writerow([
+            inspection.disposal_order.disposal_no if inspection.disposal_order else '',
+            inspection.unit.unit_no if inspection.unit else '',
+            inspection.sku.code if inspection.sku else '',
+            inspection.sku.name if inspection.sku else '',
+            inspection.part.name if inspection.part else '',
+            inspection.quantity,
+            inspection.get_status_display(),
+            inspection.processed_by.username if inspection.processed_by else '',
+            inspection.processed_at.strftime('%Y-%m-%d %H:%M:%S') if inspection.processed_at else '',
+            inspection.notes or '',
+            inspection.created_at.strftime('%Y-%m-%d %H:%M:%S') if inspection.created_at else '',
+        ])
+    return resp
+
+
+@login_required
+@require_permission('parts', 'view')
+def warehouse_reports(request):
+    """仓储报表总览"""
+    range_days = (request.GET.get('range') or '7').strip()
+    try:
+        range_days = int(range_days)
+    except (TypeError, ValueError):
+        range_days = 7
+    range_days = 30 if range_days == 30 else 7
+
+    sku_filter = (request.GET.get('sku_id') or '').strip()
+    part_filter = (request.GET.get('part_id') or '').strip()
+
+    assembly_qs = AssemblyOrder.objects.select_related('sku').prefetch_related('items__part')
+    maintenance_qs = MaintenanceWorkOrder.objects.select_related('sku', 'unit').prefetch_related('items__old_part', 'items__new_part')
+    disposal_qs = UnitDisposalOrder.objects.select_related('sku', 'unit').prefetch_related('items__part')
+    recovery_qs = PartRecoveryInspection.objects.select_related('part', 'sku', 'unit')
+
+    if sku_filter.isdigit():
+        sku_id = int(sku_filter)
+        assembly_qs = assembly_qs.filter(sku_id=sku_id)
+        maintenance_qs = maintenance_qs.filter(sku_id=sku_id)
+        disposal_qs = disposal_qs.filter(sku_id=sku_id)
+        recovery_qs = recovery_qs.filter(sku_id=sku_id)
+    if part_filter.isdigit():
+        part_id = int(part_filter)
+        assembly_qs = assembly_qs.filter(items__part_id=part_id).distinct()
+        maintenance_qs = maintenance_qs.filter(
+            Q(items__old_part_id=part_id) | Q(items__new_part_id=part_id)
+        ).distinct()
+        disposal_qs = disposal_qs.filter(items__part_id=part_id).distinct()
+        recovery_qs = recovery_qs.filter(part_id=part_id)
+
+    summary = {
+        'assembly_completed': assembly_qs.filter(status='completed').count(),
+        'maintenance_draft': maintenance_qs.filter(status='draft').count(),
+        'maintenance_completed': maintenance_qs.filter(status='completed').count(),
+        'disposal_completed': disposal_qs.filter(status='completed').count(),
+        'recovery_pending': recovery_qs.filter(status='pending').count(),
+        'recovery_repair': recovery_qs.filter(status='repair').count(),
+    }
+
+    trends = [
+        {
+            'label': '装配完成',
+            'color': '#2563eb',
+            'rows': _count_by_day(assembly_qs.filter(status='completed', completed_at__isnull=False), 'completed_at', range_days),
+        },
+        {
+            'label': '新建维修单',
+            'color': '#14b8a6',
+            'rows': _count_by_day(maintenance_qs, 'created_at', range_days),
+        },
+        {
+            'label': '单套处置完成',
+            'color': '#f97316',
+            'rows': _count_by_day(disposal_qs.filter(status='completed', completed_at__isnull=False), 'completed_at', range_days),
+        },
+        {
+            'label': '回件待质检新增',
+            'color': '#8b5cf6',
+            'rows': _count_by_day(recovery_qs.filter(status='pending'), 'created_at', range_days),
+        },
+        {
+            'label': '回件回库完成',
+            'color': '#16a34a',
+            'rows': _count_by_day(recovery_qs.filter(status='returned', processed_at__isnull=False), 'processed_at', range_days),
+        },
+    ]
+    for trend in trends:
+        trend['max_value'] = max([row['value'] for row in trend['rows']] or [0])
+        for row in trend['rows']:
+            row['percent'] = round((row['value'] / trend['max_value']) * 100, 1) if trend['max_value'] else 0
+
+    context = {
+        'range_days': range_days,
+        'sku_filter': sku_filter,
+        'part_filter': part_filter,
+        'sku_choices': SKU.objects.filter(is_active=True).order_by('code'),
+        'part_choices': Part.objects.filter(is_active=True).order_by('name'),
+        'export_query': urlencode({
+            key: value for key, value in {
+                'range': range_days,
+                'sku_id': sku_filter,
+                'part_id': part_filter,
+            }.items() if value not in ['', None]
+        }),
+        'summary': summary,
+        'trends': trends,
+        'assembly_distribution': _build_distribution([
+            {'label': '已完成', 'value': assembly_qs.filter(status='completed').count(), 'color': '#2563eb'},
+            {'label': '已取消', 'value': assembly_qs.filter(status='cancelled').count(), 'color': '#94a3b8'},
+        ]),
+        'maintenance_distribution': _build_distribution([
+            {'label': '待执行', 'value': maintenance_qs.filter(status='draft').count(), 'color': '#f59e0b'},
+            {'label': '已完成', 'value': maintenance_qs.filter(status='completed').count(), 'color': '#10b981'},
+            {'label': '已冲销', 'value': maintenance_qs.filter(status='reversed').count(), 'color': '#64748b'},
+            {'label': '已取消', 'value': maintenance_qs.filter(status='cancelled').count(), 'color': '#ef4444'},
+        ]),
+        'disposal_distribution': _build_distribution([
+            {'label': '拆解回件', 'value': disposal_qs.filter(action_type='disassemble').count(), 'color': '#06b6d4'},
+            {'label': '报废停用', 'value': disposal_qs.filter(action_type='scrap').count(), 'color': '#ef4444'},
+        ]),
+        'recovery_distribution': _build_distribution([
+            {'label': '待质检', 'value': recovery_qs.filter(status='pending').count(), 'color': '#f59e0b'},
+            {'label': '待维修', 'value': recovery_qs.filter(status='repair').count(), 'color': '#3b82f6'},
+            {'label': '已回库', 'value': recovery_qs.filter(status='returned').count(), 'color': '#16a34a'},
+            {'label': '已报废', 'value': recovery_qs.filter(status='scrapped').count(), 'color': '#6b7280'},
+        ]),
+        'issue_top_parts': Part.objects.filter(is_active=True).annotate(
+            issue_rows=Count(
+                'inventory_unit_parts',
+                filter=Q(
+                    inventory_unit_parts__is_active=True,
+                    inventory_unit_parts__status__in=['missing', 'damaged', 'lost']
+                ) & (Q(inventory_unit_parts__unit__sku_id=int(sku_filter)) if sku_filter.isdigit() else Q())
+            )
+        ).filter(
+            issue_rows__gt=0,
+            **({'id': int(part_filter)} if part_filter.isdigit() else {})
+        ).order_by('-issue_rows', 'name')[:8],
+        'maintenance_top_parts': Part.objects.filter(is_active=True).annotate(
+            replace_total=Sum(
+                'maintenance_new_items__replace_quantity',
+                filter=(Q(maintenance_new_items__work_order__sku_id=int(sku_filter)) if sku_filter.isdigit() else Q())
+            )
+        ).filter(
+            replace_total__gt=0,
+            **({'id': int(part_filter)} if part_filter.isdigit() else {})
+        ).order_by('-replace_total', 'name')[:8],
+        'recovery_top_parts': Part.objects.filter(is_active=True).annotate(
+            pending_qty=Sum(
+                'recovery_inspections__quantity',
+                filter=Q(recovery_inspections__status='pending') & (Q(recovery_inspections__sku_id=int(sku_filter)) if sku_filter.isdigit() else Q())
+            ),
+            repair_qty=Sum(
+                'recovery_inspections__quantity',
+                filter=Q(recovery_inspections__status='repair') & (Q(recovery_inspections__sku_id=int(sku_filter)) if sku_filter.isdigit() else Q())
+            ),
+            returned_qty=Sum(
+                'recovery_inspections__quantity',
+                filter=Q(recovery_inspections__status='returned') & (Q(recovery_inspections__sku_id=int(sku_filter)) if sku_filter.isdigit() else Q())
+            ),
+            scrapped_qty=Sum(
+                'recovery_inspections__quantity',
+                filter=Q(recovery_inspections__status='scrapped') & (Q(recovery_inspections__sku_id=int(sku_filter)) if sku_filter.isdigit() else Q())
+            ),
+        ).filter(
+            Q(pending_qty__gt=0) | Q(repair_qty__gt=0) | Q(returned_qty__gt=0) | Q(scrapped_qty__gt=0),
+            **({'id': int(part_filter)} if part_filter.isdigit() else {})
+        ).order_by(
+            '-pending_qty', '-repair_qty', '-returned_qty', '-scrapped_qty', 'name'
+        )[:8],
+    }
+    return render(request, 'procurement/warehouse_reports.html', context)
+
+
+@login_required
+@require_permission('parts', 'view')
+def warehouse_reports_export(request):
+    """导出仓储报表CSV"""
+    range_days = (request.GET.get('range') or '7').strip()
+    try:
+        range_days = int(range_days)
+    except (TypeError, ValueError):
+        range_days = 7
+    range_days = 30 if range_days == 30 else 7
+
+    sku_filter = (request.GET.get('sku_id') or '').strip()
+    part_filter = (request.GET.get('part_id') or '').strip()
+
+    assembly_qs = AssemblyOrder.objects.select_related('sku').prefetch_related('items__part')
+    maintenance_qs = MaintenanceWorkOrder.objects.select_related('sku', 'unit').prefetch_related('items__old_part', 'items__new_part')
+    disposal_qs = UnitDisposalOrder.objects.select_related('sku', 'unit').prefetch_related('items__part')
+    recovery_qs = PartRecoveryInspection.objects.select_related('part', 'sku', 'unit')
+
+    if sku_filter.isdigit():
+        sku_id = int(sku_filter)
+        assembly_qs = assembly_qs.filter(sku_id=sku_id)
+        maintenance_qs = maintenance_qs.filter(sku_id=sku_id)
+        disposal_qs = disposal_qs.filter(sku_id=sku_id)
+        recovery_qs = recovery_qs.filter(sku_id=sku_id)
+    if part_filter.isdigit():
+        part_id = int(part_filter)
+        assembly_qs = assembly_qs.filter(items__part_id=part_id).distinct()
+        maintenance_qs = maintenance_qs.filter(
+            Q(items__old_part_id=part_id) | Q(items__new_part_id=part_id)
+        ).distinct()
+        disposal_qs = disposal_qs.filter(items__part_id=part_id).distinct()
+        recovery_qs = recovery_qs.filter(part_id=part_id)
+
+    summary_rows = [
+        ('累计完成装配', assembly_qs.filter(status='completed').count()),
+        ('待执行维修单', maintenance_qs.filter(status='draft').count()),
+        ('已完成维修单', maintenance_qs.filter(status='completed').count()),
+        ('已完成单套处置', disposal_qs.filter(status='completed').count()),
+        ('待质检回件', recovery_qs.filter(status='pending').count()),
+        ('待维修回件', recovery_qs.filter(status='repair').count()),
+    ]
+    trend_sets = [
+        ('装配完成', _count_by_day(assembly_qs.filter(status='completed', completed_at__isnull=False), 'completed_at', range_days)),
+        ('新建维修单', _count_by_day(maintenance_qs, 'created_at', range_days)),
+        ('单套处置完成', _count_by_day(disposal_qs.filter(status='completed', completed_at__isnull=False), 'completed_at', range_days)),
+        ('回件待质检新增', _count_by_day(recovery_qs.filter(status='pending'), 'created_at', range_days)),
+        ('回件回库完成', _count_by_day(recovery_qs.filter(status='returned', processed_at__isnull=False), 'processed_at', range_days)),
+    ]
+    issue_top_parts = Part.objects.filter(is_active=True).annotate(
+        issue_rows=Count(
+            'inventory_unit_parts',
+            filter=Q(
+                inventory_unit_parts__is_active=True,
+                inventory_unit_parts__status__in=['missing', 'damaged', 'lost']
+            ) & (Q(inventory_unit_parts__unit__sku_id=int(sku_filter)) if sku_filter.isdigit() else Q())
+        )
+    ).filter(issue_rows__gt=0, **({'id': int(part_filter)} if part_filter.isdigit() else {})).order_by('-issue_rows', 'name')[:8]
+    maintenance_top_parts = Part.objects.filter(is_active=True).annotate(
+        replace_total=Sum(
+            'maintenance_new_items__replace_quantity',
+            filter=(Q(maintenance_new_items__work_order__sku_id=int(sku_filter)) if sku_filter.isdigit() else Q())
+        )
+    ).filter(replace_total__gt=0, **({'id': int(part_filter)} if part_filter.isdigit() else {})).order_by('-replace_total', 'name')[:8]
+    recovery_top_parts = Part.objects.filter(is_active=True).annotate(
+        pending_qty=Sum(
+            'recovery_inspections__quantity',
+            filter=Q(recovery_inspections__status='pending') & (Q(recovery_inspections__sku_id=int(sku_filter)) if sku_filter.isdigit() else Q())
+        ),
+        repair_qty=Sum(
+            'recovery_inspections__quantity',
+            filter=Q(recovery_inspections__status='repair') & (Q(recovery_inspections__sku_id=int(sku_filter)) if sku_filter.isdigit() else Q())
+        ),
+        returned_qty=Sum(
+            'recovery_inspections__quantity',
+            filter=Q(recovery_inspections__status='returned') & (Q(recovery_inspections__sku_id=int(sku_filter)) if sku_filter.isdigit() else Q())
+        ),
+        scrapped_qty=Sum(
+            'recovery_inspections__quantity',
+            filter=Q(recovery_inspections__status='scrapped') & (Q(recovery_inspections__sku_id=int(sku_filter)) if sku_filter.isdigit() else Q())
+        ),
+    ).filter(
+        Q(pending_qty__gt=0) | Q(repair_qty__gt=0) | Q(returned_qty__gt=0) | Q(scrapped_qty__gt=0),
+        **({'id': int(part_filter)} if part_filter.isdigit() else {})
+    ).order_by('-pending_qty', '-repair_qty', '-returned_qty', '-scrapped_qty', 'name')[:8]
+
+    resp = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+    resp['Content-Disposition'] = f'attachment; filename=\"warehouse_reports_{range_days}d.csv\"'
+    writer = csv.writer(resp)
+    writer.writerow(['筛选条件', 'SKU', (SKU.objects.filter(id=int(sku_filter)).values_list('code', flat=True).first() if sku_filter.isdigit() else '全部')])
+    writer.writerow(['筛选条件', '部件', (Part.objects.filter(id=int(part_filter)).values_list('name', flat=True).first() if part_filter.isdigit() else '全部')])
+    writer.writerow(['模块', '指标', '日期', '值'])
+    for label, value in summary_rows:
+        writer.writerow(['汇总', label, '', value])
+    for trend_label, rows in trend_sets:
+        for row in rows:
+            writer.writerow(['趋势', trend_label, row['date'], row['value']])
+    writer.writerow([])
+    writer.writerow(['榜单', '部件', '值1', '值2', '值3'])
+    for part in issue_top_parts:
+        writer.writerow(['高频损耗部件', part.name, part.issue_rows, '', ''])
+    for part in maintenance_top_parts:
+        writer.writerow(['维修替换排行', part.name, part.replace_total or 0, '', ''])
+    for part in recovery_top_parts:
+        writer.writerow([
+            '回件质检结果排行',
+            part.name,
+            f"待质检:{part.pending_qty or 0}",
+            f"待维修:{part.repair_qty or 0}",
+            f"已回库:{part.returned_qty or 0}/已报废:{part.scrapped_qty or 0}",
+        ])
+    return resp
+
+
+@login_required
+@require_permission('parts', 'update')
+def part_recovery_inspection_process(request, inspection_id):
+    """处理拆解回件质检结果"""
+    if request.method != 'POST':
+        return redirect('part_recovery_inspections_list')
+    inspection = get_object_or_404(PartRecoveryInspection, id=inspection_id)
+    action_type = (request.POST.get('action_type') or '').strip()
+    notes = (request.POST.get('notes') or '').strip()
+    try:
+        UnitDisposalService.process_recovery_inspection(
+            inspection=inspection,
+            action_type=action_type,
+            notes=notes,
+            user=request.user,
+        )
+        messages.success(request, '回件质检结果已处理')
+    except Exception as e:
+        messages.error(request, f'回件质检处理失败：{str(e)}')
+    next_url = request.POST.get('next') or reverse('part_recovery_inspections_list')
+    return redirect(next_url)
+
+
+@login_required
+@require_permission('outbound_inventory', 'update')
+def unit_disposal_create(request, unit_id):
+    """执行单套拆解/报废"""
+    if request.method != 'POST':
+        return redirect('outbound_inventory_dashboard')
+    unit = get_object_or_404(InventoryUnit, id=unit_id)
+    action_type = (request.POST.get('action_type') or '').strip()
+    issue_desc = (request.POST.get('issue_desc') or '').strip()
+    notes = (request.POST.get('notes') or '').strip()
+    try:
+        if has_action_permission(request.user, 'unit.dispose'):
+            order = UnitDisposalService.create_and_complete(
+                unit=unit,
+                action_type=action_type,
+                issue_desc=issue_desc,
+                notes=notes,
+                user=request.user,
+            )
+            messages.success(request, f'单套处置已完成：{order.disposal_no}')
+        elif can_request_approval(request.user):
+            action_label = '拆解回件' if action_type == 'disassemble' else '报废停用'
+            _request_high_risk_approval(
+                request,
+                action_code='unit.dispose',
+                module='在外库存',
+                target_type='inventory_unit',
+                target_id=unit.id,
+                target_label=unit.unit_no,
+                summary=f'{action_label}审批：{unit.unit_no}',
+                payload={
+                    'unit_id': unit.id,
+                    'unit_no': unit.unit_no,
+                    'action_type': action_type,
+                    'issue_desc': issue_desc,
+                    'notes': notes,
+                },
+            )
+        else:
+            messages.error(request, '您没有执行此操作的权限（unit.dispose）')
+    except Exception as e:
+        messages.error(request, f'单套处置失败：{str(e)}')
+    next_url = request.POST.get('next') or reverse('outbound_inventory_dashboard')
+    return redirect(next_url)
+
+
+@login_required
+@require_permission('outbound_inventory', 'view')
+def unit_disposal_orders_list(request):
+    """单套处置工单列表"""
+    orders = UnitDisposalOrder.objects.select_related(
+        'unit', 'sku', 'created_by', 'completed_by'
+    ).prefetch_related('items__part').order_by('-created_at')
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    status_filter = (request.GET.get('status') or '').strip()
+    action_filter = (request.GET.get('action_type') or '').strip()
+    if keyword:
+        orders = orders.filter(
+            Q(disposal_no__icontains=keyword) |
+            Q(unit__unit_no__icontains=keyword) |
+            Q(sku__code__icontains=keyword) |
+            Q(sku__name__icontains=keyword) |
+            Q(unit__current_order__order_no__icontains=keyword) |
+            Q(issue_desc__icontains=keyword) |
+            Q(created_by__username__icontains=keyword) |
+            Q(items__part__name__icontains=keyword)
+        ).distinct()
+    if status_filter:
+        orders = orders.filter(status=status_filter)
+    if action_filter:
+        orders = orders.filter(action_type=action_filter)
+    page = Paginator(orders, _get_page_size('page_size_disposal_orders')).get_page(request.GET.get('page'))
+    for order in page.object_list:
+        order.items_summary = '，'.join([
+            f"{item.part.name} 回收{item.returned_quantity}/{item.quantity}" for item in order.items.all()[:4]
+        ]) or '-'
+    context = {
+        'disposal_orders': page,
+        'disposal_orders_page': page,
+        'keyword': keyword,
+        'status_filter': status_filter,
+        'action_filter': action_filter,
+        'status_choices': UnitDisposalOrder.STATUS_CHOICES,
+        'action_choices': UnitDisposalOrder.ACTION_CHOICES,
+        'pagination_query': _build_querystring(request, ['page']),
+        'summary': {
+            'total_count': orders.count(),
+            'disassemble_count': orders.filter(action_type='disassemble').count(),
+            'scrap_count': orders.filter(action_type='scrap').count(),
+            'completed_count': orders.filter(status='completed').count(),
+        },
+    }
+    return render(request, 'procurement/unit_disposal_orders.html', context)
+
+
+@login_required
+@require_permission('outbound_inventory', 'view')
+def unit_disposal_orders_export(request):
+    """导出单套处置工单CSV"""
+    orders = UnitDisposalOrder.objects.select_related(
+        'unit', 'sku', 'created_by', 'completed_by'
+    ).prefetch_related('items__part').order_by('-created_at')
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    status_filter = (request.GET.get('status') or '').strip()
+    action_filter = (request.GET.get('action_type') or '').strip()
+    if keyword:
+        orders = orders.filter(
+            Q(disposal_no__icontains=keyword) |
+            Q(unit__unit_no__icontains=keyword) |
+            Q(sku__code__icontains=keyword) |
+            Q(sku__name__icontains=keyword) |
+            Q(unit__current_order__order_no__icontains=keyword) |
+            Q(issue_desc__icontains=keyword) |
+            Q(created_by__username__icontains=keyword) |
+            Q(items__part__name__icontains=keyword)
+        ).distinct()
+    if status_filter:
+        orders = orders.filter(status=status_filter)
+    if action_filter:
+        orders = orders.filter(action_type=action_filter)
+
+    resp = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+    resp['Content-Disposition'] = 'attachment; filename="unit_disposal_orders.csv"'
+    writer = csv.writer(resp)
+    writer.writerow([
+        '工单号', '动作', '单套编号', 'SKU编码', 'SKU名称', '部件明细',
+        '原因说明', '状态', '创建人', '创建时间', '完成人', '完成时间'
+    ])
+    for order in orders:
+        items_summary = '，'.join([
+            f"{item.part.name} 回收{item.returned_quantity}/{item.quantity}" for item in order.items.all()
+        ]) or '-'
+        writer.writerow([
+            order.disposal_no,
+            order.get_action_type_display(),
+            order.unit.unit_no if order.unit else '',
+            order.sku.code if order.sku else '',
+            order.sku.name if order.sku else '',
+            items_summary,
+            order.issue_desc or '',
+            order.get_status_display(),
+            order.created_by.username if order.created_by else '',
+            order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else '',
+            order.completed_by.username if order.completed_by else '',
+            order.completed_at.strftime('%Y-%m-%d %H:%M:%S') if order.completed_at else '',
+        ])
+    return resp
 
 
 @login_required
@@ -1600,7 +3278,7 @@ def outbound_inventory_export(request):
     writer = csv.writer(resp)
     writer.writerow([
         '单套编号', 'SKU编码', 'SKU名称', '状态', '当前订单', '最近物流单号', '最近节点', '最近节点时间',
-        '在途天数', '转寄节点数', '健康分', '健康等级', '预警', '拓扑链路'
+        '在途天数', '转寄节点数', '健康分', '健康等级', '预警', '部件总项', '缺件', '损坏', '丢失', '部件异常总数', '拓扑链路'
     ])
 
     unit_ids = list(units.values_list('id', flat=True))
@@ -1629,6 +3307,14 @@ def outbound_inventory_export(request):
             else:
                 chain_map[mv.unit_id].append(label)
 
+    part_summary_map = defaultdict(lambda: {'total': 0, 'missing': 0, 'damaged': 0, 'lost': 0, 'issue': 0})
+    for row in InventoryUnitPart.objects.filter(unit_id__in=unit_ids, is_active=True).values('unit_id', 'status'):
+        summary = part_summary_map[row['unit_id']]
+        summary['total'] += 1
+        if row['status'] in ['missing', 'damaged', 'lost']:
+            summary[row['status']] += 1
+            summary['issue'] += 1
+
     for unit in units:
         latest = latest_map.get(unit.id)
         hop_count = hop_count_map.get(unit.id, 0)
@@ -1643,6 +3329,11 @@ def outbound_inventory_export(request):
                 warn_reason = (warn_reason + '；' if warn_reason else '') + f'待执行>{pending_timeout_hours}小时'
             if latest.event_type == 'TRANSFER_SHIPPED' and (now - latest.event_time).days > shipped_timeout_days:
                 warn_reason = (warn_reason + '；' if warn_reason else '') + f'转寄在途>{shipped_timeout_days}天'
+            if latest.event_type == 'EXCEPTION':
+                warn_reason = (warn_reason + '；' if warn_reason else '') + '异常节点'
+        part_summary = part_summary_map.get(unit.id, {'total': 0, 'missing': 0, 'damaged': 0, 'lost': 0, 'issue': 0})
+        if part_summary['issue'] > 0:
+            warn_reason = (warn_reason + '；' if warn_reason else '') + f"部件异常{part_summary['issue']}项"
 
         if anomaly_only and not warn_reason:
             continue
@@ -1668,6 +3359,11 @@ def outbound_inventory_export(request):
             health_score,
             health_level,
             warn_reason,
+            part_summary['total'],
+            part_summary['missing'],
+            part_summary['damaged'],
+            part_summary['lost'],
+            part_summary['issue'],
             " -> ".join(chain_map.get(unit.id, [])),
         ])
     return resp
@@ -1701,6 +3397,14 @@ def outbound_inventory_topology_export(request):
         for mv in UnitMovement.objects.filter(unit_id__in=unit_ids).order_by('unit_id', '-event_time'):
             if mv.unit_id not in latest_map:
                 latest_map[mv.unit_id] = mv
+    part_issue_by_unit = {
+        row['unit_id']: int(row['cnt'] or 0)
+        for row in InventoryUnitPart.objects.filter(
+            unit_id__in=unit_ids,
+            is_active=True,
+            status__in=['missing', 'damaged', 'lost']
+        ).values('unit_id').annotate(cnt=Count('id'))
+    }
 
     resp = HttpResponse(content_type='text/csv; charset=utf-8-sig')
     resp['Content-Disposition'] = 'attachment; filename="outbound_inventory_topology.csv"'
@@ -1716,6 +3420,11 @@ def outbound_inventory_topology_export(request):
             warn_reason = f'转寄节点>{warn_hops}'
         if outbound_days > warn_outbound_days:
             warn_reason = (warn_reason + '；' if warn_reason else '') + f'在途>{warn_outbound_days}天'
+        if latest and latest.event_type == 'EXCEPTION':
+            warn_reason = (warn_reason + '；' if warn_reason else '') + '异常节点'
+        part_issue_cnt = int(part_issue_by_unit.get(unit.id, 0) or 0)
+        if part_issue_cnt > 0:
+            warn_reason = (warn_reason + '；' if warn_reason else '') + f'部件异常{part_issue_cnt}项'
         if anomaly_only and not warn_reason:
             continue
         writer.writerow([
@@ -1737,7 +3446,7 @@ def outbound_inventory_topology_export(request):
 @require_permission('skus', 'view')
 def skus_list(request):
     """产品管理"""
-    skus = SKU.objects.filter(is_active=True).order_by('code')
+    skus = SKU.objects.filter(is_active=True).prefetch_related('components__part').order_by('code')
     keyword = (request.GET.get('keyword', '') or '').strip()
     category = (request.GET.get('category', '') or '').strip()
     if category:
@@ -1750,15 +3459,149 @@ def skus_list(request):
             Q(description__icontains=keyword)
         )
 
-    skus_page = Paginator(skus, 10).get_page(request.GET.get('page'))
+    skus_page = Paginator(skus, _get_page_size('page_size_skus')).get_page(request.GET.get('page'))
+    sku_components_map = {}
+    for sku in skus_page.object_list:
+        components = []
+        for comp in sku.components.all():
+            part_label = comp.part.name
+            if comp.part.spec:
+                part_label = f"{part_label}（{comp.part.spec}）"
+            components.append({
+                'part_id': comp.part_id,
+                'part_name': comp.part.name,
+                'part_spec': comp.part.spec or '',
+                'part_label': part_label,
+                'quantity_per_set': int(comp.quantity_per_set or 1),
+                'notes': comp.notes or '',
+            })
+        sku.component_count = len(components)
+        sku.component_preview = '，'.join([
+            f"{item['part_name']}x{item['quantity_per_set']}" for item in components[:3]
+        ]) if components else '-'
+        sku_components_map[str(sku.id)] = components
+
+    parts = Part.objects.filter(is_active=True).order_by('name')
     context = {
         'skus': skus_page,
         'skus_page': skus_page,
         'keyword': keyword,
         'category': category,
+        'parts': parts,
+        'sku_components_map_json': json.dumps(sku_components_map, ensure_ascii=False),
         'pagination_query': _build_querystring(request, ['page']),
     }
     return render(request, 'skus.html', context)
+
+
+@login_required
+@require_permission('skus', 'view')
+def assembly_orders_list(request):
+    """装配单列表"""
+    orders = AssemblyOrder.objects.select_related('sku', 'created_by').prefetch_related('items__part').order_by('-created_at')
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    status_filter = (request.GET.get('status') or '').strip()
+    sku_id = (request.GET.get('sku_id') or '').strip()
+    if keyword:
+        orders = orders.filter(
+            Q(assembly_no__icontains=keyword) |
+            Q(sku__code__icontains=keyword) |
+            Q(sku__name__icontains=keyword) |
+            Q(created_by__username__icontains=keyword) |
+            Q(notes__icontains=keyword) |
+            Q(items__part__name__icontains=keyword)
+        ).distinct()
+    if status_filter:
+        orders = orders.filter(status=status_filter)
+    if sku_id.isdigit():
+        orders = orders.filter(sku_id=int(sku_id))
+
+    page = Paginator(orders, _get_page_size('page_size_assembly_orders')).get_page(request.GET.get('page'))
+    for order in page.object_list:
+        order.parts_summary = '，'.join([
+            f"{item.part.name}x{item.deducted_quantity}" for item in order.items.all()[:4]
+        ]) or '-'
+    context = {
+        'assembly_orders': page,
+        'assembly_orders_page': page,
+        'keyword': keyword,
+        'status_filter': status_filter,
+        'sku_filter': sku_id,
+        'status_choices': AssemblyOrder.STATUS_CHOICES,
+        'skus': SKU.objects.filter(is_active=True).order_by('code'),
+        'pagination_query': _build_querystring(request, ['page']),
+        'summary': {
+            'total_count': orders.count(),
+            'completed_count': orders.filter(status='completed').count(),
+            'cancelled_count': orders.filter(status='cancelled').count(),
+            'assembled_sets': orders.filter(status='completed').aggregate(total=Sum('quantity')).get('total') or 0,
+        },
+    }
+    return render(request, 'procurement/assembly_orders.html', context)
+
+
+@login_required
+@require_permission('skus', 'view')
+def assembly_orders_export(request):
+    """导出装配单CSV"""
+    orders = AssemblyOrder.objects.select_related('sku', 'created_by').prefetch_related('items__part').order_by('-created_at')
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    status_filter = (request.GET.get('status') or '').strip()
+    sku_id = (request.GET.get('sku_id') or '').strip()
+    if keyword:
+        orders = orders.filter(
+            Q(assembly_no__icontains=keyword) |
+            Q(sku__code__icontains=keyword) |
+            Q(sku__name__icontains=keyword) |
+            Q(created_by__username__icontains=keyword) |
+            Q(notes__icontains=keyword) |
+            Q(items__part__name__icontains=keyword)
+        ).distinct()
+    if status_filter:
+        orders = orders.filter(status=status_filter)
+    if sku_id.isdigit():
+        orders = orders.filter(sku_id=int(sku_id))
+
+    resp = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+    resp['Content-Disposition'] = 'attachment; filename="assembly_orders.csv"'
+    writer = csv.writer(resp)
+    writer.writerow([
+        '装配单号', 'SKU编码', 'SKU名称', '装配套数', '扣减部件', '状态',
+        '创建人', '创建时间', '完成时间', '备注'
+    ])
+    for order in orders:
+        parts_summary = '，'.join([
+            f"{item.part.name}x{item.deducted_quantity}" for item in order.items.all()
+        ]) or '-'
+        writer.writerow([
+            order.assembly_no,
+            order.sku.code if order.sku else '',
+            order.sku.name if order.sku else '',
+            order.quantity,
+            parts_summary,
+            order.get_status_display(),
+            order.created_by.username if order.created_by else '',
+            order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else '',
+            order.completed_at.strftime('%Y-%m-%d %H:%M:%S') if order.completed_at else '',
+            order.notes or '',
+        ])
+    return resp
+
+
+@login_required
+@require_permission('skus', 'update')
+def assembly_order_cancel(request, assembly_id):
+    """取消装配单"""
+    if request.method != 'POST':
+        return redirect('assembly_orders_list')
+    assembly = get_object_or_404(AssemblyOrder.objects.select_related('sku'), id=assembly_id)
+    try:
+        AssemblyService.cancel_assembly(assembly=assembly, user=request.user)
+        messages.success(request, f'装配单 {assembly.assembly_no} 已取消并回滚')
+    except Exception as e:
+        messages.error(request, f'取消装配单失败：{str(e)}')
+    next_url = request.POST.get('next') or reverse('assembly_orders_list')
+    return redirect(next_url)
 
 
 @login_required
@@ -1767,20 +3610,30 @@ def sku_create(request):
     """创建产品"""
     if request.method == 'POST':
         try:
-            sku = SKU.objects.create(
-                code=request.POST.get('code'),
-                name=request.POST.get('name'),
-                category=request.POST.get('category'),
-                image=request.FILES.get('image'),
-                rental_price=request.POST.get('rental_price'),
-                deposit=request.POST.get('deposit'),
-                stock=int(request.POST.get('stock', 0)),
-                description=request.POST.get('description', ''),
-            )
-            created_units = InventoryUnitService.ensure_units_for_sku(sku)
+            components_payload = _parse_sku_components_post(request)
+            with transaction.atomic():
+                sku = SKU.objects.create(
+                    code=request.POST.get('code'),
+                    name=request.POST.get('name'),
+                    category=request.POST.get('category'),
+                    image=request.FILES.get('image'),
+                    rental_price=request.POST.get('rental_price'),
+                    deposit=request.POST.get('deposit'),
+                    stock=0,
+                    description=request.POST.get('description', ''),
+                )
+                if components_payload:
+                    SKUComponent.objects.bulk_create([
+                        SKUComponent(
+                            sku=sku,
+                            part_id=item['part_id'],
+                            quantity_per_set=item['quantity_per_set'],
+                            notes=item['notes'],
+                        ) for item in components_payload
+                    ])
             messages.success(request, f'SKU {sku.code} 创建成功')
-            if created_units:
-                messages.info(request, f'已自动创建 {created_units} 条单套编号')
+            messages.info(request, f'部件组成已保存：{len(components_payload)} 项')
+            messages.info(request, '套餐库存需通过“新增库存（装配）”操作增加')
             return redirect('skus_list')
         except Exception as e:
             messages.error(request, f'SKU创建失败：{str(e)}')
@@ -1794,31 +3647,62 @@ def sku_edit(request, sku_id):
     """编辑产品"""
     if request.method == 'POST':
         try:
-            sku = get_object_or_404(SKU, id=sku_id)
-            old_stock = int(sku.stock or 0)
-            sku.code = request.POST.get('code')
-            sku.name = request.POST.get('name')
-            sku.category = request.POST.get('category')
-            new_image = request.FILES.get('image')
-            if request.POST.get('clear_image') == '1':
-                sku.image = None
-            elif new_image:
-                sku.image = new_image
-            sku.rental_price = request.POST.get('rental_price')
-            sku.deposit = request.POST.get('deposit')
-            sku.stock = int(request.POST.get('stock', 0))
-            sku.description = request.POST.get('description', '')
-            sku.save()
-            created_units = 0
-            if int(sku.stock or 0) > old_stock:
-                created_units = InventoryUnitService.ensure_units_for_sku(sku)
+            components_payload = _parse_sku_components_post(request)
+            with transaction.atomic():
+                sku = get_object_or_404(SKU, id=sku_id)
+                sku.code = request.POST.get('code')
+                sku.name = request.POST.get('name')
+                sku.category = request.POST.get('category')
+                new_image = request.FILES.get('image')
+                if request.POST.get('clear_image') == '1':
+                    sku.image = None
+                elif new_image:
+                    sku.image = new_image
+                sku.rental_price = request.POST.get('rental_price')
+                sku.deposit = request.POST.get('deposit')
+                sku.description = request.POST.get('description', '')
+                sku.save()
+                SKUComponent.objects.filter(sku=sku).delete()
+                if components_payload:
+                    SKUComponent.objects.bulk_create([
+                        SKUComponent(
+                            sku=sku,
+                            part_id=item['part_id'],
+                            quantity_per_set=item['quantity_per_set'],
+                            notes=item['notes'],
+                        ) for item in components_payload
+                    ])
+            InventoryUnitService.sync_unit_parts_for_sku(sku)
             messages.success(request, f'SKU {sku.code} 更新成功')
-            if created_units:
-                messages.info(request, f'库存上调已自动补齐单套编号：新增 {created_units} 条')
+            messages.info(request, f'部件组成已更新：{len(components_payload)} 项')
+            messages.info(request, '库存变更请使用“新增库存（装配）”，不支持直接手工修改')
             return redirect('skus_list')
         except Exception as e:
             messages.error(request, f'SKU更新失败：{str(e)}')
 
+    return redirect('skus_list')
+
+
+@login_required
+@require_permission('skus', 'update')
+def sku_assemble(request, sku_id):
+    """通过装配单新增 SKU 库存"""
+    if request.method != 'POST':
+        return redirect('skus_list')
+    sku = get_object_or_404(SKU, id=sku_id, is_active=True)
+    try:
+        quantity = int((request.POST.get('assembly_quantity') or '0').strip() or '0')
+        notes = (request.POST.get('assembly_notes') or '').strip()
+        assembly = AssemblyService.create_and_complete_assembly(
+            sku=sku,
+            quantity=quantity,
+            notes=notes,
+            user=request.user,
+        )
+        messages.success(request, f'装配完成：{sku.code} 新增 {assembly.quantity} 套库存')
+        messages.info(request, f'装配单号：{assembly.assembly_no}')
+    except Exception as e:
+        messages.error(request, f'装配失败：{str(e)}')
     return redirect('skus_list')
 
 
@@ -1874,7 +3758,7 @@ def purchase_orders_list(request):
             Q(link__icontains=keyword)
         )
 
-    purchase_orders_page = Paginator(pos, 10).get_page(request.GET.get('page'))
+    purchase_orders_page = Paginator(pos, _get_page_size('page_size_purchase_orders')).get_page(request.GET.get('page'))
     context = {
         'purchase_orders': purchase_orders_page,
         'purchase_orders_page': purchase_orders_page,
@@ -2062,7 +3946,7 @@ def parts_inventory_list(request):
             Q(location__icontains=keyword)
         )
 
-    parts_page = Paginator(parts, 10).get_page(request.GET.get('page'))
+    parts_page = Paginator(parts, _get_page_size('page_size_parts')).get_page(request.GET.get('page'))
     context = {
         'parts': parts_page,
         'parts_page': parts_page,
@@ -2225,7 +4109,7 @@ def parts_movements_list(request):
             Q(operator__username__icontains=keyword) |
             Q(operator__full_name__icontains=keyword)
         )
-    movements_page = Paginator(movements, 10).get_page(request.GET.get('page'))
+    movements_page = Paginator(movements, _get_page_size('page_size_parts_movements')).get_page(request.GET.get('page'))
 
     context = {
         'movements': movements_page,
@@ -2250,11 +4134,55 @@ def settings_view(request):
         active_tab = (request.POST.get('active_tab') or active_tab).strip()
         if active_tab not in allowed_tabs:
             active_tab = 'order'
+        if request.POST.get('run_consistency_check') == '1':
+            result = run_data_consistency_checks()
+            persist_data_consistency_check_result(result, executed_by=request.user, source='settings')
+            messages.info(
+                request,
+                f"巡检完成：共{result['total_issues']}项（错误{result['error_count']}，警告{result['warning_count']}）"
+            )
+            if result['issues']:
+                top_issue = result['issues'][0]
+                messages.warning(
+                    request,
+                    f"首条问题：[{top_issue.get('severity')}] {top_issue.get('message')}"
+                )
+            return redirect(f"{reverse('settings')}?tab={active_tab}")
+        if request.POST.get('test_alert_notify') == '1':
+            current_settings = get_system_settings()
+            notify_settings = {
+                'alert_notify_enabled': request.POST.get('alert_notify_enabled', current_settings.get('alert_notify_enabled', 0)),
+                'alert_notify_min_severity': request.POST.get('alert_notify_min_severity', current_settings.get('alert_notify_min_severity', 'warning')),
+                'alert_notify_webhook_url': request.POST.get('alert_notify_webhook_url', current_settings.get('alert_notify_webhook_url', '')),
+            }
+            result = NotificationService.notify_alerts(
+                title='通知测试',
+                alerts=[{
+                    'source': 'system',
+                    'severity': 'danger',
+                    'title': '通知链路测试',
+                    'value': 1,
+                    'desc': f'设置页手工触发（{timezone.now().strftime("%Y-%m-%d %H:%M:%S")}）',
+                }],
+                settings=notify_settings,
+                source='settings_test',
+            )
+            status = result.get('status')
+            if status == 'success':
+                messages.success(request, '通知测试发送成功')
+            elif status == 'failed':
+                messages.error(request, f"通知测试失败：{result.get('error') or '未知错误'}")
+            else:
+                messages.info(request, '通知未发送（请检查是否启用通知和最低级别配置）')
+            return redirect(f"{reverse('settings')}?tab={active_tab}")
         managed_keys = [
             'ship_lead_days',
             'return_offset_days',
             'buffer_days',
             'max_transfer_gap_days',
+            'transfer_score_weight_date',
+            'transfer_score_weight_confidence',
+            'transfer_score_weight_distance',
             'warehouse_sender_name',
             'warehouse_sender_phone',
             'warehouse_sender_address',
@@ -2262,7 +4190,35 @@ def settings_view(request):
             'transfer_shipped_timeout_days',
             'outbound_max_days_warn',
             'outbound_max_hops_warn',
+            'approval_pending_warn_hours',
+            'approval_required_count_default',
+            'approval_required_count_order_force_cancel',
+            'approval_required_count_transfer_cancel_task',
+            'approval_required_count_unit_dispose',
+            'approval_required_count_unit_disassemble',
+            'approval_required_count_unit_scrap',
+            'approval_required_count_map',
+            'alert_notify_enabled',
+            'alert_notify_webhook_url',
+            'alert_notify_min_severity',
+            'page_size_default',
+            'page_size_transfer_candidates',
+            'page_size_outbound_topology_units',
         ]
+        raw_approval_map = request.POST.get('approval_required_count_map')
+        if raw_approval_map is not None:
+            parsed_map = {}
+            try:
+                parsed_map = json.loads(raw_approval_map.strip() or '{}')
+                if not isinstance(parsed_map, dict):
+                    raise ValueError('审批层级策略映射必须是JSON对象')
+                for action_code, level in parsed_map.items():
+                    int_level = int(level)
+                    if int_level < 1 or int_level > 5:
+                        raise ValueError(f'审批层级超出范围：{action_code}={int_level}（允许1-5）')
+            except Exception as e:
+                messages.error(request, f'审批层级策略映射配置无效：{e}')
+                return redirect(f"{reverse('settings')}?tab={active_tab}")
         before_settings = {
             key: (SystemSettings.objects.filter(key=key).values_list('value', flat=True).first() or '')
             for key in managed_keys
@@ -2300,8 +4256,777 @@ def settings_view(request):
     context = {
         'settings': settings,
         'active_tab': active_tab,
+        'recent_consistency_runs': list(
+            DataConsistencyCheckRun.objects.select_related('executed_by').all()[:10]
+        ),
     }
     return render(request, 'settings.html', context)
+
+
+@login_required
+@require_permission('risk_events', 'view')
+def risk_events_list(request):
+    """风险事件列表"""
+    status_filter = (request.GET.get('status') or '').strip()
+    level_filter = (request.GET.get('level') or '').strip()
+    keyword = (request.GET.get('keyword') or '').strip()
+    assignee_filter = (request.GET.get('assignee') or '').strip()
+    mine_only = (request.GET.get('mine_only') or '').strip() == '1'
+
+    events = RiskEvent.objects.select_related('order', 'transfer', 'detected_by', 'assignee', 'resolved_by').order_by('-created_at')
+    if status_filter:
+        events = events.filter(status=status_filter)
+    if level_filter:
+        events = events.filter(level=level_filter)
+    if assignee_filter:
+        events = events.filter(assignee_id=assignee_filter)
+    if mine_only:
+        events = events.filter(assignee=request.user)
+    if keyword:
+        events = events.filter(
+            Q(title__icontains=keyword) |
+            Q(description__icontains=keyword) |
+            Q(order__order_no__icontains=keyword)
+        )
+    if request.GET.get('export') == '1':
+        response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+        response['Content-Disposition'] = 'attachment; filename="risk_events.csv"'
+        writer = csv.writer(response)
+        writer.writerow(['ID', '状态', '级别', '类型', '标题', '负责人', '关联订单', '关联转寄任务', '触发时间', '处理备注'])
+        for e in events:
+            writer.writerow([
+                e.id,
+                e.get_status_display(),
+                e.get_level_display(),
+                e.get_event_type_display(),
+                e.title,
+                (e.assignee.full_name if e.assignee and e.assignee.full_name else (e.assignee.username if e.assignee else '')),
+                e.order.order_no if e.order else '',
+                f'#{e.transfer.id}' if e.transfer else '',
+                e.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+                (e.processing_note or '').replace('\r', ' ').replace('\n', ' '),
+            ])
+        return response
+    events_page = Paginator(events, _get_page_size('page_size_risk_events')).get_page(request.GET.get('page'))
+
+    context = {
+        'events': events_page,
+        'events_page': events_page,
+        'status_filter': status_filter,
+        'level_filter': level_filter,
+        'keyword': keyword,
+        'assignee_filter': assignee_filter,
+        'mine_only': mine_only,
+        'assignees': User.objects.filter(is_active=True).order_by('username'),
+        'open_count': RiskEvent.objects.filter(status='open').count(),
+        'processing_count': RiskEvent.objects.filter(status='processing').count(),
+        'closed_count': RiskEvent.objects.filter(status='closed').count(),
+        'pagination_query': _build_querystring(request, ['page']),
+    }
+    return render(request, 'risk_events.html', context)
+
+
+@login_required
+@require_permission('risk_events', 'update')
+def risk_event_resolve(request, event_id):
+    """关闭风险事件"""
+    if request.method != 'POST':
+        return redirect('risk_events_list')
+    if not has_action_permission(request.user, 'risk.resolve_event'):
+        messages.error(request, '您没有执行此操作的权限（risk.resolve_event）')
+        return redirect('risk_events_list')
+
+    event = get_object_or_404(RiskEvent, id=event_id)
+    before = {
+        'status': event.status,
+        'resolved_by_id': event.resolved_by_id,
+        'resolved_at': str(event.resolved_at) if event.resolved_at else '',
+    }
+    note = (request.POST.get('note') or '').strip()
+    RiskEventService.resolve_event(event, request.user, note=note)
+    AuditService.log_with_diff(
+        user=request.user,
+        action='status_change',
+        module='风险事件',
+        target=f'风险事件#{event.id}',
+        summary='关闭风险事件',
+        before=before,
+        after={
+            'status': event.status,
+            'resolved_by_id': event.resolved_by_id,
+            'resolved_at': str(event.resolved_at) if event.resolved_at else '',
+        },
+        extra={'note': note},
+    )
+    messages.success(request, '风险事件已关闭')
+    return redirect('risk_events_list')
+
+
+@login_required
+@require_permission('risk_events', 'update')
+def risk_event_claim(request, event_id):
+    """认领风险事件并标记处理中"""
+    if request.method != 'POST':
+        return redirect('risk_events_list')
+    if not has_action_permission(request.user, 'risk.resolve_event'):
+        messages.error(request, '您没有执行此操作的权限（risk.resolve_event）')
+        return redirect('risk_events_list')
+
+    event = get_object_or_404(RiskEvent, id=event_id)
+    if event.status == 'closed':
+        messages.warning(request, '该风险事件已关闭，无法认领')
+        return redirect('risk_events_list')
+
+    before = {
+        'status': event.status,
+        'assignee_id': event.assignee_id,
+        'processing_note': event.processing_note or '',
+    }
+    note = (request.POST.get('note') or '').strip()
+    RiskEventService.claim_event(event, request.user, note=note)
+    AuditService.log_with_diff(
+        user=request.user,
+        action='update',
+        module='风险事件',
+        target=f'风险事件#{event.id}',
+        summary='认领风险事件',
+        before=before,
+        after={
+            'status': event.status,
+            'assignee_id': event.assignee_id,
+            'processing_note': event.processing_note or '',
+        },
+        extra={'note': note},
+    )
+    messages.success(request, '风险事件已认领并标记为处理中')
+    return redirect('risk_events_list')
+
+
+@login_required
+@require_permission('approvals', 'view')
+def approvals_list(request):
+    """审批中心"""
+    tasks = ApprovalTask.objects.select_related('requested_by', 'reviewed_by').all()
+    status_filter = (request.GET.get('status', '') or '').strip()
+    action_filter = (request.GET.get('action_code', '') or '').strip()
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    overdue_only = (request.GET.get('overdue_only') or '').strip() == '1'
+    mine_only = (request.GET.get('mine_only') or '').strip() == '1'
+    reviewable_only = (request.GET.get('reviewable_only') or '').strip() == '1'
+
+    if request.user.role == 'warehouse_manager' and not request.user.is_superuser:
+        tasks = tasks.filter(requested_by=request.user)
+
+    if status_filter:
+        tasks = tasks.filter(status=status_filter)
+    if action_filter:
+        tasks = tasks.filter(action_code=action_filter)
+    if keyword:
+        tasks = tasks.filter(
+            Q(task_no__icontains=keyword) |
+            Q(target_label__icontains=keyword) |
+            Q(summary__icontains=keyword)
+        )
+    if mine_only:
+        tasks = tasks.filter(requested_by=request.user)
+    if reviewable_only:
+        tasks = tasks.filter(status='pending').exclude(requested_by=request.user)
+
+    approval_warn_hours = int(get_system_settings().get('approval_pending_warn_hours', 24) or 24)
+    overdue_cutoff = timezone.now() - timedelta(hours=approval_warn_hours)
+    if overdue_only:
+        tasks = tasks.filter(status='pending', created_at__lt=overdue_cutoff)
+
+    if request.GET.get('export') == '1':
+        response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+        response['Content-Disposition'] = 'attachment; filename="approvals.csv"'
+        writer = csv.writer(response)
+        writer.writerow(['审批单号', '动作', '目标', '摘要', '申请人', '状态', '进度', '申请时间', '最近催办时间', '催办次数'])
+        for t in tasks.order_by('-created_at'):
+            required = max(int(t.required_review_count or 1), 1)
+            current = int(t.current_review_count or 0)
+            writer.writerow([
+                t.task_no,
+                t.action_code,
+                t.target_label or '',
+                t.summary,
+                t.requested_by.username if t.requested_by else '',
+                t.get_status_display(),
+                f'{min(current, required)}/{required}',
+                t.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+                t.last_reminded_at.strftime('%Y-%m-%d %H:%M:%S') if t.last_reminded_at else '',
+                int(t.remind_count or 0),
+            ])
+        return response
+
+    tasks = tasks.order_by('-created_at')
+    tasks_page = Paginator(tasks, _get_page_size('page_size_approvals')).get_page(request.GET.get('page'))
+    for task in tasks_page.object_list:
+        task.is_overdue_pending = task.status == 'pending' and task.created_at < overdue_cutoff
+        required = max(int(task.required_review_count or 1), 1)
+        current = int(task.current_review_count or 0)
+        task.review_progress_text = f'{min(current, required)}/{required}'
+    context = {
+        'tasks': tasks_page,
+        'tasks_page': tasks_page,
+        'status_filter': status_filter,
+        'action_filter': action_filter,
+        'keyword': keyword,
+        'overdue_only': overdue_only,
+        'mine_only': mine_only,
+        'reviewable_only': reviewable_only,
+        'approval_warn_hours': approval_warn_hours,
+        'pagination_query': _build_querystring(request, ['page']),
+    }
+    return render(request, 'approvals.html', context)
+
+
+@login_required
+@require_permission('approvals', 'update')
+def approval_task_approve(request, task_id):
+    """审批通过并执行高风险动作"""
+    if request.method == 'POST':
+        if not has_action_permission(request.user, 'approval.review'):
+            messages.error(request, '您没有审批权限（approval.review）')
+            return redirect('approvals_list')
+        try:
+            with transaction.atomic():
+                task = get_object_or_404(ApprovalTask.objects.select_for_update(), id=task_id)
+                if task.status != 'pending':
+                    raise ValueError('该审批单已处理')
+                if task.requested_by_id == request.user.id:
+                    raise ValueError('不能审批自己提交的申请')
+                reviewed_user_ids = list(task.reviewed_user_ids or [])
+                if request.user.id in reviewed_user_ids:
+                    raise ValueError('同一审批人不能重复审批同一任务')
+
+                payload = task.payload if isinstance(task.payload, dict) else {}
+                note = (request.POST.get('note') or '').strip()
+                now = timezone.now()
+                required_count = max(int(task.required_review_count or 1), 1)
+                current_count = int(task.current_review_count or 0) + 1
+                reviewed_user_ids.append(request.user.id)
+                trail = list(task.review_trail or [])
+                trail.append({
+                    'user_id': request.user.id,
+                    'username': request.user.username,
+                    'reviewed_at': now.isoformat(),
+                    'note': note,
+                    'stage': current_count,
+                })
+
+                task.current_review_count = current_count
+                task.reviewed_user_ids = reviewed_user_ids
+                task.review_trail = trail
+                task.reviewed_by = request.user
+                task.review_note = note
+                task.reviewed_at = now
+
+                if current_count < required_count:
+                    task.save(update_fields=[
+                        'current_review_count', 'reviewed_user_ids', 'review_trail',
+                        'reviewed_by', 'review_note', 'reviewed_at', 'updated_at'
+                    ])
+                    AuditService.log_with_diff(
+                        user=request.user,
+                        action='status_change',
+                        module='审批',
+                        target=task.task_no,
+                        summary='审批通过（未达执行层级）',
+                        before={'status': 'pending', 'current_review_count': current_count - 1},
+                        after={'status': 'pending', 'current_review_count': current_count, 'required_review_count': required_count},
+                        extra={'action_code': task.action_code, 'target': task.target_label, 'note': note},
+                    )
+                    messages.success(request, f'审批已记录：{task.task_no}（进度 {current_count}/{required_count}）')
+                    return redirect('approvals_list')
+
+                if task.action_code == 'order.force_cancel':
+                    order_id = int(payload.get('order_id') or task.target_id)
+                    order = get_object_or_404(Order, id=order_id)
+                    reason = (payload.get('reason') or '审批取消').strip() or '审批取消'
+                    _execute_order_cancel(order, reason, request.user)
+                elif task.action_code == 'transfer.cancel_task':
+                    transfer_id = int(payload.get('transfer_id') or task.target_id)
+                    transfer = get_object_or_404(Transfer, id=transfer_id)
+                    reason = (payload.get('reason') or '审批取消').strip() or '审批取消'
+                    _execute_transfer_cancel(transfer, request.user, reason)
+                elif task.action_code == 'unit.dispose':
+                    unit_id = int(payload.get('unit_id') or task.target_id)
+                    unit = get_object_or_404(InventoryUnit, id=unit_id)
+                    UnitDisposalService.create_and_complete(
+                        unit=unit,
+                        action_type=(payload.get('action_type') or '').strip(),
+                        issue_desc=(payload.get('issue_desc') or '').strip(),
+                        notes=(payload.get('notes') or '').strip(),
+                        user=request.user,
+                    )
+                else:
+                    raise ValueError(f'不支持的审批动作：{task.action_code}')
+
+                task.status = 'executed'
+                task.executed_at = now
+                task.save(update_fields=[
+                    'status', 'current_review_count', 'reviewed_user_ids', 'review_trail',
+                    'reviewed_by', 'review_note', 'reviewed_at', 'executed_at', 'updated_at'
+                ])
+                AuditService.log_with_diff(
+                    user=request.user,
+                    action='status_change',
+                    module='审批',
+                    target=task.task_no,
+                    summary='审批通过并执行',
+                    before={'status': 'pending', 'current_review_count': current_count - 1},
+                    after={'status': 'executed', 'current_review_count': current_count, 'required_review_count': required_count},
+                    extra={'action_code': task.action_code, 'target': task.target_label, 'note': note},
+                )
+            messages.success(request, f'审批通过并已执行：{task.task_no}')
+        except Exception as e:
+            messages.error(request, f'审批失败：{str(e)}')
+    return redirect('approvals_list')
+
+
+@login_required
+@require_permission('approvals', 'update')
+def approval_task_reject(request, task_id):
+    """驳回审批任务"""
+    if request.method == 'POST':
+        if not has_action_permission(request.user, 'approval.review'):
+            messages.error(request, '您没有审批权限（approval.review）')
+            return redirect('approvals_list')
+        try:
+            with transaction.atomic():
+                task = get_object_or_404(ApprovalTask.objects.select_for_update(), id=task_id)
+                if task.status != 'pending':
+                    raise ValueError('该审批单已处理')
+                if task.requested_by_id == request.user.id:
+                    raise ValueError('不能驳回自己提交的申请')
+                note = (request.POST.get('note') or '').strip()
+                if not note:
+                    note = '审批驳回'
+                task.status = 'rejected'
+                task.reviewed_by = request.user
+                task.review_note = note
+                task.reviewed_at = timezone.now()
+                task.save(update_fields=['status', 'reviewed_by', 'review_note', 'reviewed_at', 'updated_at'])
+                AuditService.log_with_diff(
+                    user=request.user,
+                    action='status_change',
+                    module='审批',
+                    target=task.task_no,
+                    summary='审批驳回',
+                    before={'status': 'pending'},
+                    after={'status': 'rejected'},
+                    extra={'action_code': task.action_code, 'target': task.target_label, 'note': note},
+                )
+            messages.success(request, f'审批已驳回：{task.task_no}')
+        except Exception as e:
+            messages.error(request, f'操作失败：{str(e)}')
+    return redirect('approvals_list')
+
+
+@login_required
+@require_permission('approvals', 'update')
+def approval_task_remind(request, task_id):
+    """审批催办（人工）"""
+    if request.method != 'POST':
+        return redirect('approvals_list')
+    if not has_action_permission(request.user, 'approval.review'):
+        messages.error(request, '您没有审批催办权限（approval.review）')
+        return redirect('approvals_list')
+    try:
+        task = ApprovalService.remind_pending_task(task_id)
+        AuditService.log_with_diff(
+            user=request.user,
+            action='status_change',
+            module='审批',
+            target=task.task_no,
+            summary='审批催办',
+            before={},
+            after={
+                'remind_count': int(task.remind_count or 0),
+                'last_reminded_at': task.last_reminded_at.isoformat() if task.last_reminded_at else '',
+            },
+            extra={'source': 'manual', 'action_code': task.action_code},
+        )
+        messages.success(request, f'催办成功：{task.task_no}')
+    except Exception as e:
+        messages.error(request, f'催办失败：{str(e)}')
+    return redirect('approvals_list')
+
+
+@login_required
+@require_permission('approvals', 'update')
+def approval_remind_overdue(request):
+    """批量催办超时审批任务（人工触发）"""
+    if request.method != 'POST':
+        return redirect('approvals_list')
+    if not has_action_permission(request.user, 'approval.review'):
+        messages.error(request, '您没有审批催办权限（approval.review）')
+        return redirect('approvals_list')
+    settings = get_system_settings()
+    warn_hours = int(settings.get('approval_pending_warn_hours', 24) or 24)
+    cutoff = timezone.now() - timedelta(hours=warn_hours)
+    task_ids = list(
+        ApprovalTask.objects.filter(status='pending', created_at__lt=cutoff)
+        .values_list('id', flat=True)[:200]
+    )
+    success = 0
+    for task_id in task_ids:
+        try:
+            task = ApprovalService.remind_pending_task(task_id)
+            success += 1
+            AuditService.log_with_diff(
+                user=request.user,
+                action='status_change',
+                module='审批',
+                target=task.task_no,
+                summary='批量审批催办',
+                before={},
+                after={
+                    'remind_count': int(task.remind_count or 0),
+                    'last_reminded_at': task.last_reminded_at.isoformat() if task.last_reminded_at else '',
+                },
+                extra={'source': 'manual_batch', 'action_code': task.action_code},
+            )
+        except Exception:
+            continue
+    messages.success(request, f'批量催办完成：{success}/{len(task_ids)}')
+    return redirect('approvals_list')
+
+
+@login_required
+@require_permission('finance', 'view')
+def finance_transactions_list(request):
+    """财务流水中心"""
+    records = FinanceTransaction.objects.select_related('order', 'created_by').all()
+    tx_type = (request.GET.get('tx_type', '') or '').strip()
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    start_date = (request.GET.get('start_date', '') or '').strip()
+    end_date = (request.GET.get('end_date', '') or '').strip()
+    export_flag = (request.GET.get('export') or '').strip() == '1'
+
+    if tx_type:
+        records = records.filter(transaction_type=tx_type)
+    if keyword:
+        records = records.filter(
+            Q(order__order_no__icontains=keyword) |
+            Q(order__customer_name__icontains=keyword) |
+            Q(reference_no__icontains=keyword) |
+            Q(notes__icontains=keyword)
+        )
+    if start_date:
+        records = records.filter(created_at__date__gte=start_date)
+    if end_date:
+        records = records.filter(created_at__date__lte=end_date)
+
+    records = records.order_by('-created_at', '-id')
+
+    summary_qs = records.values('transaction_type').annotate(total=Sum('amount'))
+    summary_map = {row['transaction_type']: row['total'] or Decimal('0.00') for row in summary_qs}
+
+    if export_flag:
+        response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+        response['Content-Disposition'] = 'attachment; filename="finance_transactions.csv"'
+        writer = csv.writer(response)
+        writer.writerow(['时间', '订单号', '客户', '交易类型', '金额', '关联单号', '备注', '操作人'])
+        tx_display = dict(FinanceTransaction.TYPE_CHOICES)
+        for r in records:
+            writer.writerow([
+                r.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+                r.order.order_no if r.order else '',
+                r.order.customer_name if r.order else '',
+                tx_display.get(r.transaction_type, r.transaction_type),
+                str(r.amount),
+                r.reference_no or '',
+                r.notes or '',
+                (r.created_by.full_name or r.created_by.username) if r.created_by else '',
+            ])
+        return response
+
+    records_page = Paginator(records, _get_page_size('page_size_finance_records')).get_page(request.GET.get('page'))
+    context = {
+        'records': records_page,
+        'records_page': records_page,
+        'tx_type': tx_type,
+        'keyword': keyword,
+        'start_date': start_date,
+        'end_date': end_date,
+        'summary_map': summary_map,
+        'pagination_query': _build_querystring(request, ['page']),
+    }
+    return render(request, 'finance_transactions.html', context)
+
+
+@login_required
+@require_permission('finance', 'view')
+def finance_reconciliation(request):
+    """财务对账中心（订单维度）"""
+    status_filter = (request.GET.get('status', '') or '').strip()
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    mismatch_only = (request.GET.get('mismatch_only') or '').strip() == '1'
+    mismatch_field = (request.GET.get('mismatch_field', '') or '').strip()
+    min_diff_amount_raw = (request.GET.get('min_diff_amount', '') or '').strip()
+    try:
+        min_diff_amount = Decimal(min_diff_amount_raw or '0')
+    except Exception:
+        min_diff_amount = Decimal('0')
+    if min_diff_amount < Decimal('0'):
+        min_diff_amount = Decimal('0')
+    export_flag = (request.GET.get('export') or '').strip() == '1'
+
+    rows = build_finance_reconciliation_rows(
+        status_filter=status_filter,
+        keyword=keyword,
+        mismatch_only=mismatch_only,
+        mismatch_field=mismatch_field,
+        min_diff_amount=min_diff_amount,
+    )
+    mismatch_stats = {
+        'total': len(rows),
+        'abnormal': sum(1 for r in rows if r.get('has_mismatch')),
+        'deposit_count': sum(1 for r in rows if 'deposit' in (r.get('mismatch_fields') or [])),
+        'balance_count': sum(1 for r in rows if 'balance' in (r.get('mismatch_fields') or [])),
+        'refund_count': sum(1 for r in rows if 'refund' in (r.get('mismatch_fields') or [])),
+        'max_abs_diff': max(
+            [
+                max(
+                    abs(r.get('deposit_diff') or Decimal('0.00')),
+                    abs(r.get('balance_diff') or Decimal('0.00')),
+                    abs(r.get('refund_diff') or Decimal('0.00')),
+                )
+                for r in rows
+            ] + [Decimal('0.00')]
+        ),
+    }
+
+    if export_flag:
+        response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+        response['Content-Disposition'] = 'attachment; filename="finance_reconciliation.csv"'
+        writer = csv.writer(response)
+        writer.writerow([
+            '订单号', '客户', '状态',
+            '应收押金', '流水收押金', '押金差异',
+            '应收尾款', '流水收尾款', '尾款差异',
+            '应退押金', '流水退押金', '退押金差异',
+            '扣罚', '是否异常', '差异摘要', '建议', '创建时间',
+        ])
+        for r in rows:
+            diff_fields = []
+            if abs(r['deposit_diff']) > Decimal('0.01'):
+                diff_fields.append('押金')
+            if abs(r['balance_diff']) > Decimal('0.01'):
+                diff_fields.append('尾款')
+            if abs(r['refund_diff']) > Decimal('0.01'):
+                diff_fields.append('退押')
+            writer.writerow([
+                r['order'].order_no,
+                r['order'].customer_name,
+                r['order'].get_status_display(),
+                str(r['expected_deposit']),
+                str(r['tx_deposit_received']),
+                str(r['deposit_diff']),
+                str(r['expected_balance_received']),
+                str(r['tx_balance_received']),
+                str(r['balance_diff']),
+                str(r['expected_refund']),
+                str(r['tx_deposit_refund']),
+                str(r['refund_diff']),
+                str(r['tx_penalty']),
+                '是' if r['has_mismatch'] else '否',
+                '、'.join(diff_fields) if diff_fields else '-',
+                '；'.join(r.get('suggestions') or []) if r.get('suggestions') else '-',
+                r['order'].created_at.strftime('%Y-%m-%d %H:%M:%S') if r['order'].created_at else '',
+            ])
+        return response
+
+    rows_page = Paginator(rows, _get_page_size('page_size_finance_reconciliation')).get_page(request.GET.get('page'))
+    context = {
+        'rows': rows_page,
+        'rows_page': rows_page,
+        'status_filter': status_filter,
+        'keyword': keyword,
+        'mismatch_only': mismatch_only,
+        'mismatch_field': mismatch_field,
+        'min_diff_amount': min_diff_amount_raw,
+        'pagination_query': _build_querystring(request, ['page']),
+        'mismatch_count': sum(1 for r in rows if r['has_mismatch']),
+        'mismatch_stats': mismatch_stats,
+    }
+    return render(request, 'finance_reconciliation.html', context)
+
+
+@login_required
+@require_permission('finance', 'update')
+def finance_reconciliation_raise_risk(request, order_id):
+    """财务对账异常生成风险事件"""
+    if request.method != 'POST':
+        return redirect('finance_reconciliation')
+    if not has_action_permission(request.user, 'finance.manual_adjust'):
+        messages.error(request, '您没有权限执行此操作（finance.manual_adjust）')
+        return redirect('finance_reconciliation')
+    order = get_object_or_404(Order, id=order_id)
+    note = (request.POST.get('note') or '').strip() or '财务对账异常，需人工核对'
+    event, created = RiskEventService.create_event(
+        event_type='frequent_cancel',
+        level='high',
+        module='财务',
+        title=f'财务对账异常：{order.order_no}',
+        description=note,
+        event_data={'source': 'finance_reconciliation', 'order_id': order.id},
+        order=order,
+        detected_by=request.user,
+    )
+    AuditService.log_with_diff(
+        user=request.user,
+        action='create',
+        module='财务',
+        target=order.order_no,
+        summary='财务对账异常生成风险事件',
+        before={},
+        after={'risk_event_id': event.id, 'created': bool(created)},
+        extra={'note': note},
+    )
+    if created:
+        messages.success(request, f'已生成风险事件：#{event.id}')
+    else:
+        messages.info(request, f'已存在未关闭风险事件：#{event.id}')
+    return redirect('finance_reconciliation')
+
+
+@login_required
+@require_permission('ops_center', 'view')
+def ops_center(request):
+    """运维中心：核心告警聚合视图"""
+    settings = get_system_settings()
+    transfer_pending_timeout_hours = int(settings.get('transfer_pending_timeout_hours', 24) or 24)
+    approval_pending_warn_hours = int(settings.get('approval_pending_warn_hours', 24) or 24)
+    now = timezone.now()
+
+    transfer_overdue_count = Transfer.objects.filter(
+        status='pending',
+        created_at__lt=now - timedelta(hours=transfer_pending_timeout_hours),
+    ).count()
+    approval_overdue_count = ApprovalTask.objects.filter(
+        status='pending',
+        created_at__lt=now - timedelta(hours=approval_pending_warn_hours),
+    ).count()
+    open_risk_count = RiskEvent.objects.filter(status='open').count()
+    latest_check = DataConsistencyCheckRun.objects.order_by('-created_at').first()
+    latest_check_issues = int(latest_check.total_issues) if latest_check else 0
+    finance_mismatch_count = 0
+    if latest_check and latest_check.issues:
+        finance_mismatch_count = sum(
+            1 for i in (latest_check.issues or [])
+            if (i or {}).get('type') == 'finance_reconciliation_mismatch'
+        )
+
+    source_filter = (request.GET.get('source') or '').strip()
+    severity_filter = (request.GET.get('severity') or '').strip()
+    export_flag = (request.GET.get('export') or '').strip() == '1'
+
+    overdue_transfers = Transfer.objects.select_related('order_from', 'order_to', 'sku').filter(
+        status='pending',
+        created_at__lt=now - timedelta(hours=transfer_pending_timeout_hours),
+    ).order_by('created_at')[:20]
+    overdue_approvals = ApprovalTask.objects.select_related('requested_by').filter(
+        status='pending',
+        created_at__lt=now - timedelta(hours=approval_pending_warn_hours),
+    ).order_by('created_at')[:20]
+    open_risk_events = RiskEvent.objects.select_related('order', 'transfer').filter(status='open').order_by('-created_at')[:20]
+    recent_checks = DataConsistencyCheckRun.objects.select_related('executed_by').order_by('-created_at')[:20]
+
+    alerts = []
+    if transfer_overdue_count > 0:
+        alerts.append({
+            'source': 'transfer',
+            'severity': 'danger',
+            'title': '转寄任务超时',
+            'value': transfer_overdue_count,
+            'desc': f'待执行超过 {transfer_pending_timeout_hours} 小时',
+            'url': reverse('transfers_list') + '?panel=tasks&status=pending',
+        })
+    if approval_overdue_count > 0:
+        alerts.append({
+            'source': 'approval',
+            'severity': 'danger',
+            'title': '审批任务超时',
+            'value': approval_overdue_count,
+            'desc': f'待审批超过 {approval_pending_warn_hours} 小时',
+            'url': reverse('approvals_list') + '?status=pending',
+        })
+    if open_risk_count > 0:
+        alerts.append({
+            'source': 'risk',
+            'severity': 'warning',
+            'title': '待处理风险事件',
+            'value': open_risk_count,
+            'desc': '风险事件尚未闭环',
+            'url': reverse('risk_events_list') + '?status=open',
+        })
+    if latest_check and latest_check_issues > 0:
+        alerts.append({
+            'source': 'consistency',
+            'severity': 'warning',
+            'title': '一致性巡检存在问题',
+            'value': latest_check_issues,
+            'desc': f'最近巡检时间：{latest_check.created_at.strftime("%Y-%m-%d %H:%M")}',
+            'url': reverse('settings') + '?tab=system',
+        })
+    if finance_mismatch_count > 0:
+        alerts.append({
+            'source': 'finance',
+            'severity': 'warning',
+            'title': '财务对账异常',
+            'value': finance_mismatch_count,
+            'desc': '最近巡检识别到财务差异订单',
+            'url': reverse('finance_reconciliation') + '?mismatch_only=1',
+        })
+
+    if source_filter:
+        alerts = [a for a in alerts if a.get('source') == source_filter]
+    if severity_filter:
+        alerts = [a for a in alerts if a.get('severity') == severity_filter]
+
+    if export_flag:
+        response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+        response['Content-Disposition'] = 'attachment; filename="ops_alerts.csv"'
+        writer = csv.writer(response)
+        writer.writerow(['来源', '级别', '告警项', '数量', '说明', '处理链接'])
+        source_labels = {
+            'transfer': '转寄',
+            'approval': '审批',
+                'risk': '风险事件',
+                'consistency': '一致性巡检',
+                'finance': '财务',
+            }
+        severity_labels = {'danger': '高', 'warning': '中', 'info': '低'}
+        for alert in alerts:
+            writer.writerow([
+                source_labels.get(alert.get('source'), alert.get('source') or ''),
+                severity_labels.get(alert.get('severity'), alert.get('severity') or ''),
+                alert.get('title') or '',
+                alert.get('value') or 0,
+                alert.get('desc') or '',
+                alert.get('url') or '',
+            ])
+        return response
+
+    context = {
+        'alerts': alerts,
+        'transfer_overdue_count': transfer_overdue_count,
+        'approval_overdue_count': approval_overdue_count,
+        'open_risk_count': open_risk_count,
+        'latest_check': latest_check,
+        'latest_check_issues': latest_check_issues,
+        'finance_mismatch_count': finance_mismatch_count,
+        'source_filter': source_filter,
+        'severity_filter': severity_filter,
+        'overdue_transfers': overdue_transfers,
+        'overdue_approvals': overdue_approvals,
+        'open_risk_events': open_risk_events,
+        'recent_checks': recent_checks,
+    }
+    return render(request, 'ops_center.html', context)
 
 
 @login_required
@@ -2408,7 +5133,7 @@ def audit_logs(request):
             ])
         return resp
 
-    logs_page = Paginator(filtered_logs, 10).get_page(request.GET.get('page'))
+    logs_page = Paginator(filtered_logs, _get_page_size('page_size_audit_logs')).get_page(request.GET.get('page'))
 
     modules = list(
         AuditLog.objects.exclude(module__isnull=True)
@@ -2460,7 +5185,7 @@ def users_list(request):
             Q(phone__icontains=keyword)
         )
 
-    users_page = Paginator(users, 10).get_page(request.GET.get('page'))
+    users_page = Paginator(users, _get_page_size('page_size_users')).get_page(request.GET.get('page'))
     context = {
         'users': users_page,
         'users_page': users_page,
@@ -2496,11 +5221,11 @@ def order_mark_confirmed(request, order_id):
     """工作台：确认订单并进入待发货"""
     if request.method == 'POST':
         try:
+            if not has_action_permission(request.user, 'order.confirm_delivery'):
+                raise ValueError('您没有执行此操作的权限（order.confirm_delivery）')
             deposit_paid = Decimal(request.POST.get('deposit_paid', '0') or '0')
             auto_deliver = request.POST.get('auto_deliver') == '1'
             ship_tracking = (request.POST.get('ship_tracking', '') or '').strip()
-            if auto_deliver and not has_action_permission(request.user, 'order.confirm_delivery'):
-                raise ValueError('您没有执行此操作的权限（order.confirm_delivery）')
             if auto_deliver and not ship_tracking:
                 raise ValueError('快递单号不能为空')
 
@@ -2547,11 +5272,11 @@ def order_mark_completed(request, order_id):
     """工作台：标记订单完成（自动执行归还再完成）"""
     if request.method == 'POST':
         try:
+            if not has_action_permission(request.user, 'order.mark_returned'):
+                raise ValueError('您没有执行此操作的权限（order.mark_returned）')
             order = get_object_or_404(Order, id=order_id)
-            if order.status == 'delivered':
-                if _is_transfer_source_order_active(order):
-                    raise ValueError('该订单为转寄链路订单，请前往【转寄中心】完成操作')
-                OrderService.mark_as_returned(order_id, request.POST.get('return_tracking', ''), Decimal('0.00'), request.user)
+            if order.status != 'returned':
+                raise ValueError(f"订单状态为 {order.get_status_display()}，无法标记完成")
             OrderService.complete_order(order_id, request.user)
             messages.success(request, '订单已标记为已完成')
         except ValueError as e:
@@ -2566,13 +5291,31 @@ def order_mark_completed(request, order_id):
 def order_cancel(request, order_id):
     """取消订单"""
     if request.method == 'POST':
-        if not has_action_permission(request.user, 'order.force_cancel'):
-            messages.error(request, '您没有执行此操作的权限（order.force_cancel）')
-            return redirect('orders_list')
         try:
+            order = get_object_or_404(Order, id=order_id)
             reason = request.POST.get('reason', '手动取消')
-            OrderService.cancel_order(order_id, reason, request.user)
-            messages.success(request, '订单已取消')
+            if order.status not in ['pending', 'confirmed']:
+                raise ValueError(f"订单状态为 {order.get_status_display()}，无法取消")
+            if has_action_permission(request.user, 'order.force_cancel'):
+                _execute_order_cancel(order, reason, request.user)
+                messages.success(request, '订单已取消')
+            elif can_request_approval(request.user):
+                _request_high_risk_approval(
+                    request,
+                    action_code='order.force_cancel',
+                    module='订单',
+                    target_type='order',
+                    target_id=order.id,
+                    target_label=order.order_no,
+                    summary=f'申请取消订单 {order.order_no}',
+                    payload={
+                        'order_id': order.id,
+                        'order_no': order.order_no,
+                        'reason': reason,
+                    },
+                )
+            else:
+                messages.error(request, '您没有执行此操作的权限（order.force_cancel）')
         except ValueError as e:
             messages.error(request, str(e))
         except Exception as e:
@@ -2594,7 +5337,7 @@ def api_get_sku_details(request, sku_id):
                 'name': sku.name,
                 'rental_price': str(sku.rental_price),
                 'deposit': str(sku.deposit),
-                'stock': sku.stock,
+                'stock': sku.effective_stock,
             }
         })
     except SKU.DoesNotExist:

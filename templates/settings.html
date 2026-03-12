@@ -67,6 +67,24 @@
                         <small class="form-text">来源单与目标单预定日期差超过该值时，不参与转寄候选</small>
                     </div>
                     <div class="form-group">
+                        <label for="transfer_score_weight_date">评分权重：时间差</label>
+                        <input type="number" id="transfer_score_weight_date" name="transfer_score_weight_date" class="form-control"
+                               value="{{ settings.transfer_score_weight_date|default:'100' }}" min="1" required>
+                        <small class="form-text">用于评分回放展示：date_gap_score × 时间差权重</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="transfer_score_weight_confidence">评分权重：地址可信度</label>
+                        <input type="number" id="transfer_score_weight_confidence" name="transfer_score_weight_confidence" class="form-control"
+                               value="{{ settings.transfer_score_weight_confidence|default:'10' }}" min="1" required>
+                        <small class="form-text">用于评分回放展示：confidence_rank × 可信度权重（high=0, medium=1, low=2）</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="transfer_score_weight_distance">评分权重：距离</label>
+                        <input type="number" id="transfer_score_weight_distance" name="transfer_score_weight_distance" class="form-control"
+                               value="{{ settings.transfer_score_weight_distance|default:'1' }}" min="1" required>
+                        <small class="form-text">用于评分回放展示：distance_score × 距离权重</small>
+                    </div>
+                    <div class="form-group">
                         <label for="transfer_pending_timeout_hours">转寄待执行超时阈值（小时）</label>
                         <input type="number" id="transfer_pending_timeout_hours" name="transfer_pending_timeout_hours" class="form-control"
                                value="{{ settings.transfer_pending_timeout_hours|default:'24' }}" min="1" required>
@@ -113,6 +131,96 @@
                         <input type="number" id="outbound_max_hops_warn" name="outbound_max_hops_warn" class="form-control"
                                value="{{ settings.outbound_max_hops_warn|default:'4' }}" min="1" required>
                     </div>
+                    <div class="form-group">
+                        <label for="approval_pending_warn_hours">审批超时预警阈值（小时）</label>
+                        <input type="number" id="approval_pending_warn_hours" name="approval_pending_warn_hours" class="form-control"
+                               value="{{ settings.approval_pending_warn_hours|default:'24' }}" min="1" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="approval_required_count_default">审批默认层级</label>
+                        <input type="number" id="approval_required_count_default" name="approval_required_count_default" class="form-control"
+                               value="{{ settings.approval_required_count_default|default:'1' }}" min="1" max="5" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="approval_required_count_order_force_cancel">订单强制取消审批层级</label>
+                        <input type="number" id="approval_required_count_order_force_cancel" name="approval_required_count_order_force_cancel" class="form-control"
+                               value="{{ settings.approval_required_count_order_force_cancel|default:'1' }}" min="1" max="3" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="approval_required_count_transfer_cancel_task">转寄任务取消审批层级</label>
+                        <input type="number" id="approval_required_count_transfer_cancel_task" name="approval_required_count_transfer_cancel_task" class="form-control"
+                               value="{{ settings.approval_required_count_transfer_cancel_task|default:'1' }}" min="1" max="3" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="approval_required_count_unit_dispose">单套处置审批层级</label>
+                        <input type="number" id="approval_required_count_unit_dispose" name="approval_required_count_unit_dispose" class="form-control"
+                               value="{{ settings.approval_required_count_unit_dispose|default:'1' }}" min="1" max="3" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="approval_required_count_unit_disassemble">拆解回件审批层级</label>
+                        <input type="number" id="approval_required_count_unit_disassemble" name="approval_required_count_unit_disassemble" class="form-control"
+                               value="{{ settings.approval_required_count_unit_disassemble|default:'1' }}" min="1" max="3" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="approval_required_count_unit_scrap">报废停用审批层级</label>
+                        <input type="number" id="approval_required_count_unit_scrap" name="approval_required_count_unit_scrap" class="form-control"
+                               value="{{ settings.approval_required_count_unit_scrap|default:'1' }}" min="1" max="3" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="approval_required_count_map">审批层级策略映射（JSON）</label>
+                        <textarea id="approval_required_count_map" name="approval_required_count_map" class="form-control" rows="3"
+                                  placeholder='{"order.force_cancel":2,"transfer.cancel_task":1,"unit.dispose.scrap":2,"unit.dispose.disassemble":1}'>{{ settings.approval_required_count_map|default:'{}' }}</textarea>
+                        <small class="form-text">按动作代码覆盖审批层级，优先级高于上面的单项配置</small>
+                    </div>
+                    <hr>
+                    <h4 class="mb-3">告警通知</h4>
+                    <div class="form-group">
+                        <label for="alert_notify_enabled">启用自动通知</label>
+                        <select id="alert_notify_enabled" name="alert_notify_enabled" class="form-control">
+                            <option value="0" {% if settings.alert_notify_enabled|default:'0' == '0' %}selected{% endif %}>关闭</option>
+                            <option value="1" {% if settings.alert_notify_enabled == '1' %}selected{% endif %}>开启</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="alert_notify_min_severity">通知最低级别</label>
+                        <select id="alert_notify_min_severity" name="alert_notify_min_severity" class="form-control">
+                            <option value="warning" {% if settings.alert_notify_min_severity|default:'warning' == 'warning' %}selected{% endif %}>中（warning）及以上</option>
+                            <option value="danger" {% if settings.alert_notify_min_severity == 'danger' %}selected{% endif %}>高（danger）及以上</option>
+                            <option value="info" {% if settings.alert_notify_min_severity == 'info' %}selected{% endif %}>低（info）及以上</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="alert_notify_webhook_url">Webhook地址</label>
+                        <input type="url" id="alert_notify_webhook_url" name="alert_notify_webhook_url" class="form-control"
+                               value="{{ settings.alert_notify_webhook_url|default:'' }}"
+                               placeholder="https://example.com/webhook">
+                        <small class="form-text">用于接收 ops_watchdog / approval_sla_remind 自动通知</small>
+                    </div>
+                    <div class="form-group">
+                        <button type="submit" name="test_alert_notify" value="1" class="btn btn-outline-warning">测试通知</button>
+                    </div>
+                    <hr>
+                    <h4 class="mb-3">界面分页配置</h4>
+                    <div class="form-row">
+                        <div class="form-group col-md-4">
+                            <label for="page_size_default">默认分页条数</label>
+                            <input type="number" id="page_size_default" name="page_size_default" class="form-control"
+                                   value="{{ settings.page_size_default|default:'10' }}" min="1" max="100">
+                            <small class="form-text">应用于绝大多数列表页面。</small>
+                        </div>
+                        <div class="form-group col-md-4">
+                            <label for="page_size_transfer_candidates">转寄候选分页条数</label>
+                            <input type="number" id="page_size_transfer_candidates" name="page_size_transfer_candidates" class="form-control"
+                                   value="{{ settings.page_size_transfer_candidates|default:'5' }}" min="1" max="100">
+                            <small class="form-text">转寄中心候选列表优先使用该值。</small>
+                        </div>
+                        <div class="form-group col-md-4">
+                            <label for="page_size_outbound_topology_units">拓扑单套分页条数</label>
+                            <input type="number" id="page_size_outbound_topology_units" name="page_size_outbound_topology_units" class="form-control"
+                                   value="{{ settings.page_size_outbound_topology_units|default:'5' }}" min="1" max="100">
+                            <small class="form-text">在外库存拓扑视图分页条数。</small>
+                        </div>
+                    </div>
                     <div class="info-grid">
                         <div class="info-item">
                             <label>系统版本：</label>
@@ -131,7 +239,39 @@
                             <span>4.2.x</span>
                         </div>
                     </div>
-                    <div class="text-muted small mt-3">该分组目前为只读信息，后续会加入分页默认条数、默认筛选项等界面配置。</div>
+                    <div class="mt-3">
+                        <button type="submit" name="run_consistency_check" value="1" class="btn btn-outline-primary">
+                            运行数据一致性巡检
+                        </button>
+                    </div>
+                    <div class="table-responsive mt-3">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th>时间</th>
+                                    <th>来源</th>
+                                    <th>问题总数</th>
+                                    <th>错误</th>
+                                    <th>警告</th>
+                                    <th>执行人</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for run in recent_consistency_runs %}
+                                <tr>
+                                    <td>{{ run.created_at|date:"Y-m-d H:i" }}</td>
+                                    <td>{{ run.source }}</td>
+                                    <td>{{ run.total_issues }}</td>
+                                    <td>{{ run.summary.error_count|default:0 }}</td>
+                                    <td>{{ run.summary.warning_count|default:0 }}</td>
+                                    <td>{% if run.executed_by %}{{ run.executed_by.full_name|default:run.executed_by.username }}{% else %}-{% endif %}</td>
+                                </tr>
+                                {% empty %}
+                                <tr><td colspan="6" class="text-center text-muted">暂无巡检记录</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </div>

@@ -4,8 +4,13 @@ from decimal import Decimal
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 
-from apps.core.models import Order, Part, PurchaseOrder, PurchaseOrderItem, SKU, Transfer, TransferAllocation, OrderItem, AuditLog
+from apps.core.models import (
+    Order, Part, PurchaseOrder, PurchaseOrderItem, SKU, Transfer,
+    TransferAllocation, OrderItem, AuditLog, FinanceTransaction, RiskEvent, ApprovalTask, SystemSettings,
+    DataConsistencyCheckRun, TransferRecommendationLog,
+)
 
 
 User = get_user_model()
@@ -69,6 +74,56 @@ class ApiEndpointsTestCase(TestCase):
         codes = [item['code'] for item in payload['data']]
         self.assertIn('SKU-API-1', codes)
 
+    def test_order_finance_transactions_api_should_return_records(self):
+        order = Order.objects.get(id=1001)
+        FinanceTransaction.objects.create(
+            order=order,
+            transaction_type='deposit_received',
+            amount=Decimal('60.00'),
+            notes='API测试押金',
+            created_by=self.user,
+        )
+        resp = self.client.get(reverse('api_order_finance_transactions', kwargs={'order_id': order.id}))
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(len(payload['data']), 1)
+        self.assertEqual(payload['data'][0]['transaction_type'], 'deposit_received')
+        self.assertEqual(payload['data'][0]['amount'], '60.00')
+
+    def test_finance_reconciliation_api_should_return_mismatch_with_suggestions(self):
+        order = Order.objects.get(id=1001)
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=self.sku.rental_price,
+        )
+        FinanceTransaction.objects.create(
+            order=order,
+            transaction_type='deposit_received',
+            amount=Decimal('10.00'),
+            created_by=self.user,
+        )
+        resp = self.client.get(reverse('api_finance_reconciliation') + '?mismatch_only=1')
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['meta']['total'], 1)
+        self.assertTrue(payload['data'][0]['has_mismatch'])
+        self.assertIn('押金多收', ''.join(payload['data'][0]['suggestions']))
+        resp2 = self.client.get(reverse('api_finance_reconciliation') + '?mismatch_only=1&mismatch_field=deposit&min_diff_amount=5')
+        self.assertEqual(resp2.status_code, 200)
+        payload2 = resp2.json()
+        self.assertTrue(payload2['success'])
+        self.assertEqual(payload2['meta']['mismatch_field'], 'deposit')
+        self.assertEqual(payload2['meta']['min_diff_amount'], '5')
+        self.assertEqual(payload2['meta']['total'], 1)
+        self.assertIn('mismatch_stats', payload2['meta'])
+        self.assertGreaterEqual(int(payload2['meta']['mismatch_stats']['abnormal']), 1)
+
     def test_dashboard_stats_api_returns_real_counts(self):
         resp = self.client.get(reverse('api_dashboard_stats'))
         self.assertEqual(resp.status_code, 200)
@@ -78,6 +133,10 @@ class ApiEndpointsTestCase(TestCase):
         self.assertEqual(payload['data']['total_skus'], 1)
         self.assertEqual(payload['data']['low_stock_parts'], 1)
         self.assertIn('completed_orders', payload['data'])
+        self.assertIn('due_within_7_days_count', payload['data'])
+        self.assertIn('fulfillment_rate', payload['data'])
+        self.assertIn('cancel_rate', payload['data'])
+        self.assertIn('avg_transit_days', payload['data'])
 
     def test_dashboard_role_view_should_return_role_specific_payload(self):
         resp = self.client.get(reverse('api_dashboard_role_view'))
@@ -87,6 +146,9 @@ class ApiEndpointsTestCase(TestCase):
         self.assertEqual(payload['data']['role'], 'admin')
         self.assertEqual(payload['data']['view_type'], 'business')
         self.assertTrue(any(card['key'] == 'total_revenue' for card in payload['data']['focus_cards']))
+        self.assertTrue(any(card['key'] == 'transfer_available_count' and card.get('url_name') == 'transfers_list' for card in payload['data']['focus_cards']))
+        self.assertTrue(any(card['key'] == 'due_within_7_days_count' and card.get('query') == 'sla=warning' for card in payload['data']['focus_cards']))
+        self.assertTrue(any(k['key'] == 'fulfillment_rate' for k in payload['data'].get('kpi_entries', [])))
         self.assertTrue(any(action['url_name'] == 'order_create' for action in payload['data']['quick_actions']))
         self.assertTrue(any(risk['key'] == 'pending_orders' for risk in payload['data']['risk_entries']))
         self.assertTrue(any(risk['key'] == 'low_stock_parts' and risk['query'] == 'low=1' for risk in payload['data']['risk_entries']))
@@ -109,6 +171,302 @@ class ApiEndpointsTestCase(TestCase):
         self.assertTrue(any(card['key'] == 'warehouse_available_stock' for card in payload2['data']['focus_cards']))
         self.assertTrue(any(action['url_name'] == 'parts_inventory_list' for action in payload2['data']['quick_actions']))
         self.assertTrue(any(risk['key'] == 'pending_transfer_tasks' for risk in payload2['data']['risk_entries']))
+
+    def test_dashboard_role_view_admin_should_allow_view_role_override(self):
+        resp = self.client.get(reverse('api_dashboard_role_view') + '?view_role=warehouse_staff')
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['data']['role'], 'warehouse_staff')
+        self.assertEqual(payload['data']['view_type'], 'warehouse')
+
+    def test_dashboard_role_view_non_admin_should_ignore_view_role_override(self):
+        staff = User.objects.create_user(
+            username='api_cs',
+            password='test123',
+            role='customer_service',
+            is_staff=True,
+        )
+        self.client.logout()
+        self.client.login(username='api_cs', password='test123')
+        resp = self.client.get(reverse('api_dashboard_role_view') + '?view_role=admin')
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['data']['role'], 'customer_service')
+        self.assertEqual(payload['data']['view_type'], 'service')
+
+    def test_dashboard_role_view_should_include_open_risk_events_entry(self):
+        RiskEvent.objects.create(
+            event_type='frequent_cancel',
+            level='medium',
+            status='open',
+            module='订单',
+            title='API风险事件',
+            description='测试',
+            detected_by=self.user,
+        )
+        resp = self.client.get(reverse('api_dashboard_role_view'))
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertTrue(any(risk['key'] == 'open_risk_events' for risk in payload['data']['risk_entries']))
+
+    def test_dashboard_role_view_should_include_overdue_approvals_entry(self):
+        SystemSettings.objects.update_or_create(key='approval_pending_warn_hours', defaults={'value': '1'})
+        task = ApprovalTask.objects.create(
+            action_code='order.force_cancel',
+            module='订单',
+            target_type='order',
+            target_id=1001,
+            target_label='ORD-TEST',
+            summary='测试待审批',
+            payload={'order_id': 1001},
+            requested_by=self.user,
+        )
+        ApprovalTask.objects.filter(id=task.id).update(created_at=timezone.now() - timedelta(hours=2))
+        resp = self.client.get(reverse('api_dashboard_role_view'))
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertTrue(any(risk['key'] == 'overdue_pending_approvals' for risk in payload['data']['risk_entries']))
+
+    def test_dashboard_kpi_trend_api_should_return_daily_buckets(self):
+        today = timezone.localdate()
+        Order.objects.create(
+            order_no='ORD-TREND-DELIVERED',
+            customer_name='趋势A',
+            customer_phone='13800000002',
+            delivery_address='广东省深圳市南山区',
+            event_date=today - timedelta(days=1),
+            status='delivered',
+            total_amount=Decimal('100.00'),
+            deposit_paid=Decimal('0.00'),
+            balance=Decimal('100.00'),
+            created_by=self.user,
+        )
+        Order.objects.create(
+            order_no='ORD-TREND-CANCEL',
+            customer_name='趋势B',
+            customer_phone='13800000003',
+            delivery_address='广东省深圳市南山区',
+            event_date=today,
+            status='cancelled',
+            total_amount=Decimal('100.00'),
+            deposit_paid=Decimal('0.00'),
+            balance=Decimal('0.00'),
+            created_by=self.user,
+        )
+        resp = self.client.get(reverse('api_dashboard_kpi_trend') + '?days=3')
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['meta']['days'], 3)
+        self.assertEqual(len(payload['data']), 3)
+        self.assertTrue(any(int(row['cancelled']) >= 1 for row in payload['data']))
+        self.assertTrue(any(int(row['delivered']) >= 1 for row in payload['data']))
+
+    def test_ops_alerts_api_should_return_summary_and_filtered_alerts(self):
+        task = ApprovalTask.objects.create(
+            action_code='order.force_cancel',
+            module='订单',
+            target_type='order',
+            target_id=1001,
+            target_label='ORD-TEST',
+            summary='测试待审批',
+            payload={'order_id': 1001},
+            requested_by=self.user,
+        )
+        ApprovalTask.objects.filter(id=task.id).update(created_at=timezone.now() - timedelta(hours=26))
+        RiskEvent.objects.create(
+            event_type='frequent_cancel',
+            level='medium',
+            status='open',
+            module='订单',
+            title='API风险事件',
+            description='测试',
+            detected_by=self.user,
+        )
+        DataConsistencyCheckRun.objects.create(
+            source='manual',
+            total_issues=2,
+            summary={'total': 2},
+            issues=[{'type': 'finance_reconciliation_mismatch', 'x': 1}],
+            executed_by=self.user,
+        )
+        resp = self.client.get(reverse('api_ops_alerts'))
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertIn('summary', payload['data'])
+        self.assertIn('alerts', payload['data'])
+        self.assertTrue(any(a['title'] == '审批任务超时' for a in payload['data']['alerts']))
+        self.assertTrue(any(a['source'] == 'finance' for a in payload['data']['alerts']))
+        self.assertEqual(payload['data']['summary']['finance_mismatch_count'], 1)
+
+        resp2 = self.client.get(reverse('api_ops_alerts') + '?source=approval&severity=danger')
+        self.assertEqual(resp2.status_code, 200)
+        alerts = resp2.json()['data']['alerts']
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]['source'], 'approval')
+        self.assertEqual(alerts[0]['severity'], 'danger')
+
+    def test_risk_events_api_should_support_filters(self):
+        event_mine = RiskEvent.objects.create(
+            event_type='frequent_cancel',
+            level='high',
+            status='processing',
+            module='订单',
+            title='我的风险事件',
+            description='需要处理',
+            detected_by=self.user,
+            assignee=self.user,
+        )
+        other = User.objects.create_user(
+            username='api_risk_other',
+            password='test123',
+            role='manager',
+            is_staff=True,
+        )
+        RiskEvent.objects.create(
+            event_type='frequent_cancel',
+            level='low',
+            status='open',
+            module='订单',
+            title='其他风险事件',
+            description='其他',
+            detected_by=self.user,
+            assignee=other,
+        )
+        resp = self.client.get(reverse('api_risk_events') + '?mine_only=1&status=processing')
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['meta']['total'], 1)
+        self.assertEqual(payload['data'][0]['id'], event_mine.id)
+        self.assertEqual(payload['data'][0]['assignee_name'], self.user.full_name or self.user.username)
+
+    def test_approvals_api_should_support_filters(self):
+        mine = ApprovalTask.objects.create(
+            action_code='order.force_cancel',
+            module='订单',
+            target_type='order',
+            target_id=1001,
+            target_label='ORD-MINE',
+            summary='我发起审批',
+            payload={'order_id': 1001},
+            requested_by=self.user,
+            status='pending',
+        )
+        other_user = User.objects.create_user(
+            username='api_approval_other',
+            password='test123',
+            role='manager',
+            is_staff=True,
+        )
+        other = ApprovalTask.objects.create(
+            action_code='transfer.cancel_task',
+            module='转寄',
+            target_type='transfer',
+            target_id=1,
+            target_label='TR-1',
+            summary='他人发起审批',
+            payload={'transfer_id': 1},
+            requested_by=other_user,
+            status='pending',
+        )
+        resp = self.client.get(reverse('api_approvals') + '?reviewable_only=1')
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['meta']['total'], 1)
+        self.assertEqual(payload['data'][0]['id'], other.id)
+        self.assertNotEqual(payload['data'][0]['id'], mine.id)
+
+    def test_transfer_recommendation_logs_api_should_support_filters(self):
+        order = Order.objects.get(id=1001)
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=self.sku.rental_price,
+        )
+        log = TransferRecommendationLog.objects.create(
+            order=order,
+            sku=self.sku,
+            trigger_type='recommend',
+            target_event_date=order.event_date,
+            target_address=order.delivery_address,
+            before_source_order_ids=[111],
+            selected_source_order_id=222,
+            selected_source_order_no='ORD-SOURCE-222',
+            warehouse_needed=0,
+            candidates=[{'order_no': 'ORD-SOURCE-222'}],
+            score_summary={'candidate_count': 1},
+            operator=self.user,
+        )
+        resp = self.client.get(reverse('api_transfer_recommendation_logs') + '?trigger_type=recommend&keyword=API客户')
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['meta']['total'], 1)
+        self.assertEqual(payload['data'][0]['id'], log.id)
+        self.assertEqual(payload['data'][0]['trigger_type_display'], '转寄中心重推')
+        # 仓库补量过滤
+        TransferRecommendationLog.objects.create(
+            order=order,
+            sku=self.sku,
+            trigger_type='recommend',
+            target_event_date=order.event_date,
+            target_address=order.delivery_address,
+            before_source_order_ids=[],
+            selected_source_order_id=None,
+            selected_source_order_no='',
+            warehouse_needed=1,
+            candidates=[],
+            score_summary={'candidate_count': 0},
+            operator=self.user,
+        )
+        resp2 = self.client.get(reverse('api_transfer_recommendation_logs') + '?decision_type=warehouse')
+        self.assertEqual(resp2.status_code, 200)
+        payload2 = resp2.json()
+        self.assertTrue(payload2['success'])
+        self.assertEqual(payload2['meta']['decision_type'], 'warehouse')
+        self.assertTrue(all((item.get('selected_source_order_id') in (None, 0)) for item in payload2['data']))
+
+    def test_transfer_recommendation_log_detail_api_should_return_single_log(self):
+        order = Order.objects.get(id=1001)
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=self.sku.rental_price,
+        )
+        log = TransferRecommendationLog.objects.create(
+            order=order,
+            sku=self.sku,
+            trigger_type='recommend',
+            target_event_date=order.event_date,
+            target_address=order.delivery_address,
+            before_source_order_ids=[111],
+            selected_source_order_id=222,
+            selected_source_order_no='ORD-SOURCE-222',
+            warehouse_needed=0,
+            candidates=[{'source_order_no': 'ORD-SOURCE-222', 'score_total': 12.3}],
+            score_summary={'candidate_count': 1, 'selected_rank': 1},
+            operator=self.user,
+        )
+        resp = self.client.get(reverse('api_transfer_recommendation_log_detail', kwargs={'log_id': log.id}))
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertTrue(payload['success'])
+        self.assertEqual(payload['data']['id'], log.id)
+        self.assertEqual(payload['data']['order_no'], order.order_no)
+        self.assertEqual(payload['data']['score_summary']['selected_rank'], 1)
 
     def test_dashboard_stats_should_ignore_allocations_from_inactive_source(self):
         OrderItem.objects.create(

@@ -1,0 +1,130 @@
+﻿{% extends "base.html" %}
+
+{% block title %}风险事件 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}风险事件{% endblock %}
+
+{% block content %}
+<div class="card mb-3">
+  <div class="card-body">
+    <form class="row g-2" method="get">
+      <div class="col-md-2">
+        <select class="form-select" name="status">
+          <option value="">全部状态</option>
+          <option value="open" {% if status_filter == 'open' %}selected{% endif %}>待处理</option>
+          <option value="processing" {% if status_filter == 'processing' %}selected{% endif %}>处理中</option>
+          <option value="closed" {% if status_filter == 'closed' %}selected{% endif %}>已关闭</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <select class="form-select" name="level">
+          <option value="">全部级别</option>
+          <option value="low" {% if level_filter == 'low' %}selected{% endif %}>低</option>
+          <option value="medium" {% if level_filter == 'medium' %}selected{% endif %}>中</option>
+          <option value="high" {% if level_filter == 'high' %}selected{% endif %}>高</option>
+          <option value="critical" {% if level_filter == 'critical' %}selected{% endif %}>严重</option>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <input class="form-control" type="text" name="keyword" value="{{ keyword }}" placeholder="标题/描述/订单号">
+      </div>
+      <div class="col-md-2">
+        <select class="form-select" name="assignee">
+          <option value="">全部负责人</option>
+          {% for u in assignees %}
+          <option value="{{ u.id }}" {% if assignee_filter == u.id|stringformat:"s" %}selected{% endif %}>
+            {{ u.full_name|default:u.username }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-4 d-flex gap-2 align-items-center">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="mine_only" name="mine_only" value="1" {% if mine_only %}checked{% endif %}>
+          <label class="form-check-label" for="mine_only">仅看我负责</label>
+        </div>
+        <button class="btn btn-primary" type="submit">查询</button>
+        <a class="btn btn-secondary" href="{% url 'risk_events_list' %}">重置</a>
+        <a class="btn btn-outline-success" href="?{{ pagination_query }}&export=1">导出CSV</a>
+      </div>
+    </form>
+    <div class="mt-3 text-muted small">
+      待处理：{{ open_count }}，处理中：{{ processing_count }}，已关闭：{{ closed_count }}
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>级别</th>
+          <th>类型</th>
+          <th>标题/描述</th>
+          <th>关联</th>
+          <th>状态</th>
+          <th>负责人</th>
+          <th>处理备注</th>
+          <th>触发人</th>
+          <th>时间</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in events %}
+        <tr>
+          <td>{{ e.id }}</td>
+          <td>{{ e.get_level_display }}</td>
+          <td>{{ e.get_event_type_display }}</td>
+          <td>
+            <div>{{ e.title }}</div>
+            <div class="text-muted small">{{ e.description|default:'-' }}</div>
+          </td>
+          <td>
+            {% if e.order %}<div>订单：{{ e.order.order_no }}</div>{% endif %}
+            {% if e.transfer %}<div>任务：#{{ e.transfer.id }}</div>{% endif %}
+          </td>
+          <td>{{ e.get_status_display }}</td>
+          <td>{{ e.assignee|default:'-' }}</td>
+          <td class="text-muted small">{{ e.processing_note|default:'-'|linebreaksbr }}</td>
+          <td>{{ e.detected_by|default:'-' }}</td>
+          <td>{{ e.created_at|date:"Y-m-d H:i" }}</td>
+          <td>
+            {% if e.status != 'closed' %}
+            <div class="d-flex gap-1 flex-wrap">
+              <form method="post" action="{% url 'risk_event_claim' e.id %}">
+                {% csrf_token %}
+                <input class="form-control form-control-sm mb-1" type="text" name="note" placeholder="认领备注（可选）">
+                <button class="btn btn-sm btn-outline-primary" type="submit">认领处理中</button>
+              </form>
+              <form method="post" action="{% url 'risk_event_resolve' e.id %}">
+                {% csrf_token %}
+                <input class="form-control form-control-sm mb-1" type="text" name="note" placeholder="关闭备注（可选）">
+                <button class="btn btn-sm btn-success" type="submit">关闭</button>
+              </form>
+            </div>
+            {% else %}
+            <span class="text-muted">-</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="11" class="text-center">暂无风险事件</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if events_page.paginator.num_pages > 1 %}
+  <div class="card-body d-flex justify-content-end gap-2">
+    {% if events_page.has_previous %}
+      <a class="btn btn-sm btn-outline-secondary" href="?{{ pagination_query }}&page={{ events_page.previous_page_number }}">上一页</a>
+    {% endif %}
+    <span class="btn btn-sm btn-light disabled">{{ events_page.number }}/{{ events_page.paginator.num_pages }}</span>
+    {% if events_page.has_next %}
+      <a class="btn btn-sm btn-outline-secondary" href="?{{ pagination_query }}&page={{ events_page.next_page_number }}">下一页</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

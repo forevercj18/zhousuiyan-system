@@ -1,11 +1,14 @@
 from datetime import date, timedelta
 from decimal import Decimal
 import json
+from io import StringIO
 from pathlib import Path
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
+from django.db.models import Sum
 from django.http import HttpResponse
-from django.test import TestCase
+from django.test import Client, TestCase
 from django.test.client import RequestFactory
 from django.urls import reverse
 from django.utils import timezone
@@ -14,10 +17,12 @@ from .middleware import AuditLogMiddleware
 from .models import (
     AuditLog,
     InventoryUnit,
+    InventoryUnitPart,
     UnitMovement,
     Order,
     OrderItem,
     Part,
+    SKUComponent,
     PartsMovement,
     PurchaseOrder,
     PurchaseOrderItem,
@@ -25,6 +30,18 @@ from .models import (
     SystemSettings,
     Transfer,
     TransferAllocation,
+    FinanceTransaction,
+    RiskEvent,
+    ApprovalTask,
+    DataConsistencyCheckRun,
+    TransferRecommendationLog,
+    AssemblyOrder,
+    AssemblyOrderItem,
+    MaintenanceWorkOrder,
+    MaintenanceWorkOrderItem,
+    UnitDisposalOrder,
+    UnitDisposalOrderItem,
+    PartRecoveryInspection,
 )
 from .services import OrderService, PartsService, ProcurementService
 from .utils import (
@@ -32,6 +49,8 @@ from .utils import (
     build_transfer_allocation_plan,
     build_transfer_pool_rows,
     check_sku_availability,
+    get_dashboard_stats_payload,
+    run_data_consistency_checks,
 )
 
 
@@ -82,6 +101,8 @@ class CoreServicesTestCase(TestCase):
             data={
                 'customer_name': '张三',
                 'customer_phone': '13800000000',
+                'customer_wechat': 'zhangsan_wechat',
+                'xianyu_order_no': 'xy123456',
                 'delivery_address': '测试地址',
                 'event_date': event_date,
                 'rental_days': 1,
@@ -91,9 +112,96 @@ class CoreServicesTestCase(TestCase):
         )
 
         self.assertEqual(order.status, 'pending')
+        self.assertEqual(order.customer_wechat, 'zhangsan_wechat')
+        self.assertEqual(order.xianyu_order_no, 'xy123456')
         self.assertEqual(order.items.count(), 1)
         self.assertEqual(order.total_amount, Decimal('100.00'))
         self.assertTrue(AuditLog.objects.filter(target=order.order_no, action='create').exists())
+
+    def test_confirm_order_should_create_deposit_finance_transaction(self):
+        order = Order.objects.create(
+            customer_name='财务客户A',
+            customer_phone='13812340001',
+            delivery_address='财务地址A',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='pending',
+            total_amount=Decimal('100.00'),
+            balance=Decimal('100.00'),
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('100.00'),
+        )
+
+        OrderService.confirm_order(order.id, Decimal('50.00'), self.user)
+
+        tx = FinanceTransaction.objects.filter(order=order).order_by('-id').first()
+        self.assertIsNotNone(tx)
+        self.assertEqual(tx.transaction_type, 'deposit_received')
+        self.assertEqual(tx.amount, Decimal('50.00'))
+
+    def test_mark_returned_should_create_balance_finance_transaction(self):
+        order = Order.objects.create(
+            customer_name='财务客户B',
+            customer_phone='13812340002',
+            delivery_address='财务地址B',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='delivered',
+            total_amount=Decimal('100.00'),
+            balance=Decimal('100.00'),
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('100.00'),
+        )
+
+        OrderService.mark_as_returned(order.id, 'RET-FIN-001', Decimal('80.00'), self.user)
+
+        tx = FinanceTransaction.objects.filter(order=order).order_by('-id').first()
+        self.assertIsNotNone(tx)
+        self.assertEqual(tx.transaction_type, 'balance_received')
+        self.assertEqual(tx.amount, Decimal('80.00'))
+
+    def test_complete_order_should_create_deposit_refund_finance_transaction(self):
+        order = Order.objects.create(
+            customer_name='财务客户C',
+            customer_phone='13812340003',
+            delivery_address='财务地址C',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='returned',
+            total_amount=Decimal('100.00'),
+            deposit_paid=Decimal('50.00'),
+            balance=Decimal('0.00'),
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('100.00'),
+        )
+
+        OrderService.complete_order(order.id, self.user)
+
+        tx = FinanceTransaction.objects.filter(order=order).order_by('-id').first()
+        self.assertIsNotNone(tx)
+        self.assertEqual(tx.transaction_type, 'deposit_refund')
+        self.assertEqual(tx.amount, Decimal('50.00'))
 
     def test_create_order_transfer_allocation_should_auto_create_transfer_task(self):
         source_order = Order.objects.create(
@@ -294,6 +402,59 @@ class CoreServicesTestCase(TestCase):
         result = check_sku_availability(self.sku.id, 1)
         self.assertEqual(result['occupied'], 1)
         self.assertEqual(result['available_count'], 1)
+
+    def test_effective_stock_should_prefer_active_units_over_legacy_stock_field(self):
+        self.sku.stock = 99
+        self.sku.save(update_fields=['stock'])
+        for idx in range(3):
+            InventoryUnit.objects.create(
+                sku=self.sku,
+                unit_no=f'ZSY-EFFECTIVE-{idx + 1:04d}',
+                status='in_warehouse',
+                current_location_type='warehouse',
+                is_active=True,
+            )
+        InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-EFFECTIVE-SCRAP-0001',
+            status='scrapped',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+
+        self.sku.refresh_from_db()
+        self.assertEqual(self.sku.effective_stock, 3)
+        result = check_sku_availability(self.sku.id, 1)
+        self.assertEqual(result['current_stock'], 3)
+        self.assertEqual(result['available_count'], 3)
+
+    def test_dashboard_stats_should_use_effective_stock_instead_of_raw_legacy_stock_field(self):
+        self.sku.stock = 99
+        self.sku.save(update_fields=['stock'])
+        InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-DASH-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-DASH-0002',
+            status='scrapped',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        payload = get_dashboard_stats_payload()
+        self.assertEqual(payload['warehouse_available_stock'], 1)
+
+    def test_dashboard_stats_should_fallback_to_legacy_stock_when_units_not_initialized(self):
+        InventoryUnit.objects.filter(sku=self.sku).delete()
+        self.sku.stock = 3
+        self.sku.save(update_fields=['stock'])
+
+        payload = get_dashboard_stats_payload()
+        self.assertEqual(payload['warehouse_available_stock'], 3)
 
     def test_transfer_candidate_sorting_by_target_plus_buffer_then_distance(self):
         sku = SKU.objects.create(
@@ -669,7 +830,47 @@ class CoreServicesTestCase(TestCase):
         row = next((r for r in rows if r['order'].id == target.id and r['item'].sku_id == sku.id), None)
         self.assertIsNotNone(row)
         self.assertTrue(row['has_pending_task'])
+        self.assertEqual(row['task_status'], 'completed')
+        self.assertEqual(row['can_recommend_reason'], '已存在已完成转寄任务，不可重推')
+        self.assertEqual(row['can_generate_reason'], '已存在已完成转寄任务')
         self.assertFalse(row['can_generate_task'])
+
+    def test_transfer_pool_row_should_expose_generate_reason_when_target_not_delivered(self):
+        sku = SKU.objects.create(
+            code='SKU-TX-P4',
+            name='候选池套餐4',
+            category='主题套餐',
+            rental_price=Decimal('80.00'),
+            deposit=Decimal('20.00'),
+            stock=5,
+            is_active=True,
+        )
+        source = Order.objects.create(
+            customer_name='来源候选4',
+            customer_phone='13054000001',
+            delivery_address='广东省广州市天河区体育西路4号',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标候选4',
+            customer_phone='13054000002',
+            delivery_address='广东省广州市越秀区中山一路4号',
+            event_date=date.today() + timedelta(days=8),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('80.00'))
+        OrderItem.objects.create(order=target, sku=sku, quantity=1, rental_price=sku.rental_price, deposit=sku.deposit, subtotal=Decimal('80.00'))
+
+        rows = build_transfer_pool_rows()
+        row = next((r for r in rows if r['order'].id == target.id and r['item'].sku_id == sku.id), None)
+        self.assertIsNotNone(row)
+        self.assertFalse(row['can_generate_task'])
+        self.assertEqual(row['can_generate_reason'], '目标订单未发货，暂不可生成任务')
 
     def test_transfer_pool_row_should_show_current_source_for_delivered_target_with_consumed_allocation(self):
         sku = SKU.objects.create(
@@ -912,6 +1113,8 @@ class CoreServicesTestCase(TestCase):
             data={
                 'customer_name': '编辑前',
                 'customer_phone': '13600000003',
+                'customer_wechat': 'before_wechat',
+                'xianyu_order_no': 'xy-before',
                 'delivery_address': '成都市高新区天府大道300号',
                 'event_date': date.today() + timedelta(days=8),
                 'rental_days': 1,
@@ -927,6 +1130,8 @@ class CoreServicesTestCase(TestCase):
             {
                 'customer_name': '编辑后',
                 'customer_phone': '13600000003',
+                'customer_wechat': 'after_wechat',
+                'xianyu_order_no': 'xy-after',
                 'delivery_address': '成都市高新区天府大道300号',
                 'event_date': date.today() + timedelta(days=8),
                 'rental_days': 1,
@@ -948,6 +1153,9 @@ class CoreServicesTestCase(TestCase):
                 status='locked'
             ).exists()
         )
+        order.refresh_from_db()
+        self.assertEqual(order.customer_wechat, 'after_wechat')
+        self.assertEqual(order.xianyu_order_no, 'xy-after')
         self.assertTrue(
             TransferAllocation.objects.filter(
                 id=first_alloc.id,
@@ -1081,6 +1289,200 @@ class CoreViewsFlowTestCase(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, 'delivered')
 
+    def test_workbench_mark_delivered_should_require_tracking_number(self):
+        order = Order.objects.create(
+            customer_name='发货必填客户',
+            customer_phone='13500000010',
+            delivery_address='地址10',
+            event_date=date.today() + timedelta(days=2),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+        )
+
+        resp = self.client.post(
+            reverse('order_mark_delivered', kwargs={'order_id': order.id}),
+            {'ship_tracking': ''}
+        )
+        self.assertEqual(resp.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'confirmed')
+
+    def test_order_mark_returned_should_require_return_tracking_number(self):
+        order = Order.objects.create(
+            customer_name='归还必填客户',
+            customer_phone='13500000011',
+            delivery_address='地址11',
+            event_date=date.today() + timedelta(days=2),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+
+        resp = self.client.post(
+            reverse('order_mark_returned', kwargs={'order_id': order.id}),
+            {'return_tracking': '', 'balance_paid': '0'}
+        )
+        self.assertEqual(resp.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'delivered')
+
+    def test_order_detail_should_include_finance_transactions(self):
+        order = Order.objects.create(
+            customer_name='详情财务',
+            customer_phone='13500009999',
+            delivery_address='详情地址',
+            event_date=date.today() + timedelta(days=2),
+            rental_days=1,
+            status='pending',
+            total_amount=Decimal('200.00'),
+            balance=Decimal('200.00'),
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('200.00'),
+        )
+        OrderService.confirm_order(order.id, Decimal('80.00'), self.user)
+        resp = self.client.get(reverse('order_detail', kwargs={'order_id': order.id}))
+        self.assertEqual(resp.status_code, 200)
+        txs = list(resp.context['finance_transactions'])
+        self.assertGreaterEqual(len(txs), 1)
+        self.assertEqual(txs[0].transaction_type, 'deposit_received')
+        self.assertEqual(resp.context['expected_deposit_total'], Decimal('80.00'))
+
+    def test_orders_list_should_use_configured_default_page_size(self):
+        SystemSettings.objects.update_or_create(key='page_size_default', defaults={'value': '2'})
+        for idx in range(3):
+            order = Order.objects.create(
+                customer_name=f'分页客户{idx}',
+                customer_phone=f'1390000000{idx}',
+                delivery_address='分页地址',
+                event_date=date.today() + timedelta(days=idx + 1),
+                rental_days=1,
+                status='pending',
+                created_by=self.user,
+            )
+            OrderItem.objects.create(
+                order=order,
+                sku=self.sku,
+                quantity=1,
+                rental_price=self.sku.rental_price,
+                deposit=self.sku.deposit,
+                subtotal=self.sku.rental_price,
+            )
+
+        resp = self.client.get(reverse('orders_list'))
+        self.assertEqual(resp.status_code, 200)
+        page = resp.context['orders_page']
+        self.assertEqual(page.paginator.per_page, 2)
+        self.assertEqual(len(page.object_list), 2)
+
+    def test_orders_list_should_compute_shipping_timeliness_and_sort_by_risk(self):
+        today = timezone.localdate()
+        overdue = Order.objects.create(
+            customer_name='超时单',
+            customer_phone='13910000001',
+            delivery_address='A地址',
+            event_date=today + timedelta(days=1),
+            ship_date=today - timedelta(days=1),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        warning = Order.objects.create(
+            customer_name='预警单',
+            customer_phone='13910000002',
+            delivery_address='B地址',
+            event_date=today + timedelta(days=6),
+            ship_date=today + timedelta(days=3),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        normal = Order.objects.create(
+            customer_name='正常单',
+            customer_phone='13910000003',
+            delivery_address='C地址',
+            event_date=today + timedelta(days=15),
+            ship_date=today + timedelta(days=10),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        shipped = Order.objects.create(
+            customer_name='已发货单',
+            customer_phone='13910000004',
+            delivery_address='D地址',
+            event_date=today - timedelta(days=1),
+            ship_date=today - timedelta(days=3),
+            rental_days=1,
+            status='delivered',
+            ship_tracking='SF123456',
+            created_by=self.user,
+        )
+        for o in [overdue, warning, normal, shipped]:
+            OrderItem.objects.create(
+                order=o,
+                sku=self.sku,
+                quantity=1,
+                rental_price=self.sku.rental_price,
+                deposit=self.sku.deposit,
+                subtotal=self.sku.rental_price,
+            )
+
+        resp = self.client.get(reverse('orders_list'))
+        self.assertEqual(resp.status_code, 200)
+        rows = list(resp.context['orders_page'].object_list)
+        order_codes = [r.shipping_timeliness_code for r in rows[:4]]
+        self.assertEqual(order_codes, ['overdue', 'warning', 'normal', 'shipped'])
+        self.assertEqual(rows[0].shipping_timeliness_label, '🔴 已超时，请尽快发货')
+        self.assertEqual(rows[1].shipping_timeliness_label, '🟠 即将超时（7天内）')
+        self.assertEqual(rows[3].shipping_remaining_days, 0)
+
+    def test_orders_list_should_support_sla_filter(self):
+        today = timezone.localdate()
+        overdue = Order.objects.create(
+            customer_name='超时筛选',
+            customer_phone='13920000001',
+            delivery_address='A地址',
+            event_date=today + timedelta(days=1),
+            ship_date=today - timedelta(days=2),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        shipped = Order.objects.create(
+            customer_name='发货筛选',
+            customer_phone='13920000002',
+            delivery_address='B地址',
+            event_date=today - timedelta(days=1),
+            ship_date=today - timedelta(days=3),
+            rental_days=1,
+            status='delivered',
+            ship_tracking='YT123456',
+            created_by=self.user,
+        )
+        for o in [overdue, shipped]:
+            OrderItem.objects.create(
+                order=o,
+                sku=self.sku,
+                quantity=1,
+                rental_price=self.sku.rental_price,
+                deposit=self.sku.deposit,
+                subtotal=self.sku.rental_price,
+            )
+
+        resp = self.client.get(reverse('orders_list') + '?sla=overdue')
+        self.assertEqual(resp.status_code, 200)
+        rows = list(resp.context['orders_page'].object_list)
+        self.assertTrue(rows)
+        self.assertTrue(all(r.shipping_timeliness_code == 'overdue' for r in rows))
+
     def test_order_mark_returned_should_block_for_transfer_source_order(self):
         source_order = Order.objects.create(
             customer_name='来源客户',
@@ -1136,6 +1538,12 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(source_order.status, 'delivered')
         self.assertNotEqual(source_order.return_tracking, 'RET-BLOCK')
 
+        detail_resp = self.client.get(reverse('order_detail', kwargs={'order_id': source_order.id}))
+        self.assertEqual(detail_resp.status_code, 200)
+        self.assertContains(detail_resp, '来源单占用')
+        self.assertContains(detail_resp, '是（1）')
+        self.assertContains(detail_resp, '转寄中心操作（来源占用中）')
+
     def test_workbench_confirm_auto_deliver(self):
         order = Order.objects.create(
             customer_name='自动发货客户',
@@ -1178,7 +1586,162 @@ class CoreViewsFlowTestCase(TestCase):
         )
         self.assertEqual(resp.status_code, 302)
         order.refresh_from_db()
-        self.assertEqual(order.status, 'completed')
+        self.assertEqual(order.status, 'delivered')
+
+    def test_order_mark_completed_should_only_allow_returned_status(self):
+        order = Order.objects.create(
+            customer_name='待完成客户',
+            customer_phone='13500000011',
+            delivery_address='地址4',
+            event_date=date.today() + timedelta(days=2),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+        )
+
+        resp = self.client.post(reverse('order_mark_completed', kwargs={'order_id': order.id}))
+        self.assertEqual(resp.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'confirmed')
+
+    def test_order_detail_should_hide_mark_completed_without_action_permission(self):
+        cs = User.objects.create_user(
+            username='flow_customer_service_returned',
+            password='test123',
+            role='customer_service',
+            is_staff=True,
+        )
+        order = Order.objects.create(
+            customer_name='详情权限客户',
+            customer_phone='13500000021',
+            delivery_address='地址6',
+            event_date=date.today() + timedelta(days=2),
+            rental_days=1,
+            status='returned',
+            created_by=self.user,
+        )
+        client = Client()
+        client.login(username='flow_customer_service_returned', password='test123')
+
+        resp = client.get(reverse('order_detail', kwargs={'order_id': order.id}))
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, '标记完成')
+
+    def test_orders_list_should_hide_mark_completed_without_action_permission(self):
+        cs = User.objects.create_user(
+            username='flow_customer_service_returned_list',
+            password='test123',
+            role='customer_service',
+            is_staff=True,
+        )
+        order = Order.objects.create(
+            customer_name='列表权限客户',
+            customer_phone='13500000022',
+            delivery_address='地址7',
+            event_date=date.today() + timedelta(days=2),
+            rental_days=1,
+            status='returned',
+            created_by=self.user,
+        )
+        client = Client()
+        client.login(username='flow_customer_service_returned_list', password='test123')
+
+        resp = client.get(reverse('orders_list'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, f"markCompleted({order.id},")
+
+    def test_orders_list_should_support_returned_status_filter(self):
+        returned_order = Order.objects.create(
+            customer_name='已归还筛选客户',
+            customer_phone='13500000023',
+            delivery_address='地址8',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='returned',
+            created_by=self.user,
+        )
+        pending_order = Order.objects.create(
+            customer_name='待处理筛选客户',
+            customer_phone='13500000024',
+            delivery_address='地址9',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+
+        resp = self.client.get(reverse('orders_list'), {'status': 'returned'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, returned_order.order_no)
+        self.assertNotContains(resp, pending_order.order_no)
+        self.assertContains(resp, '<option value="returned" selected>已归还</option>', html=True)
+
+    def test_orders_list_should_support_wechat_and_xianyu_keyword_search(self):
+        target_order = Order.objects.create(
+            customer_name='微信闲鱼客户',
+            customer_phone='18800000001',
+            customer_wechat='wx-search-001',
+            xianyu_order_no='xy-order-001',
+            delivery_address='地址10',
+            event_date=date.today() + timedelta(days=4),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        other_order = Order.objects.create(
+            customer_name='普通客户',
+            customer_phone='18800000002',
+            customer_wechat='wx-other-002',
+            xianyu_order_no='xy-other-002',
+            delivery_address='地址11',
+            event_date=date.today() + timedelta(days=5),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+
+        resp_wechat = self.client.get(reverse('orders_list'), {'keyword': 'wx-search-001'})
+        self.assertEqual(resp_wechat.status_code, 200)
+        self.assertContains(resp_wechat, target_order.order_no)
+        self.assertNotContains(resp_wechat, other_order.order_no)
+
+        resp_xianyu = self.client.get(reverse('orders_list'), {'keyword': 'xy-order-001'})
+        self.assertEqual(resp_xianyu.status_code, 200)
+        self.assertContains(resp_xianyu, target_order.order_no)
+        self.assertNotContains(resp_xianyu, other_order.order_no)
+
+    def test_purchase_orders_nav_should_not_activate_orders_menu(self):
+        resp = self.client.get(reverse('purchase_orders_list'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '<a href="/procurement/purchase-orders/" class="nav-item active">', html=False)
+        self.assertContains(resp, '<a href="/orders/" class="nav-item ">')
+
+    def test_customer_service_should_not_confirm_order_without_action_permission(self):
+        cs = User.objects.create_user(
+            username='flow_customer_service',
+            password='test123',
+            role='customer_service',
+            is_staff=True,
+        )
+        order = Order.objects.create(
+            customer_name='客服确认客户',
+            customer_phone='13500000012',
+            delivery_address='地址5',
+            event_date=date.today() + timedelta(days=2),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        client = Client()
+        client.login(username='flow_customer_service', password='test123')
+
+        resp = client.post(
+            reverse('order_mark_confirmed', kwargs={'order_id': order.id}),
+            {'deposit_paid': '80'},
+        )
+        self.assertEqual(resp.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'pending')
 
     def test_purchase_order_create_with_items(self):
         resp = self.client.post(
@@ -1242,6 +1805,7 @@ class CoreViewsFlowTestCase(TestCase):
             event_date=date.today() + timedelta(days=1),
             rental_days=1,
             status='delivered',
+            deposit_paid=Decimal('80.00'),
             created_by=self.user,
             ship_date=date.today(),
             return_date=date.today() + timedelta(days=2),
@@ -1288,6 +1852,13 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(order_to.ship_tracking, 'YT-NEW-001')
         self.assertEqual(order_from.status, 'completed')
         self.assertEqual(order_from.return_tracking, 'YT-NEW-001')
+        self.assertTrue(
+            FinanceTransaction.objects.filter(
+                order=order_from,
+                transaction_type='deposit_refund',
+                amount=Decimal('80.00'),
+            ).exists()
+        )
 
     def test_transfer_complete_should_require_tracking_number(self):
         order_from = Order.objects.create(
@@ -1327,6 +1898,234 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(resp.status_code, 200)
         transfer.refresh_from_db()
         self.assertEqual(transfer.status, 'pending')
+
+    def test_transfer_complete_should_only_consume_matching_source_allocation(self):
+        source_a = Order.objects.create(
+            customer_name='来源A',
+            customer_phone='13633330001',
+            delivery_address='来源A地址',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        source_b = Order.objects.create(
+            customer_name='来源B',
+            customer_phone='13633330002',
+            delivery_address='来源B地址',
+            event_date=date.today() + timedelta(days=1),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标单',
+            customer_phone='13633330003',
+            delivery_address='目标地址',
+            event_date=date.today() + timedelta(days=7),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source_a, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        OrderItem.objects.create(order=source_b, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        OrderItem.objects.create(order=target, sku=self.sku, quantity=2, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('400.00'))
+
+        alloc_a = TransferAllocation.objects.create(
+            source_order=source_a,
+            target_order=target,
+            sku=self.sku,
+            quantity=1,
+            target_event_date=target.event_date,
+            window_start=target.event_date - timedelta(days=2),
+            window_end=target.event_date + timedelta(days=2),
+            status='locked',
+            created_by=self.user,
+        )
+        alloc_b = TransferAllocation.objects.create(
+            source_order=source_b,
+            target_order=target,
+            sku=self.sku,
+            quantity=1,
+            target_event_date=target.event_date,
+            window_start=target.event_date - timedelta(days=2),
+            window_end=target.event_date + timedelta(days=2),
+            status='locked',
+            created_by=self.user,
+        )
+
+        transfer = Transfer.objects.create(
+            order_from=source_a,
+            order_to=target,
+            sku=self.sku,
+            quantity=1,
+            gap_days=3,
+            cost_saved=Decimal('100.00'),
+            status='pending',
+            created_by=self.user,
+        )
+
+        self.client.post(
+            reverse('transfer_complete', kwargs={'transfer_id': transfer.id}),
+            {'tracking_no': 'YT-CONSUME-001'},
+            follow=True
+        )
+
+        alloc_a.refresh_from_db()
+        alloc_b.refresh_from_db()
+        self.assertEqual(alloc_a.status, 'consumed')
+        self.assertEqual(alloc_b.status, 'locked')
+
+    def test_transfer_complete_should_split_allocation_when_partial_consume(self):
+        source = Order.objects.create(
+            customer_name='来源拆分',
+            customer_phone='13644440001',
+            delivery_address='来源拆分地址',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标拆分',
+            customer_phone='13644440002',
+            delivery_address='目标拆分地址',
+            event_date=date.today() + timedelta(days=7),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source, sku=self.sku, quantity=2, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('400.00'))
+        OrderItem.objects.create(order=target, sku=self.sku, quantity=2, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('400.00'))
+
+        TransferAllocation.objects.create(
+            source_order=source,
+            target_order=target,
+            sku=self.sku,
+            quantity=2,
+            target_event_date=target.event_date,
+            window_start=target.event_date - timedelta(days=2),
+            window_end=target.event_date + timedelta(days=2),
+            status='locked',
+            created_by=self.user,
+        )
+        transfer = Transfer.objects.create(
+            order_from=source,
+            order_to=target,
+            sku=self.sku,
+            quantity=1,
+            gap_days=3,
+            cost_saved=Decimal('100.00'),
+            status='pending',
+            created_by=self.user,
+        )
+
+        self.client.post(
+            reverse('transfer_complete', kwargs={'transfer_id': transfer.id}),
+            {'tracking_no': 'YT-SPLIT-001'},
+            follow=True
+        )
+
+        consumed_qty = TransferAllocation.objects.filter(
+            source_order=source,
+            target_order=target,
+            sku=self.sku,
+            status='consumed',
+        ).aggregate(total=Sum('quantity'))['total'] or 0
+        locked_qty = TransferAllocation.objects.filter(
+            source_order=source,
+            target_order=target,
+            sku=self.sku,
+            status='locked',
+        ).aggregate(total=Sum('quantity'))['total'] or 0
+        self.assertEqual(int(consumed_qty), 1)
+        self.assertEqual(int(locked_qty), 1)
+
+    def test_consistency_check_should_report_legacy_stock_mismatch(self):
+        result = run_data_consistency_checks()
+        self.assertGreaterEqual(result['warning_count'], 1)
+        self.assertTrue(
+            any(
+                i.get('type') == 'legacy_stock_mismatch'
+                and i.get('meta', {}).get('sku_id') == self.sku.id
+                for i in result['issues']
+            )
+        )
+
+    def test_consistency_check_should_report_transfer_locked_shortage(self):
+        source = Order.objects.create(
+            customer_name='巡检来源',
+            customer_phone='13910000001',
+            delivery_address='巡检来源地址',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='巡检目标',
+            customer_phone='13910000002',
+            delivery_address='巡检目标地址',
+            event_date=date.today() + timedelta(days=6),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source, sku=self.sku, quantity=2, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        OrderItem.objects.create(order=target, sku=self.sku, quantity=2, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        Transfer.objects.create(
+            order_from=source,
+            order_to=target,
+            sku=self.sku,
+            quantity=2,
+            gap_days=6,
+            cost_saved=Decimal('100.00'),
+            status='pending',
+            created_by=self.user,
+        )
+        TransferAllocation.objects.create(
+            source_order=source,
+            target_order=target,
+            sku=self.sku,
+            quantity=1,
+            target_event_date=target.event_date,
+            window_start=target.event_date - timedelta(days=2),
+            window_end=target.event_date + timedelta(days=2),
+            status='locked',
+            created_by=self.user,
+        )
+
+        result = run_data_consistency_checks()
+        self.assertGreaterEqual(result['error_count'], 1)
+        self.assertTrue(
+            any(i.get('type') == 'transfer_locked_shortage' for i in result['issues'])
+        )
+
+    def test_consistency_check_should_report_finance_reconciliation_mismatch(self):
+        order = Order.objects.create(
+            customer_name='巡检财务客户',
+            customer_phone='13910000003',
+            delivery_address='巡检财务地址',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            total_amount=Decimal('200.00'),
+            deposit_paid=Decimal('100.00'),
+            balance=Decimal('0.00'),
+            status='completed',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=Decimal('200.00'),
+            deposit=Decimal('100.00'),
+            subtotal=Decimal('200.00'),
+        )
+
+        result = run_data_consistency_checks()
+        self.assertTrue(any(i.get('type') == 'finance_reconciliation_mismatch' for i in result['issues']))
+        self.assertGreaterEqual(int((result.get('type_counts') or {}).get('finance_reconciliation_mismatch', 0)), 1)
 
     def test_transfer_recommend_should_skip_when_pending_task_exists(self):
         source = Order.objects.create(
@@ -1420,6 +2219,49 @@ class CoreViewsFlowTestCase(TestCase):
                 order_to=target,
                 sku=self.sku,
                 status='pending'
+            ).exists()
+        )
+
+    def test_transfer_recommend_for_delivered_order_should_create_risk_event_when_source_changed(self):
+        source = Order.objects.create(
+            customer_name='来源风险',
+            customer_phone='13600006666',
+            delivery_address='广东省广州市天河区',
+            event_date=date.today(),
+            rental_days=1,
+            status='completed',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标风险',
+            customer_phone='13600007777',
+            delivery_address='广东省广州市越秀区',
+            event_date=date.today() + timedelta(days=7),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        OrderItem.objects.create(order=target, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        TransferAllocation.objects.create(
+            source_order=source,
+            target_order=target,
+            sku=self.sku,
+            quantity=1,
+            target_event_date=target.event_date,
+            window_start=target.event_date - timedelta(days=5),
+            window_end=target.event_date + timedelta(days=5),
+            status='locked',
+            created_by=self.user,
+        )
+
+        resp = self.client.post(reverse('transfer_recommend'), {'rows[]': [f'{target.id}:{self.sku.id}']})
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(
+            RiskEvent.objects.filter(
+                event_type='delivered_recommend_change',
+                order=target,
+                status='open',
             ).exists()
         )
 
@@ -1605,6 +2447,49 @@ class CoreViewsFlowTestCase(TestCase):
             Transfer.objects.filter(order_to=target, sku=self.sku).count(),
             1
         )
+        messages_list = [m.message for m in resp.context['messages']]
+        self.assertTrue(any('已存在转寄任务（待执行或已完成）' in m for m in messages_list))
+
+    def test_transfer_recommend_should_warn_when_completed_task_exists(self):
+        source = Order.objects.create(
+            customer_name='来源RC',
+            customer_phone='13640000001',
+            delivery_address='广东省广州市天河区',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标RC',
+            customer_phone='13640000002',
+            delivery_address='广东省广州市越秀区',
+            event_date=date.today() + timedelta(days=8),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(order=source, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        OrderItem.objects.create(order=target, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('200.00'))
+        Transfer.objects.create(
+            order_from=source,
+            order_to=target,
+            sku=self.sku,
+            quantity=1,
+            gap_days=8,
+            cost_saved=Decimal('100.00'),
+            status='completed',
+            created_by=self.user,
+        )
+
+        resp = self.client.post(
+            reverse('transfer_recommend'),
+            {'rows[]': [f'{target.id}:{self.sku.id}']},
+            follow=True
+        )
+        self.assertEqual(resp.status_code, 200)
+        messages_list = [m.message for m in resp.context['messages']]
+        self.assertTrue(any('已存在转寄任务（待执行或已完成），不可重推' in m for m in messages_list))
 
     def test_transfer_generate_tasks_should_switch_to_recommended_source_before_create_task(self):
         source_current = Order.objects.create(
@@ -1796,6 +2681,33 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(target_row.transfer_allocations_display[0]['order_no'], source.order_no)
         self.assertEqual(target_row.transfer_allocations_display[0]['quantity'], 1)
 
+    def test_orders_and_dashboard_should_render_returned_status_label(self):
+        returned_order = Order.objects.create(
+            customer_name='归还状态客户',
+            customer_phone='18900000003',
+            delivery_address='广东省深圳市南山区科技园2号',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='returned',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=returned_order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('200.00'),
+        )
+
+        list_resp = self.client.get(reverse('orders_list'), {'status': 'returned'})
+        self.assertEqual(list_resp.status_code, 200)
+        self.assertContains(list_resp, '<span class="badge text-bg-info">已归还</span>', html=True)
+
+        dashboard_resp = self.client.get(reverse('dashboard'))
+        self.assertEqual(dashboard_resp.status_code, 200)
+        self.assertContains(dashboard_resp, '<span class="badge text-bg-info">已归还</span>', html=True)
+
     def test_dashboard_should_render_role_risk_entries_and_quick_actions(self):
         resp = self.client.get(reverse('dashboard'))
         self.assertEqual(resp.status_code, 200)
@@ -1803,6 +2715,348 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertTrue(any(item['url_name'] == 'order_create' for item in role_dashboard['quick_actions']))
         self.assertTrue(any(item['key'] == 'pending_orders' for item in role_dashboard['risk_entries']))
         self.assertTrue(any(item['key'] == 'low_stock_parts' and item['query'] == 'low=1' for item in role_dashboard['risk_entries']))
+        self.assertTrue(any(card['key'] == 'pending_orders' and card.get('url_name') == 'orders_list' for card in role_dashboard['focus_cards']))
+        self.assertTrue(any(card['key'] == 'due_within_7_days_count' and card.get('query') == 'sla=warning' for card in role_dashboard['focus_cards']))
+        self.assertTrue(any(k['key'] == 'fulfillment_rate' for k in role_dashboard.get('kpi_entries', [])))
+
+    def test_dashboard_should_support_admin_view_role_switch(self):
+        unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='TEST-DASH-0001',
+            status='in_warehouse',
+            is_active=True,
+        )
+        maintenance = MaintenanceWorkOrder.objects.create(
+            unit=unit,
+            sku=self.sku,
+            issue_desc='待处理维修',
+            status='draft',
+            created_by=self.user,
+        )
+        disposal = UnitDisposalOrder.objects.create(
+            action_type='disassemble',
+            unit=unit,
+            sku=self.sku,
+            status='completed',
+            created_by=self.user,
+            completed_by=self.user,
+        )
+        disposal_item = UnitDisposalOrderItem.objects.create(
+            disposal_order=disposal,
+            part=self.part,
+            quantity=1,
+            returned_quantity=0,
+        )
+        PartRecoveryInspection.objects.create(
+            disposal_order=disposal,
+            disposal_item=disposal_item,
+            unit=unit,
+            sku=self.sku,
+            part=self.part,
+            quantity=1,
+            status='pending',
+        )
+        PartRecoveryInspection.objects.create(
+            disposal_order=disposal,
+            disposal_item=disposal_item,
+            unit=unit,
+            sku=self.sku,
+            part=self.part,
+            quantity=1,
+            status='repair',
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part,
+            expected_quantity=1,
+            actual_quantity=0,
+            status='missing',
+            is_active=True,
+        )
+
+        resp = self.client.get(reverse('dashboard') + '?view_role=warehouse_staff')
+        self.assertEqual(resp.status_code, 200)
+        role_dashboard = resp.context['role_dashboard']
+        self.assertEqual(role_dashboard['role'], 'warehouse_staff')
+        self.assertEqual(role_dashboard['view_type'], 'warehouse')
+        self.assertTrue(any(card['key'] == 'warehouse_available_stock' for card in role_dashboard['focus_cards']))
+        self.assertTrue(any(card['key'] == 'pending_recovery_inspections' and card['value'] == 1 for card in role_dashboard['focus_cards']))
+        self.assertTrue(any(card['key'] == 'repair_recovery_inspections' and card['value'] == 1 for card in role_dashboard['focus_cards']))
+        self.assertTrue(any(card['key'] == 'draft_maintenance_work_orders' and card['value'] == 1 for card in role_dashboard['focus_cards']))
+        self.assertTrue(role_dashboard['warehouse_insights'])
+        self.assertTrue(any(panel['title'] == '高频异常部件' for panel in role_dashboard['warehouse_insights']))
+        self.assertTrue(any(panel['title'] == '回件待处理焦点' for panel in role_dashboard['warehouse_insights']))
+        first_item = role_dashboard['warehouse_insights'][0]['items'][0]
+        self.assertEqual(first_item['url_name'], 'warehouse_reports')
+        self.assertIn('part_id=', first_item['query'])
+        self.assertEqual(first_item['detail_url_name'], 'part_issue_pool')
+
+    def test_warehouse_reports_should_render_summary_metrics(self):
+        unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='TEST-REPORT-0001',
+            status='in_warehouse',
+            is_active=True,
+        )
+        assembly = AssemblyOrder.objects.create(
+            sku=self.sku,
+            quantity=2,
+            status='completed',
+            created_by=self.user,
+            completed_at=timezone.now(),
+        )
+        disposal = UnitDisposalOrder.objects.create(
+            action_type='disassemble',
+            unit=unit,
+            sku=self.sku,
+            status='completed',
+            created_by=self.user,
+            completed_by=self.user,
+            completed_at=timezone.now(),
+        )
+        disposal_item = UnitDisposalOrderItem.objects.create(
+            disposal_order=disposal,
+            part=self.part,
+            quantity=1,
+            returned_quantity=0,
+        )
+        PartRecoveryInspection.objects.create(
+            disposal_order=disposal,
+            disposal_item=disposal_item,
+            unit=unit,
+            sku=self.sku,
+            part=self.part,
+            quantity=1,
+            status='pending',
+        )
+        work_order = MaintenanceWorkOrder.objects.create(
+            unit=unit,
+            sku=self.sku,
+            issue_desc='报表测试维修',
+            status='draft',
+            created_by=self.user,
+        )
+        MaintenanceWorkOrderItem.objects.create(
+            work_order=work_order,
+            old_part=self.part,
+            new_part=self.part,
+            replace_quantity=2,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part,
+            expected_quantity=2,
+            actual_quantity=1,
+            status='damaged',
+            is_active=True,
+        )
+
+        resp = self.client.get(reverse('warehouse_reports'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '仓储报表')
+        self.assertContains(resp, '高频损耗部件')
+        self.assertContains(resp, self.part.name)
+        self.assertContains(resp, reverse('part_issue_pool'))
+        self.assertContains(resp, reverse('maintenance_work_orders_list'))
+        self.assertContains(resp, reverse('part_recovery_inspections_list'))
+        summary = resp.context['summary']
+        self.assertEqual(summary['assembly_completed'], 1)
+        self.assertEqual(summary['maintenance_draft'], 1)
+        self.assertEqual(summary['disposal_completed'], 1)
+        self.assertEqual(summary['recovery_pending'], 1)
+
+    def test_warehouse_reports_should_support_sku_and_part_filters(self):
+        other_sku = SKU.objects.create(
+            code='SKU-REPORT-OTHER',
+            name='其他报表套餐',
+            category='主题套餐',
+            rental_price=Decimal('99.00'),
+            deposit=Decimal('20.00'),
+            stock=0,
+            is_active=True,
+        )
+        other_part = Part.objects.create(
+            name='其他部件',
+            spec='X1',
+            category='accessory',
+            unit='个',
+            current_stock=5,
+            safety_stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='TEST-REPORT-FILTER-0001',
+            status='in_warehouse',
+            is_active=True,
+        )
+        other_unit = InventoryUnit.objects.create(
+            sku=other_sku,
+            unit_no='TEST-REPORT-FILTER-0002',
+            status='in_warehouse',
+            is_active=True,
+        )
+        assembly_other = AssemblyOrder.objects.create(sku=other_sku, quantity=1, status='completed', created_by=self.user, completed_at=timezone.now())
+        assembly_self = AssemblyOrder.objects.create(sku=self.sku, quantity=1, status='completed', created_by=self.user, completed_at=timezone.now())
+        AssemblyOrderItem.objects.create(
+            assembly_order=assembly_self,
+            part=self.part,
+            quantity_per_set=1,
+            required_quantity=1,
+            deducted_quantity=1,
+        )
+        AssemblyOrderItem.objects.create(
+            assembly_order=assembly_other,
+            part=other_part,
+            quantity_per_set=1,
+            required_quantity=1,
+            deducted_quantity=1,
+        )
+        maintenance_self = MaintenanceWorkOrder.objects.create(unit=unit, sku=self.sku, issue_desc='当前SKU维修', status='draft', created_by=self.user)
+        maintenance_other = MaintenanceWorkOrder.objects.create(unit=other_unit, sku=other_sku, issue_desc='其他SKU维修', status='draft', created_by=self.user)
+        MaintenanceWorkOrderItem.objects.create(
+            work_order=maintenance_self,
+            old_part=self.part,
+            new_part=self.part,
+            replace_quantity=1,
+        )
+        MaintenanceWorkOrderItem.objects.create(
+            work_order=maintenance_other,
+            old_part=other_part,
+            new_part=other_part,
+            replace_quantity=1,
+        )
+        InventoryUnitPart.objects.create(unit=unit, part=self.part, expected_quantity=1, actual_quantity=0, status='missing', is_active=True)
+        InventoryUnitPart.objects.create(unit=other_unit, part=other_part, expected_quantity=1, actual_quantity=0, status='missing', is_active=True)
+
+        resp = self.client.get(reverse('warehouse_reports'), {'sku_id': str(self.sku.id), 'part_id': str(self.part.id), 'range': '7'})
+        self.assertEqual(resp.status_code, 200)
+        summary = resp.context['summary']
+        self.assertEqual(summary['assembly_completed'], 1)
+        self.assertEqual(summary['maintenance_draft'], 1)
+        self.assertEqual(list(resp.context['issue_top_parts'].values_list('id', flat=True)), [self.part.id])
+
+    def test_warehouse_reports_export_should_return_csv(self):
+        resp = self.client.get(reverse('warehouse_reports_export') + '?range=7')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('text/csv', resp['Content-Type'])
+        body = resp.content.decode('utf-8-sig')
+        self.assertIn('模块,指标,日期,值', body)
+        self.assertIn('汇总,累计完成装配', body)
+
+    def test_warehouse_reports_export_should_respect_sku_and_part_filters(self):
+        AssemblyOrder.objects.create(sku=self.sku, quantity=1, status='completed', created_by=self.user, completed_at=timezone.now())
+        resp = self.client.get(reverse('warehouse_reports_export'), {'range': '7', 'sku_id': str(self.sku.id), 'part_id': str(self.part.id)})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.content.decode('utf-8-sig')
+        self.assertIn(f'筛选条件,SKU,{self.sku.code}', body)
+        self.assertIn(f'筛选条件,部件,{self.part.name}', body)
+
+    def test_risk_events_list_and_resolve_should_work(self):
+        event = RiskEvent.objects.create(
+            event_type='frequent_cancel',
+            level='medium',
+            status='open',
+            module='订单',
+            title='测试风险事件',
+            description='待关闭',
+            detected_by=self.user,
+        )
+        resp = self.client.get(reverse('risk_events_list'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '测试风险事件')
+
+        resp2 = self.client.post(
+            reverse('risk_event_resolve', kwargs={'event_id': event.id}),
+            {'note': '已处理'},
+            follow=True
+        )
+        self.assertEqual(resp2.status_code, 200)
+        event.refresh_from_db()
+        self.assertEqual(event.status, 'closed')
+        self.assertTrue(
+            AuditLog.objects.filter(module='风险事件', target=f'风险事件#{event.id}').exists()
+        )
+
+    def test_risk_event_claim_should_set_processing_and_assignee(self):
+        event = RiskEvent.objects.create(
+            event_type='frequent_cancel',
+            level='medium',
+            status='open',
+            module='订单',
+            title='待认领风险事件',
+            description='待处理',
+            detected_by=self.user,
+        )
+        resp = self.client.post(
+            reverse('risk_event_claim', kwargs={'event_id': event.id}),
+            {'note': '我来跟进'},
+            follow=True
+        )
+        self.assertEqual(resp.status_code, 200)
+        event.refresh_from_db()
+        self.assertEqual(event.status, 'processing')
+        self.assertEqual(event.assignee_id, self.user.id)
+        self.assertIn('我来跟进', event.processing_note)
+        self.assertTrue(
+            AuditLog.objects.filter(module='风险事件', target=f'风险事件#{event.id}', action='update').exists()
+        )
+
+    def test_risk_event_claim_closed_should_keep_closed(self):
+        event = RiskEvent.objects.create(
+            event_type='frequent_cancel',
+            level='medium',
+            status='closed',
+            module='订单',
+            title='已关闭风险事件',
+            description='done',
+            detected_by=self.user,
+        )
+        resp = self.client.post(
+            reverse('risk_event_claim', kwargs={'event_id': event.id}),
+            {'note': '尝试认领'},
+            follow=True
+        )
+        self.assertEqual(resp.status_code, 200)
+        event.refresh_from_db()
+        self.assertEqual(event.status, 'closed')
+
+    def test_risk_events_list_should_support_mine_only_and_export(self):
+        other = User.objects.create_user(
+            username='risk_other',
+            password='test123',
+            role='manager',
+            is_staff=True,
+        )
+        mine = RiskEvent.objects.create(
+            event_type='frequent_cancel',
+            level='medium',
+            status='processing',
+            module='订单',
+            title='我负责事件',
+            assignee=self.user,
+            detected_by=self.user,
+        )
+        RiskEvent.objects.create(
+            event_type='frequent_cancel',
+            level='medium',
+            status='processing',
+            module='订单',
+            title='他人负责事件',
+            assignee=other,
+            detected_by=self.user,
+        )
+        resp = self.client.get(reverse('risk_events_list') + '?mine_only=1')
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, mine.title)
+        self.assertNotContains(resp, '他人负责事件')
+
+        export_resp = self.client.get(reverse('risk_events_list') + '?mine_only=1&export=1')
+        self.assertEqual(export_resp.status_code, 200)
+        self.assertIn('text/csv', export_resp['Content-Type'])
+        content = export_resp.content.decode('utf-8-sig')
+        self.assertIn('我负责事件', content)
+        self.assertNotIn('他人负责事件', content)
 
     def test_parts_inventory_low_filter_should_only_return_low_stock_parts(self):
         low_part = Part.objects.create(
@@ -1880,6 +3134,334 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertIn('健康等级', content)
         self.assertIn(unit.unit_no, content)
 
+    def test_outbound_inventory_dashboard_should_include_part_summary(self):
+        SKUComponent.objects.create(sku=self.sku, part=self.part, quantity_per_set=2)
+        unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKUFLOW0001-0003',
+            status='in_transit',
+            current_location_type='transit',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part,
+            expected_quantity=2,
+            actual_quantity=1,
+            status='missing',
+            is_active=True,
+        )
+        resp = self.client.get(reverse('outbound_inventory_dashboard'))
+        self.assertEqual(resp.status_code, 200)
+        units = list(resp.context['units_page'].object_list)
+        target = next((u for u in units if u.id == unit.id), None)
+        self.assertIsNotNone(target)
+        self.assertEqual(target.part_summary['total'], 1)
+        self.assertEqual(target.part_summary['missing'], 1)
+        self.assertEqual(target.part_summary['issue'], 1)
+
+    def test_outbound_inventory_dashboard_should_warn_when_part_issue_exists(self):
+        unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKUFLOW0001-0005',
+            status='in_transit',
+            current_location_type='transit',
+            is_active=True,
+        )
+        UnitMovement.objects.create(
+            unit=unit,
+            event_type='TRANSFER_SHIPPED',
+            status='normal',
+            notes='部件异常预警测试',
+            operator=self.user,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part,
+            expected_quantity=1,
+            actual_quantity=0,
+            status='missing',
+            is_active=True,
+        )
+
+        resp = self.client.get(reverse('outbound_inventory_dashboard'))
+        self.assertEqual(resp.status_code, 200)
+        units = list(resp.context['units_page'].object_list)
+        target = next((u for u in units if u.id == unit.id), None)
+        self.assertIsNotNone(target)
+        self.assertIn('部件异常1项', target.warn_reason)
+        self.assertLess(target.health_score, 100)
+
+    def test_outbound_inventory_unit_parts_update_should_persist(self):
+        unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKUFLOW0001-0004',
+            status='in_transit',
+            current_location_type='transit',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part,
+            expected_quantity=1,
+            actual_quantity=1,
+            status='normal',
+            is_active=True,
+        )
+        resp = self.client.post(
+            reverse('outbound_inventory_unit_parts_update', kwargs={'unit_id': unit.id}),
+            {
+                'part_id[]': [str(self.part.id)],
+                'status[]': ['damaged'],
+                'actual_quantity[]': ['0'],
+                'notes[]': ['破损'],
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        row = InventoryUnitPart.objects.get(unit=unit, part=self.part)
+        self.assertEqual(row.status, 'damaged')
+        self.assertEqual(row.actual_quantity, 0)
+        self.assertEqual(row.notes, '破损')
+        self.assertIsNotNone(row.last_checked_at)
+        self.assertTrue(
+            AuditLog.objects.filter(module='在外库存', target=unit.unit_no, action='update').exists()
+        )
+
+    def test_outbound_inventory_dashboard_part_issue_only_filter(self):
+        healthy_unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKUFLOW0001-0006',
+            status='in_transit',
+            current_location_type='transit',
+            is_active=True,
+        )
+        issue_unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKUFLOW0001-0007',
+            status='in_transit',
+            current_location_type='transit',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=healthy_unit,
+            part=self.part,
+            expected_quantity=1,
+            actual_quantity=1,
+            status='normal',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=issue_unit,
+            part=self.part,
+            expected_quantity=1,
+            actual_quantity=0,
+            status='missing',
+            is_active=True,
+        )
+
+        resp = self.client.get(reverse('outbound_inventory_dashboard') + '?part_issue_only=1')
+        self.assertEqual(resp.status_code, 200)
+        rows = list(resp.context['units_page'].object_list)
+        ids = [u.id for u in rows]
+        self.assertIn(issue_unit.id, ids)
+        self.assertNotIn(healthy_unit.id, ids)
+
+    def test_part_issue_pool_should_list_anomalies_and_draft_maintenance(self):
+        damaged_unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKUFLOW0001-0010',
+            status='in_transit',
+            current_location_type='customer',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=damaged_unit,
+            part=self.part,
+            expected_quantity=2,
+            actual_quantity=1,
+            status='damaged',
+            notes='灯串损坏',
+            is_active=True,
+        )
+
+        maintenance_unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKUFLOW0001-0011',
+            status='maintenance',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        draft_order = MaintenanceWorkOrder.objects.create(
+            unit=maintenance_unit,
+            sku=self.sku,
+            issue_desc='待换布幔',
+            status='draft',
+            created_by=self.user,
+        )
+        draft_order.items.create(
+            old_part=self.part,
+            new_part=self.part,
+            replace_quantity=1,
+            notes='测试待处理',
+        )
+
+        resp = self.client.get(reverse('part_issue_pool'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, damaged_unit.unit_no)
+        self.assertContains(resp, draft_order.work_order_no)
+        self.assertEqual(resp.context['summary']['issue_units'], 1)
+        self.assertEqual(resp.context['summary']['draft_maintenance'], 1)
+
+    def test_part_issue_pool_should_filter_by_status(self):
+        damaged_unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKUFLOW0001-0012',
+            status='in_transit',
+            current_location_type='customer',
+            is_active=True,
+        )
+        missing_unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKUFLOW0001-0013',
+            status='in_transit',
+            current_location_type='customer',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=damaged_unit,
+            part=self.part,
+            expected_quantity=1,
+            actual_quantity=0,
+            status='damaged',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=missing_unit,
+            part=self.part,
+            expected_quantity=1,
+            actual_quantity=0,
+            status='missing',
+            is_active=True,
+        )
+
+        resp = self.client.get(reverse('part_issue_pool') + '?status=damaged')
+        self.assertEqual(resp.status_code, 200)
+        rows = list(resp.context['anomaly_page'].object_list)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].unit_id, damaged_unit.id)
+
+    def test_part_issue_pool_should_support_sku_and_part_filters(self):
+        other_sku = SKU.objects.create(
+            code='SKU-ISSUE-OTHER',
+            name='其他异常套餐',
+            category='主题套餐',
+            rental_price=Decimal('88.00'),
+            deposit=Decimal('20.00'),
+            stock=0,
+            is_active=True,
+        )
+        other_part = Part.objects.create(
+            name='其他异常部件',
+            spec='ISSUE-1',
+            category='accessory',
+            unit='个',
+            current_stock=5,
+            safety_stock=1,
+            is_active=True,
+        )
+        damaged_unit = InventoryUnit.objects.create(sku=self.sku, unit_no='ZSY-SKUFLOW0001-0014', status='in_transit', current_location_type='customer', is_active=True)
+        other_unit = InventoryUnit.objects.create(sku=other_sku, unit_no='ZSY-SKUFLOW0001-0015', status='in_transit', current_location_type='customer', is_active=True)
+        InventoryUnitPart.objects.create(unit=damaged_unit, part=self.part, expected_quantity=1, actual_quantity=0, status='damaged', is_active=True)
+        InventoryUnitPart.objects.create(unit=other_unit, part=other_part, expected_quantity=1, actual_quantity=0, status='damaged', is_active=True)
+
+        resp = self.client.get(reverse('part_issue_pool'), {'sku_id': str(self.sku.id), 'part_id': str(self.part.id)})
+        self.assertEqual(resp.status_code, 200)
+        rows = list(resp.context['anomaly_page'].object_list)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].unit_id, damaged_unit.id)
+
+    def test_maintenance_work_orders_should_support_sku_and_part_filters(self):
+        other_sku = SKU.objects.create(
+            code='SKU-MAINT-OTHER',
+            name='其他维修套餐',
+            category='主题套餐',
+            rental_price=Decimal('88.00'),
+            deposit=Decimal('20.00'),
+            stock=0,
+            is_active=True,
+        )
+        other_part = Part.objects.create(
+            name='其他维修部件',
+            spec='M-1',
+            category='accessory',
+            unit='个',
+            current_stock=5,
+            safety_stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(sku=self.sku, unit_no='ZSY-SKUFLOW0001-0016', status='maintenance', current_location_type='warehouse', is_active=True)
+        other_unit = InventoryUnit.objects.create(sku=other_sku, unit_no='ZSY-SKUFLOW0001-0017', status='maintenance', current_location_type='warehouse', is_active=True)
+        order = MaintenanceWorkOrder.objects.create(unit=unit, sku=self.sku, issue_desc='当前部件维修', status='draft', created_by=self.user)
+        other_order = MaintenanceWorkOrder.objects.create(unit=other_unit, sku=other_sku, issue_desc='其他部件维修', status='draft', created_by=self.user)
+        order.items.create(old_part=self.part, new_part=self.part, replace_quantity=1)
+        other_order.items.create(old_part=other_part, new_part=other_part, replace_quantity=1)
+
+        resp = self.client.get(reverse('maintenance_work_orders_list'), {'sku_id': str(self.sku.id), 'part_id': str(self.part.id)})
+        self.assertEqual(resp.status_code, 200)
+        rows = list(resp.context['maintenance_orders_page'].object_list)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].id, order.id)
+
+    def test_part_recovery_inspections_should_support_sku_and_part_filters(self):
+        other_sku = SKU.objects.create(
+            code='SKU-REC-OTHER',
+            name='其他回件套餐',
+            category='主题套餐',
+            rental_price=Decimal('88.00'),
+            deposit=Decimal('20.00'),
+            stock=0,
+            is_active=True,
+        )
+        other_part = Part.objects.create(
+            name='其他回件部件',
+            spec='R-1',
+            category='accessory',
+            unit='个',
+            current_stock=5,
+            safety_stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(sku=self.sku, unit_no='ZSY-SKUFLOW0001-0018', status='in_warehouse', current_location_type='warehouse', is_active=True)
+        other_unit = InventoryUnit.objects.create(sku=other_sku, unit_no='ZSY-SKUFLOW0001-0019', status='in_warehouse', current_location_type='warehouse', is_active=True)
+        disposal = UnitDisposalOrder.objects.create(action_type='disassemble', unit=unit, sku=self.sku, status='completed', created_by=self.user, completed_by=self.user, completed_at=timezone.now())
+        other_disposal = UnitDisposalOrder.objects.create(action_type='disassemble', unit=other_unit, sku=other_sku, status='completed', created_by=self.user, completed_by=self.user, completed_at=timezone.now())
+        disposal_item = UnitDisposalOrderItem.objects.create(disposal_order=disposal, part=self.part, quantity=1, returned_quantity=0)
+        other_item = UnitDisposalOrderItem.objects.create(disposal_order=other_disposal, part=other_part, quantity=1, returned_quantity=0)
+        PartRecoveryInspection.objects.create(disposal_order=disposal, disposal_item=disposal_item, unit=unit, sku=self.sku, part=self.part, quantity=1, status='pending')
+        PartRecoveryInspection.objects.create(disposal_order=other_disposal, disposal_item=other_item, unit=other_unit, sku=other_sku, part=other_part, quantity=1, status='pending')
+
+        resp = self.client.get(reverse('part_recovery_inspections_list'), {'sku_id': str(self.sku.id), 'part_id': str(self.part.id)})
+        self.assertEqual(resp.status_code, 200)
+        rows = list(resp.context['inspections_page'].object_list)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].unit_id, unit.id)
+
+    def test_maintenance_work_orders_should_show_report_drilldown_hint(self):
+        unit = InventoryUnit.objects.create(sku=self.sku, unit_no='ZSY-SKUFLOW0001-0020', status='maintenance', current_location_type='warehouse', is_active=True)
+        order = MaintenanceWorkOrder.objects.create(unit=unit, sku=self.sku, issue_desc='报表下钻提示', status='draft', created_by=self.user)
+        order.items.create(old_part=self.part, new_part=self.part, replace_quantity=1)
+
+        resp = self.client.get(reverse('maintenance_work_orders_list'), {
+            'sku_id': str(self.sku.id),
+            'part_id': str(self.part.id),
+            'from_report': '1',
+            'range': '30',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '当前数据来自仓储报表下钻')
+        self.assertContains(resp, reverse('warehouse_reports'))
+
 
 class ActionPermissionGuardTests(TestCase):
     def setUp(self):
@@ -1929,7 +3511,14 @@ class ActionPermissionGuardTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.status, 'pending')
-        self.assertContains(resp, 'order.force_cancel', status_code=200)
+        self.assertTrue(
+            ApprovalTask.objects.filter(
+                action_code='order.force_cancel',
+                target_type='order',
+                target_id=order.id,
+                status='pending',
+            ).exists()
+        )
 
     def test_warehouse_manager_should_not_cancel_transfer_task(self):
         source = Order.objects.create(
@@ -1968,7 +3557,14 @@ class ActionPermissionGuardTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         transfer.refresh_from_db()
         self.assertEqual(transfer.status, 'pending')
-        self.assertContains(resp, 'transfer.cancel_task', status_code=200)
+        self.assertTrue(
+            ApprovalTask.objects.filter(
+                action_code='transfer.cancel_task',
+                target_type='transfer',
+                target_id=transfer.id,
+                status='pending',
+            ).exists()
+        )
 
 
 class AuditDiffLogTests(TestCase):
@@ -2028,6 +3624,73 @@ class AuditDiffLogTests(TestCase):
         self.assertEqual(payload['before']['status'], 'pending')
         self.assertEqual(payload['after']['status'], 'cancelled')
         self.assertIn('status', payload.get('changed_fields', []))
+
+    def test_order_cancel_delivered_should_be_rejected(self):
+        order = Order.objects.create(
+            customer_name='风险取消客户',
+            customer_phone='13800000008',
+            delivery_address='广东省深圳市南山区科技园',
+            event_date=date.today() + timedelta(days=2),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=self.sku.rental_price,
+        )
+        resp = self.client.post(
+            reverse('order_cancel', kwargs={'order_id': order.id}),
+            {'reason': '高风险取消测试'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'delivered')
+        self.assertFalse(
+            RiskEvent.objects.filter(
+                event_type='delivered_order_cancel',
+                order=order,
+                status='open'
+            ).exists()
+        )
+        self.assertFalse(
+            ApprovalTask.objects.filter(
+                action_code='order.force_cancel',
+                target_type='order',
+                target_id=order.id,
+            ).exists()
+        )
+        self.assertContains(resp, '无法取消')
+
+    def test_frequent_cancel_should_create_risk_event(self):
+        for idx in range(3):
+            order = Order.objects.create(
+                customer_name=f'取消客户{idx}',
+                customer_phone=f'1380000001{idx}',
+                delivery_address='广东省深圳市福田区',
+                event_date=date.today() + timedelta(days=3),
+                rental_days=1,
+                status='pending',
+                created_by=self.user,
+            )
+            OrderItem.objects.create(
+                order=order,
+                sku=self.sku,
+                quantity=1,
+                rental_price=self.sku.rental_price,
+                deposit=self.sku.deposit,
+                subtotal=self.sku.rental_price,
+            )
+            self.client.post(reverse('order_cancel', kwargs={'order_id': order.id}), {'reason': '频繁取消测试'}, follow=True)
+
+        self.assertTrue(
+            RiskEvent.objects.filter(event_type='frequent_cancel', status='open').exists()
+        )
 
     def test_transfer_cancel_should_write_before_after_diff(self):
         source = Order.objects.create(
@@ -2099,6 +3762,64 @@ class AuditDiffLogTests(TestCase):
         self.assertEqual(payload['before']['ship_lead_days'], '2')
         self.assertEqual(payload['after']['ship_lead_days'], '3')
         self.assertIn('ship_lead_days', payload.get('changed_fields', []))
+
+    def test_settings_run_consistency_check_should_not_write_settings_audit(self):
+        before_count = AuditLog.objects.filter(module='系统设置', target='settings').count()
+        before_runs = DataConsistencyCheckRun.objects.count()
+        resp = self.client.post(
+            reverse('settings'),
+            {
+                'active_tab': 'system',
+                'run_consistency_check': '1',
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        after_count = AuditLog.objects.filter(module='系统设置', target='settings').count()
+        self.assertEqual(before_count, after_count)
+        self.assertEqual(DataConsistencyCheckRun.objects.count(), before_runs + 1)
+
+    def test_settings_should_reject_invalid_approval_required_count_map(self):
+        SystemSettings.objects.update_or_create(
+            key='approval_required_count_map',
+            defaults={'value': '{"order.force_cancel": 2}'},
+        )
+        resp = self.client.post(
+            reverse('settings'),
+            {
+                'active_tab': 'system',
+                'approval_required_count_map': '{"order.force_cancel":"abc"}',
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '审批层级策略映射配置无效')
+        value = SystemSettings.objects.filter(key='approval_required_count_map').values_list('value', flat=True).first()
+        self.assertEqual(value, '{"order.force_cancel": 2}')
+
+    def test_settings_test_alert_notify_should_write_notification_audit(self):
+        before_count = AuditLog.objects.filter(module='通知中心', target='通知测试').count()
+        resp = self.client.post(
+            reverse('settings'),
+            {
+                'active_tab': 'system',
+                'test_alert_notify': '1',
+                'alert_notify_enabled': '1',
+                'alert_notify_min_severity': 'info',
+                'alert_notify_webhook_url': '',
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            AuditLog.objects.filter(module='通知中心', target='通知测试').count(),
+            before_count + 1,
+        )
+        log = AuditLog.objects.filter(module='通知中心', target='通知测试').order_by('-created_at').first()
+        payload = json.loads(log.details)
+        self.assertEqual(payload['summary'], '发送告警通知')
+        self.assertEqual(payload['extra'].get('source'), 'settings_test')
+        self.assertEqual(payload['after'].get('status'), 'skipped')
 
     def test_order_confirm_should_write_structured_diff(self):
         order = Order.objects.create(
@@ -2446,6 +4167,970 @@ class ProcurementAuditDiffTests(TestCase):
         self.assertIn('current_stock', payload.get('changed_fields', []))
 
 
+class SKUBOMViewTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='sku_bom_admin',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.client.force_login(self.user)
+        self.part_a = Part.objects.create(
+            name='部件A',
+            spec='A1',
+            category='accessory',
+            unit='个',
+            current_stock=10,
+            safety_stock=1,
+            is_active=True,
+        )
+        self.part_b = Part.objects.create(
+            name='部件B',
+            spec='B1',
+            category='accessory',
+            unit='个',
+            current_stock=10,
+            safety_stock=1,
+            is_active=True,
+        )
+
+    def test_sku_create_should_persist_bom_components(self):
+        resp = self.client.post(
+            reverse('sku_create'),
+            {
+                'code': 'SKU-BOM-001',
+                'name': 'BOM测试套餐',
+                'category': '主题套餐',
+                'rental_price': '168.00',
+                'deposit': '200.00',
+                'description': 'test',
+                'component_part_id[]': [str(self.part_a.id), str(self.part_b.id)],
+                'component_qty[]': ['2', '1'],
+                'component_notes[]': ['主体', '辅件'],
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        sku = SKU.objects.get(code='SKU-BOM-001')
+        comps = SKUComponent.objects.filter(sku=sku).order_by('part_id')
+        self.assertEqual(comps.count(), 2)
+        self.assertEqual(comps[0].quantity_per_set, 2)
+        self.assertEqual(comps[1].quantity_per_set, 1)
+        self.assertEqual(InventoryUnit.objects.filter(sku=sku).count(), 0)
+        self.assertEqual(InventoryUnitPart.objects.filter(unit__sku=sku, is_active=True).count(), 0)
+        self.assertEqual(sku.stock, 0)
+
+    def test_sku_edit_should_replace_bom_components(self):
+        create_resp = self.client.post(
+            reverse('sku_create'),
+            {
+                'code': 'SKU-BOM-EDIT',
+                'name': '编辑BOM套餐',
+                'category': '主题套餐',
+                'rental_price': '99.00',
+                'deposit': '50.00',
+                'description': '',
+                'component_part_id[]': [str(self.part_a.id)],
+                'component_qty[]': ['1'],
+                'component_notes[]': ['旧'],
+            },
+            follow=True,
+        )
+        self.assertEqual(create_resp.status_code, 200)
+        sku = SKU.objects.get(code='SKU-BOM-EDIT')
+
+        resp = self.client.post(
+            reverse('sku_edit', kwargs={'sku_id': sku.id}),
+            {
+                'code': sku.code,
+                'name': sku.name,
+                'category': sku.category,
+                'rental_price': '120.00',
+                'deposit': '80.00',
+                'description': '更新',
+                'component_part_id[]': [str(self.part_b.id)],
+                'component_qty[]': ['3'],
+                'component_notes[]': ['新'],
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        comps = SKUComponent.objects.filter(sku=sku)
+        self.assertEqual(comps.count(), 1)
+        comp = comps.first()
+        self.assertEqual(comp.part_id, self.part_b.id)
+        self.assertEqual(comp.quantity_per_set, 3)
+        self.assertEqual(InventoryUnit.objects.filter(sku=sku).count(), 0)
+
+    def test_sku_assemble_should_deduct_parts_and_create_units(self):
+        sku = SKU.objects.create(
+            code='SKU-ASM-001',
+            name='装配套餐',
+            category='主题套餐',
+            rental_price=Decimal('199.00'),
+            deposit=Decimal('88.00'),
+            stock=0,
+            is_active=True,
+        )
+        SKUComponent.objects.create(sku=sku, part=self.part_a, quantity_per_set=2, notes='主体')
+        SKUComponent.objects.create(sku=sku, part=self.part_b, quantity_per_set=1, notes='辅件')
+
+        resp = self.client.post(
+            reverse('sku_assemble', kwargs={'sku_id': sku.id}),
+            {'assembly_quantity': '3', 'assembly_notes': '首批装配'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        sku.refresh_from_db()
+        self.part_a.refresh_from_db()
+        self.part_b.refresh_from_db()
+
+        self.assertEqual(sku.stock, 3)
+        self.assertEqual(InventoryUnit.objects.filter(sku=sku, is_active=True).count(), 3)
+        self.assertEqual(InventoryUnitPart.objects.filter(unit__sku=sku, is_active=True).count(), 6)
+        self.assertEqual(self.part_a.current_stock, 4)
+        self.assertEqual(self.part_b.current_stock, 7)
+        assembly = AssemblyOrder.objects.get(sku=sku)
+        self.assertEqual(assembly.status, 'completed')
+        self.assertEqual(assembly.items.count(), 2)
+
+    def test_maintenance_work_order_complete_should_replace_parts(self):
+        sku = SKU.objects.create(
+            code='SKU-MWO-001',
+            name='维修套餐',
+            category='主题套餐',
+            rental_price=Decimal('120.00'),
+            deposit=Decimal('50.00'),
+            stock=0,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-MWO-001-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        damaged_part = Part.objects.create(
+            name='损坏主体',
+            spec='A2',
+            category='accessory',
+            unit='个',
+            current_stock=0,
+            safety_stock=0,
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=damaged_part,
+            expected_quantity=1,
+            actual_quantity=1,
+            status='normal',
+            is_active=True,
+        )
+
+        resp = self.client.post(
+            reverse('maintenance_work_order_create', kwargs={'unit_id': unit.id}),
+            {
+                'issue_desc': '主体折损',
+                'notes': '换新件',
+                'old_part_id[]': [str(damaged_part.id)],
+                'new_part_id[]': [str(self.part_b.id)],
+                'replace_quantity[]': ['1'],
+                'item_notes[]': ['替换辅件'],
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        work_order = MaintenanceWorkOrder.objects.get(unit=unit)
+        self.assertEqual(work_order.status, 'draft')
+        unit.refresh_from_db()
+        self.assertEqual(unit.status, 'maintenance')
+
+        resp = self.client.post(
+            reverse('maintenance_work_order_complete', kwargs={'work_order_id': work_order.id}),
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        work_order.refresh_from_db()
+        unit.refresh_from_db()
+        self.part_b.refresh_from_db()
+        damaged_row = InventoryUnitPart.objects.get(unit=unit, part=damaged_part)
+        replacement_row = InventoryUnitPart.objects.get(unit=unit, part=self.part_b)
+
+        self.assertEqual(work_order.status, 'completed')
+        self.assertEqual(unit.status, 'in_warehouse')
+        self.assertEqual(self.part_b.current_stock, 9)
+        self.assertEqual(damaged_row.status, 'missing')
+        self.assertEqual(damaged_row.actual_quantity, 0)
+        self.assertEqual(replacement_row.status, 'normal')
+        self.assertEqual(replacement_row.actual_quantity, 1)
+
+    def test_maintenance_work_order_should_block_duplicate_draft_for_same_unit(self):
+        sku = SKU.objects.create(
+            code='SKU-MWO-002',
+            name='维修套餐2',
+            category='主题套餐',
+            rental_price=Decimal('120.00'),
+            deposit=Decimal('50.00'),
+            stock=0,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-MWO-002-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part_a,
+            expected_quantity=1,
+            actual_quantity=1,
+            status='normal',
+            is_active=True,
+        )
+        payload = {
+            'issue_desc': '首次维修',
+            'old_part_id[]': [str(self.part_a.id)],
+            'new_part_id[]': [str(self.part_b.id)],
+            'replace_quantity[]': ['1'],
+            'item_notes[]': ['test'],
+        }
+        first = self.client.post(reverse('maintenance_work_order_create', kwargs={'unit_id': unit.id}), payload, follow=True)
+        self.assertEqual(first.status_code, 200)
+        second = self.client.post(reverse('maintenance_work_order_create', kwargs={'unit_id': unit.id}), payload, follow=True)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(MaintenanceWorkOrder.objects.filter(unit=unit).count(), 1)
+
+    def test_assembly_order_cancel_should_restore_parts_and_disable_created_units(self):
+        sku = SKU.objects.create(
+            code='SKU-ASM-CANCEL',
+            name='装配取消套餐',
+            category='主题套餐',
+            rental_price=Decimal('188.00'),
+            deposit=Decimal('66.00'),
+            stock=0,
+            is_active=True,
+        )
+        SKUComponent.objects.create(sku=sku, part=self.part_a, quantity_per_set=1, notes='主体')
+        SKUComponent.objects.create(sku=sku, part=self.part_b, quantity_per_set=1, notes='辅件')
+
+        create_resp = self.client.post(
+            reverse('sku_assemble', kwargs={'sku_id': sku.id}),
+            {'assembly_quantity': '2', 'assembly_notes': '测试取消'},
+            follow=True,
+        )
+        self.assertEqual(create_resp.status_code, 200)
+        assembly = AssemblyOrder.objects.get(sku=sku)
+        self.assertEqual(assembly.created_units.count(), 2)
+
+        cancel_resp = self.client.post(
+            reverse('assembly_order_cancel', kwargs={'assembly_id': assembly.id}),
+            {'next': reverse('assembly_orders_list')},
+            follow=True,
+        )
+        self.assertEqual(cancel_resp.status_code, 200)
+        assembly.refresh_from_db()
+        sku.refresh_from_db()
+        self.part_a.refresh_from_db()
+        self.part_b.refresh_from_db()
+        self.assertEqual(assembly.status, 'cancelled')
+        self.assertEqual(sku.stock, 0)
+        self.assertEqual(self.part_a.current_stock, 10)
+        self.assertEqual(self.part_b.current_stock, 10)
+        self.assertEqual(InventoryUnit.objects.filter(source_assembly_order=assembly, is_active=True).count(), 0)
+
+    def test_assembly_orders_export_should_respect_filters(self):
+        sku = SKU.objects.create(
+            code='SKU-ASM-EXPORT',
+            name='装配导出套餐',
+            category='主题套餐',
+            rental_price=Decimal('188.00'),
+            deposit=Decimal('66.00'),
+            stock=0,
+            is_active=True,
+        )
+        SKUComponent.objects.create(sku=sku, part=self.part_a, quantity_per_set=1, notes='主体')
+        self.client.post(
+            reverse('sku_assemble', kwargs={'sku_id': sku.id}),
+            {'assembly_quantity': '1', 'assembly_notes': '导出测试'},
+            follow=True,
+        )
+        resp = self.client.get(reverse('assembly_orders_export') + f'?keyword={sku.code}&status=completed')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('text/csv', resp['Content-Type'])
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn('装配单号', content)
+        self.assertIn(sku.code, content)
+
+    def test_assembly_orders_export_should_support_part_and_creator_keyword(self):
+        sku = SKU.objects.create(
+            code='SKU-ASM-KEYWORD',
+            name='装配关键词套餐',
+            category='主题套餐',
+            rental_price=Decimal('188.00'),
+            deposit=Decimal('66.00'),
+            stock=0,
+            is_active=True,
+        )
+        SKUComponent.objects.create(sku=sku, part=self.part_a, quantity_per_set=1, notes='主体')
+        self.client.post(
+            reverse('sku_assemble', kwargs={'sku_id': sku.id}),
+            {'assembly_quantity': '1', 'assembly_notes': '创建人关键词测试'},
+            follow=True,
+        )
+        by_part = self.client.get(reverse('assembly_orders_export') + f'?keyword={self.part_a.name}')
+        self.assertEqual(by_part.status_code, 200)
+        self.assertIn(sku.code, by_part.content.decode('utf-8-sig'))
+        by_creator = self.client.get(reverse('assembly_orders_export') + f'?keyword={self.user.username}')
+        self.assertEqual(by_creator.status_code, 200)
+        self.assertIn(sku.code, by_creator.content.decode('utf-8-sig'))
+
+    def test_maintenance_work_order_cancel_should_restore_unit_status(self):
+        sku = SKU.objects.create(
+            code='SKU-MWO-CANCEL',
+            name='维修取消套餐',
+            category='主题套餐',
+            rental_price=Decimal('120.00'),
+            deposit=Decimal('50.00'),
+            stock=0,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-MWO-CANCEL-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part_a,
+            expected_quantity=1,
+            actual_quantity=1,
+            status='normal',
+            is_active=True,
+        )
+        self.client.post(
+            reverse('maintenance_work_order_create', kwargs={'unit_id': unit.id}),
+            {
+                'issue_desc': '取消测试',
+                'old_part_id[]': [str(self.part_a.id)],
+                'new_part_id[]': [str(self.part_b.id)],
+                'replace_quantity[]': ['1'],
+                'item_notes[]': ['cancel'],
+            },
+            follow=True,
+        )
+        work_order = MaintenanceWorkOrder.objects.get(unit=unit)
+        self.assertEqual(work_order.status, 'draft')
+        cancel_resp = self.client.post(
+            reverse('maintenance_work_order_cancel', kwargs={'work_order_id': work_order.id}),
+            {'next': reverse('maintenance_work_orders_list')},
+            follow=True,
+        )
+        self.assertEqual(cancel_resp.status_code, 200)
+        work_order.refresh_from_db()
+        unit.refresh_from_db()
+        self.assertEqual(work_order.status, 'cancelled')
+        self.assertEqual(unit.status, 'in_warehouse')
+
+    def test_maintenance_work_orders_export_should_respect_filters(self):
+        sku = SKU.objects.create(
+            code='SKU-MWO-EXPORT',
+            name='维修导出套餐',
+            category='主题套餐',
+            rental_price=Decimal('120.00'),
+            deposit=Decimal('50.00'),
+            stock=0,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-MWO-EXPORT-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part_a,
+            expected_quantity=1,
+            actual_quantity=1,
+            status='normal',
+            is_active=True,
+        )
+        self.client.post(
+            reverse('maintenance_work_order_create', kwargs={'unit_id': unit.id}),
+            {
+                'issue_desc': '导出维修',
+                'old_part_id[]': [str(self.part_a.id)],
+                'new_part_id[]': [str(self.part_b.id)],
+                'replace_quantity[]': ['1'],
+                'item_notes[]': ['export'],
+            },
+            follow=True,
+        )
+        resp = self.client.get(reverse('maintenance_work_orders_export') + '?status=draft&keyword=MWO-EXPORT')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('text/csv', resp['Content-Type'])
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn('工单号', content)
+        self.assertIn(unit.unit_no, content)
+
+    def test_maintenance_work_orders_export_should_support_part_and_order_keyword(self):
+        sku = SKU.objects.create(
+            code='SKU-MWO-KEYWORD',
+            name='维修关键词套餐',
+            category='主题套餐',
+            rental_price=Decimal('120.00'),
+            deposit=Decimal('50.00'),
+            stock=0,
+            is_active=True,
+        )
+        order = Order.objects.create(
+            customer_name='维修订单客户',
+            customer_phone='13800009999',
+            delivery_address='广东省深圳市南山区',
+            event_date=date.today() + timedelta(days=5),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-MWO-KEYWORD-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            current_order=order,
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part_a,
+            expected_quantity=1,
+            actual_quantity=1,
+            status='normal',
+            is_active=True,
+        )
+        self.client.post(
+            reverse('maintenance_work_order_create', kwargs={'unit_id': unit.id}),
+            {
+                'issue_desc': '按部件和订单搜索',
+                'old_part_id[]': [str(self.part_a.id)],
+                'new_part_id[]': [str(self.part_b.id)],
+                'replace_quantity[]': ['1'],
+                'item_notes[]': ['search'],
+            },
+            follow=True,
+        )
+        by_part = self.client.get(reverse('maintenance_work_orders_export') + f'?keyword={self.part_b.name}')
+        self.assertEqual(by_part.status_code, 200)
+        self.assertIn(unit.unit_no, by_part.content.decode('utf-8-sig'))
+        by_order = self.client.get(reverse('maintenance_work_orders_export') + f'?keyword={order.order_no}')
+        self.assertEqual(by_order.status_code, 200)
+        self.assertIn(unit.unit_no, by_order.content.decode('utf-8-sig'))
+
+    def test_maintenance_work_order_reverse_should_restore_parts_and_stock(self):
+        sku = SKU.objects.create(
+            code='SKU-MWO-REVERSE',
+            name='维修冲销套餐',
+            category='主题套餐',
+            rental_price=Decimal('120.00'),
+            deposit=Decimal('50.00'),
+            stock=0,
+            is_active=True,
+        )
+        old_part = Part.objects.create(
+            name='旧部件',
+            spec='O1',
+            category='accessory',
+            unit='个',
+            current_stock=5,
+            safety_stock=1,
+            is_active=True,
+        )
+        new_part = Part.objects.create(
+            name='新部件',
+            spec='N1',
+            category='accessory',
+            unit='个',
+            current_stock=5,
+            safety_stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-MWO-REVERSE-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=old_part,
+            expected_quantity=1,
+            actual_quantity=1,
+            status='normal',
+            is_active=True,
+        )
+        self.client.post(
+            reverse('maintenance_work_order_create', kwargs={'unit_id': unit.id}),
+            {
+                'issue_desc': '维修冲销测试',
+                'old_part_id[]': [str(old_part.id)],
+                'new_part_id[]': [str(new_part.id)],
+                'replace_quantity[]': ['1'],
+                'item_notes[]': ['replace'],
+            },
+            follow=True,
+        )
+        work_order = MaintenanceWorkOrder.objects.get(unit=unit)
+        self.client.post(
+            reverse('maintenance_work_order_complete', kwargs={'work_order_id': work_order.id}),
+            {'next': reverse('maintenance_work_orders_list')},
+            follow=True,
+        )
+        new_part.refresh_from_db()
+        self.assertEqual(new_part.current_stock, 4)
+
+        resp = self.client.post(
+            reverse('maintenance_work_order_reverse', kwargs={'work_order_id': work_order.id}),
+            {'next': reverse('maintenance_work_orders_list')},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        work_order.refresh_from_db()
+        unit.refresh_from_db()
+        old_part.refresh_from_db()
+        new_part.refresh_from_db()
+        self.assertEqual(work_order.status, 'reversed')
+        self.assertEqual(unit.status, 'in_warehouse')
+        self.assertEqual(new_part.current_stock, 5)
+        old_row = InventoryUnitPart.objects.get(unit=unit, part=old_part, is_active=True)
+        self.assertEqual(old_row.actual_quantity, 1)
+        self.assertEqual(old_row.status, 'normal')
+
+    def test_maintenance_work_order_reverse_should_reject_when_unit_has_current_order(self):
+        sku = SKU.objects.create(
+            code='SKU-MWO-REVERSE-2',
+            name='维修冲销套餐2',
+            category='主题套餐',
+            rental_price=Decimal('120.00'),
+            deposit=Decimal('50.00'),
+            stock=0,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-MWO-REVERSE-0002',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        work_order = MaintenanceWorkOrder.objects.create(
+            unit=unit,
+            sku=sku,
+            issue_desc='已完成',
+            status='completed',
+            created_by=self.user,
+            completed_by=self.user,
+            completed_at=timezone.now(),
+        )
+        order = Order.objects.create(
+            customer_name='占用客户',
+            customer_phone='13811112222',
+            delivery_address='地址',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        unit.current_order = order
+        unit.save(update_fields=['current_order', 'updated_at'])
+
+        resp = self.client.post(
+            reverse('maintenance_work_order_reverse', kwargs={'work_order_id': work_order.id}),
+            {'next': reverse('maintenance_work_orders_list')},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        work_order.refresh_from_db()
+        self.assertEqual(work_order.status, 'completed')
+
+    def test_unit_disposal_disassemble_should_create_pending_recovery_inspections_and_disable_unit(self):
+        sku = SKU.objects.create(
+            code='SKU-DISASSEMBLE',
+            name='拆解套餐',
+            category='主题套餐',
+            rental_price=Decimal('100.00'),
+            deposit=Decimal('30.00'),
+            stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-DISASSEMBLE-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(unit=unit, part=self.part_a, expected_quantity=2, actual_quantity=2, status='normal', is_active=True)
+        InventoryUnitPart.objects.create(unit=unit, part=self.part_b, expected_quantity=1, actual_quantity=1, status='normal', is_active=True)
+        self.part_a.current_stock = 3
+        self.part_a.save(update_fields=['current_stock'])
+        self.part_b.current_stock = 4
+        self.part_b.save(update_fields=['current_stock'])
+
+        resp = self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'disassemble', 'issue_desc': '拆解回件测试', 'notes': '拆解'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        unit.refresh_from_db()
+        sku.refresh_from_db()
+        self.part_a.refresh_from_db()
+        self.part_b.refresh_from_db()
+        order = UnitDisposalOrder.objects.get(unit=unit)
+        self.assertEqual(order.action_type, 'disassemble')
+        self.assertEqual(order.status, 'completed')
+        self.assertFalse(unit.is_active)
+        self.assertEqual(unit.status, 'scrapped')
+        self.assertEqual(sku.stock, 0)
+        self.assertEqual(self.part_a.current_stock, 3)
+        self.assertEqual(self.part_b.current_stock, 4)
+        inspections = PartRecoveryInspection.objects.filter(disposal_order=order).order_by('part__name')
+        self.assertEqual(inspections.count(), 2)
+        self.assertEqual(inspections[0].status, 'pending')
+        self.assertEqual(inspections[1].status, 'pending')
+
+    def test_part_recovery_inspection_process_returned_should_inbound_stock(self):
+        sku = SKU.objects.create(
+            code='SKU-RECOVER-RETURN',
+            name='回件回库套餐',
+            category='主题套餐',
+            rental_price=Decimal('100.00'),
+            deposit=Decimal('30.00'),
+            stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-RECOVER-RETURN-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(unit=unit, part=self.part_a, expected_quantity=1, actual_quantity=1, status='normal', is_active=True)
+        self.part_a.current_stock = 2
+        self.part_a.save(update_fields=['current_stock'])
+        self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'disassemble', 'issue_desc': '拆解待质检', 'notes': '拆解'},
+            follow=True,
+        )
+        inspection = PartRecoveryInspection.objects.get(part=self.part_a)
+        resp = self.client.post(
+            reverse('part_recovery_inspection_process', kwargs={'inspection_id': inspection.id}),
+            {'action_type': 'returned', 'notes': '合格回库'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        inspection.refresh_from_db()
+        self.part_a.refresh_from_db()
+        self.assertEqual(inspection.status, 'returned')
+        self.assertEqual(self.part_a.current_stock, 3)
+
+    def test_part_recovery_inspection_process_repair_should_not_inbound_stock(self):
+        sku = SKU.objects.create(
+            code='SKU-RECOVER-REPAIR',
+            name='回件待修套餐',
+            category='主题套餐',
+            rental_price=Decimal('100.00'),
+            deposit=Decimal('30.00'),
+            stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-RECOVER-REPAIR-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(unit=unit, part=self.part_a, expected_quantity=1, actual_quantity=1, status='normal', is_active=True)
+        self.part_a.current_stock = 2
+        self.part_a.save(update_fields=['current_stock'])
+        self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'disassemble', 'issue_desc': '拆解待维修', 'notes': '拆解'},
+            follow=True,
+        )
+        inspection = PartRecoveryInspection.objects.get(part=self.part_a)
+        resp = self.client.post(
+            reverse('part_recovery_inspection_process', kwargs={'inspection_id': inspection.id}),
+            {'action_type': 'repair', 'notes': '转维修池'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        inspection.refresh_from_db()
+        self.part_a.refresh_from_db()
+        self.assertEqual(inspection.status, 'repair')
+        self.assertEqual(self.part_a.current_stock, 2)
+
+    def test_part_recovery_inspection_repair_then_returned_should_inbound_stock(self):
+        sku = SKU.objects.create(
+            code='SKU-RECOVER-REPAIR-RETURN',
+            name='待修后回库套餐',
+            category='主题套餐',
+            rental_price=Decimal('100.00'),
+            deposit=Decimal('30.00'),
+            stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-RECOVER-REPAIR-RETURN-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(unit=unit, part=self.part_a, expected_quantity=1, actual_quantity=1, status='normal', is_active=True)
+        self.part_a.current_stock = 1
+        self.part_a.save(update_fields=['current_stock'])
+        self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'disassemble', 'issue_desc': '拆解待修后回库', 'notes': '拆解'},
+            follow=True,
+        )
+        inspection = PartRecoveryInspection.objects.get(part=self.part_a)
+        self.client.post(
+            reverse('part_recovery_inspection_process', kwargs={'inspection_id': inspection.id}),
+            {'action_type': 'repair', 'notes': '先转待维修'},
+            follow=True,
+        )
+        self.part_a.refresh_from_db()
+        self.assertEqual(self.part_a.current_stock, 1)
+        resp = self.client.post(
+            reverse('part_recovery_inspection_process', kwargs={'inspection_id': inspection.id}),
+            {'action_type': 'returned', 'notes': '维修后回库'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        inspection.refresh_from_db()
+        self.part_a.refresh_from_db()
+        self.assertEqual(inspection.status, 'returned')
+        self.assertEqual(self.part_a.current_stock, 2)
+
+    def test_part_recovery_inspection_repair_then_scrapped_should_not_inbound_stock(self):
+        sku = SKU.objects.create(
+            code='SKU-RECOVER-REPAIR-SCRAP',
+            name='待修后报废套餐',
+            category='主题套餐',
+            rental_price=Decimal('100.00'),
+            deposit=Decimal('30.00'),
+            stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-RECOVER-REPAIR-SCRAP-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(unit=unit, part=self.part_a, expected_quantity=1, actual_quantity=1, status='normal', is_active=True)
+        self.part_a.current_stock = 1
+        self.part_a.save(update_fields=['current_stock'])
+        self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'disassemble', 'issue_desc': '拆解待修后报废', 'notes': '拆解'},
+            follow=True,
+        )
+        inspection = PartRecoveryInspection.objects.get(part=self.part_a)
+        self.client.post(
+            reverse('part_recovery_inspection_process', kwargs={'inspection_id': inspection.id}),
+            {'action_type': 'repair', 'notes': '先转待维修'},
+            follow=True,
+        )
+        resp = self.client.post(
+            reverse('part_recovery_inspection_process', kwargs={'inspection_id': inspection.id}),
+            {'action_type': 'scrapped', 'notes': '维修失败报废'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        inspection.refresh_from_db()
+        self.part_a.refresh_from_db()
+        self.assertEqual(inspection.status, 'scrapped')
+        self.assertEqual(self.part_a.current_stock, 1)
+
+    def test_part_recovery_inspections_export_should_respect_filters(self):
+        sku = SKU.objects.create(
+            code='SKU-RECOVER-EXPORT',
+            name='回件导出套餐',
+            category='主题套餐',
+            rental_price=Decimal('100.00'),
+            deposit=Decimal('30.00'),
+            stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-RECOVER-EXPORT-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(unit=unit, part=self.part_a, expected_quantity=1, actual_quantity=1, status='normal', is_active=True)
+        self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'disassemble', 'issue_desc': '回件导出', 'notes': '拆解'},
+            follow=True,
+        )
+        resp = self.client.get(reverse('part_recovery_inspections_export') + '?status=pending&keyword=RECOVER-EXPORT')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('text/csv', resp['Content-Type'])
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn('来源处置单', content)
+        self.assertIn(unit.unit_no, content)
+
+    def test_part_recovery_inspections_export_should_support_note_keyword(self):
+        sku = SKU.objects.create(
+            code='SKU-RECOVER-KEYWORD',
+            name='回件关键词套餐',
+            category='主题套餐',
+            rental_price=Decimal('100.00'),
+            deposit=Decimal('30.00'),
+            stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-RECOVER-KEYWORD-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(unit=unit, part=self.part_a, expected_quantity=1, actual_quantity=1, status='normal', is_active=True)
+        self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'disassemble', 'issue_desc': '回件备注搜索', 'notes': '备注关键词-回库待检'},
+            follow=True,
+        )
+        inspection = PartRecoveryInspection.objects.get(unit=unit, part=self.part_a)
+        inspection.notes = '备注关键词-回库待检'
+        inspection.save(update_fields=['notes', 'updated_at'])
+        by_note = self.client.get(reverse('part_recovery_inspections_export') + '?keyword=备注关键词-回库待检')
+        self.assertEqual(by_note.status_code, 200)
+        self.assertIn(unit.unit_no, by_note.content.decode('utf-8-sig'))
+        by_part = self.client.get(reverse('part_recovery_inspections_export') + f'?keyword={self.part_a.name}')
+        self.assertEqual(by_part.status_code, 200)
+        self.assertIn(unit.unit_no, by_part.content.decode('utf-8-sig'))
+
+    def test_unit_disposal_scrap_should_disable_unit_without_returning_parts(self):
+        sku = SKU.objects.create(
+            code='SKU-SCRAP',
+            name='报废套餐',
+            category='主题套餐',
+            rental_price=Decimal('100.00'),
+            deposit=Decimal('30.00'),
+            stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-SCRAP-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(unit=unit, part=self.part_a, expected_quantity=1, actual_quantity=1, status='normal', is_active=True)
+        self.part_a.current_stock = 7
+        self.part_a.save(update_fields=['current_stock'])
+
+        resp = self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'scrap', 'issue_desc': '报废测试', 'notes': '损坏严重'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        unit.refresh_from_db()
+        sku.refresh_from_db()
+        self.part_a.refresh_from_db()
+        order = UnitDisposalOrder.objects.get(unit=unit)
+        self.assertEqual(order.action_type, 'scrap')
+        self.assertEqual(order.status, 'completed')
+        self.assertFalse(unit.is_active)
+        self.assertEqual(unit.status, 'scrapped')
+        self.assertEqual(sku.stock, 0)
+        self.assertEqual(self.part_a.current_stock, 7)
+
+    def test_unit_disposal_orders_export_should_respect_filters(self):
+        sku = SKU.objects.create(
+            code='SKU-DIS-EXPORT',
+            name='处置导出套餐',
+            category='主题套餐',
+            rental_price=Decimal('100.00'),
+            deposit=Decimal('30.00'),
+            stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-DIS-EXPORT-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(unit=unit, part=self.part_a, expected_quantity=1, actual_quantity=1, status='normal', is_active=True)
+        self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'scrap', 'issue_desc': '导出处置', 'notes': 'export'},
+            follow=True,
+        )
+        resp = self.client.get(reverse('unit_disposal_orders_export') + '?action_type=scrap&status=completed&keyword=DIS-EXPORT')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('text/csv', resp['Content-Type'])
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn('工单号', content)
+        self.assertIn(unit.unit_no, content)
+
+    def test_unit_disposal_orders_export_should_support_part_and_issue_keyword(self):
+        sku = SKU.objects.create(
+            code='SKU-DIS-KEYWORD',
+            name='处置关键词套餐',
+            category='主题套餐',
+            rental_price=Decimal('100.00'),
+            deposit=Decimal('30.00'),
+            stock=1,
+            is_active=True,
+        )
+        unit = InventoryUnit.objects.create(
+            sku=sku,
+            unit_no='ZSY-SKU-DIS-KEYWORD-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(unit=unit, part=self.part_a, expected_quantity=1, actual_quantity=1, status='normal', is_active=True)
+        self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'scrap', 'issue_desc': '按订单和部件搜索', 'notes': 'dispose-search'},
+            follow=True,
+        )
+        by_part = self.client.get(reverse('unit_disposal_orders_export') + f'?keyword={self.part_a.name}')
+        self.assertEqual(by_part.status_code, 200)
+        self.assertIn(unit.unit_no, by_part.content.decode('utf-8-sig'))
+        by_issue = self.client.get(reverse('unit_disposal_orders_export') + '?keyword=按订单和部件搜索')
+        self.assertEqual(by_issue.status_code, 200)
+        self.assertIn(unit.unit_no, by_issue.content.decode('utf-8-sig'))
+
+
 class AuditCoverageGuardTests(TestCase):
     def test_production_code_should_not_directly_write_auditlog_objects_create(self):
         """防回退：生产代码中禁止绕过 AuditService 直接写 AuditLog.objects.create。"""
@@ -2479,3 +5164,1157 @@ class AuditCoverageGuardTests(TestCase):
             [],
             msg='发现直接 AuditLog.objects.create 调用，请统一改为 AuditService：\n' + '\n'.join(violations),
         )
+
+
+class ApprovalFlowTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username='approval_admin',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.admin2 = User.objects.create_user(
+            username='approval_admin2',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.manager = User.objects.create_user(
+            username='approval_manager',
+            password='test123',
+            role='manager',
+            is_staff=True,
+        )
+        self.warehouse_manager = User.objects.create_user(
+            username='approval_wh_manager',
+            password='test123',
+            role='warehouse_manager',
+            is_staff=True,
+        )
+        self.sku = SKU.objects.create(
+            code='SKU-APR-001',
+            name='审批测试套餐',
+            category='主题套餐',
+            rental_price=Decimal('88.00'),
+            deposit=Decimal('50.00'),
+            stock=5,
+            is_active=True,
+        )
+        self.part = Part.objects.create(
+            name='审批测试部件',
+            spec='APR-1',
+            category='accessory',
+            unit='个',
+            current_stock=10,
+            safety_stock=1,
+            is_active=True,
+        )
+        self.source_order = Order.objects.create(
+            customer_name='来源客户',
+            customer_phone='13900001111',
+            delivery_address='广东省广州市天河区1号',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.admin,
+        )
+        self.target_order = Order.objects.create(
+            customer_name='目标客户',
+            customer_phone='13900002222',
+            delivery_address='广东省广州市越秀区2号',
+            event_date=date.today() + timedelta(days=7),
+            rental_days=1,
+            status='pending',
+            created_by=self.admin,
+        )
+        OrderItem.objects.create(
+            order=self.source_order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('88.00'),
+        )
+        OrderItem.objects.create(
+            order=self.target_order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('88.00'),
+        )
+        self.transfer = Transfer.objects.create(
+            order_from=self.source_order,
+            order_to=self.target_order,
+            sku=self.sku,
+            quantity=1,
+            gap_days=6,
+            status='pending',
+            created_by=self.admin,
+        )
+
+    def test_manager_cancel_order_should_create_approval_task(self):
+        self.client.force_login(self.manager)
+        resp = self.client.post(
+            reverse('order_cancel', kwargs={'order_id': self.target_order.id}),
+            {'reason': '审批测试取消'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.target_order.refresh_from_db()
+        self.assertEqual(self.target_order.status, 'pending')
+        task = ApprovalTask.objects.filter(
+            action_code='order.force_cancel',
+            target_type='order',
+            target_id=self.target_order.id,
+            status='pending',
+        ).first()
+        self.assertIsNotNone(task)
+        self.assertEqual(task.requested_by_id, self.manager.id)
+
+    def test_manager_cancel_order_should_use_action_required_count_map(self):
+        SystemSettings.objects.update_or_create(
+            key='approval_required_count_map',
+            defaults={'value': '{"order.force_cancel": 2, "transfer.cancel_task": 1}'},
+        )
+        SystemSettings.objects.update_or_create(
+            key='approval_required_count_default',
+            defaults={'value': '1'},
+        )
+        self.client.force_login(self.manager)
+        resp = self.client.post(
+            reverse('order_cancel', kwargs={'order_id': self.target_order.id}),
+            {'reason': '审批层级映射测试'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task = ApprovalTask.objects.filter(
+            action_code='order.force_cancel',
+            target_type='order',
+            target_id=self.target_order.id,
+            status='pending',
+        ).first()
+        self.assertIsNotNone(task)
+        self.assertEqual(task.required_review_count, 2)
+
+    def test_admin_approve_order_cancel_should_execute(self):
+        task = ApprovalTask.objects.create(
+            action_code='order.force_cancel',
+            module='订单',
+            target_type='order',
+            target_id=self.target_order.id,
+            target_label=self.target_order.order_no,
+            summary='申请取消',
+            payload={
+                'order_id': self.target_order.id,
+                'order_no': self.target_order.order_no,
+                'reason': '审批通过取消',
+            },
+            requested_by=self.manager,
+        )
+        self.client.force_login(self.admin)
+        resp = self.client.post(
+            reverse('approval_task_approve', kwargs={'task_id': task.id}),
+            {'note': '同意'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.target_order.refresh_from_db()
+        self.assertEqual(task.status, 'executed')
+        self.assertEqual(self.target_order.status, 'cancelled')
+
+    def test_manager_cancel_transfer_should_create_approval_and_admin_can_execute(self):
+        self.client.force_login(self.manager)
+        resp = self.client.post(
+            reverse('transfer_cancel', kwargs={'transfer_id': self.transfer.id}),
+            {'reason': '审批取消转寄'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task = ApprovalTask.objects.filter(
+            action_code='transfer.cancel_task',
+            target_type='transfer',
+            target_id=self.transfer.id,
+            status='pending',
+        ).first()
+        self.assertIsNotNone(task)
+
+        self.client.force_login(self.admin)
+        resp2 = self.client.post(reverse('approval_task_approve', kwargs={'task_id': task.id}), follow=True)
+        self.assertEqual(resp2.status_code, 200)
+        task.refresh_from_db()
+        self.transfer.refresh_from_db()
+        self.assertEqual(task.status, 'executed')
+        self.assertEqual(self.transfer.status, 'cancelled')
+
+    def test_manager_unit_disposal_should_create_approval_task(self):
+        unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKU-APPROVAL-DISPOSE-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part,
+            expected_quantity=1,
+            actual_quantity=1,
+            status='normal',
+            is_active=True,
+        )
+        self.client.force_login(self.manager)
+        resp = self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'scrap', 'issue_desc': '审批报废', 'notes': '待审批'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        unit.refresh_from_db()
+        self.assertTrue(unit.is_active)
+        self.assertFalse(UnitDisposalOrder.objects.filter(unit=unit).exists())
+        task = ApprovalTask.objects.filter(
+            action_code='unit.dispose',
+            target_type='inventory_unit',
+            target_id=unit.id,
+            status='pending',
+        ).first()
+        self.assertIsNotNone(task)
+        self.assertEqual(task.requested_by_id, self.manager.id)
+
+    def test_manager_unit_disposal_should_use_scrap_specific_required_count(self):
+        SystemSettings.objects.update_or_create(
+            key='approval_required_count_unit_dispose',
+            defaults={'value': '1'},
+        )
+        SystemSettings.objects.update_or_create(
+            key='approval_required_count_unit_scrap',
+            defaults={'value': '3'},
+        )
+        unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKU-APPROVAL-DISPOSE-SCRAP-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part,
+            expected_quantity=1,
+            actual_quantity=1,
+            status='normal',
+            is_active=True,
+        )
+        self.client.force_login(self.manager)
+        resp = self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'scrap', 'issue_desc': '审批报废层级', 'notes': 'scrap-level'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task = ApprovalTask.objects.filter(
+            action_code='unit.dispose',
+            target_type='inventory_unit',
+            target_id=unit.id,
+            status='pending',
+        ).first()
+        self.assertIsNotNone(task)
+        self.assertEqual(task.required_review_count, 3)
+
+    def test_manager_unit_disposal_should_allow_map_override_for_disassemble(self):
+        SystemSettings.objects.update_or_create(
+            key='approval_required_count_unit_disassemble',
+            defaults={'value': '1'},
+        )
+        SystemSettings.objects.update_or_create(
+            key='approval_required_count_map',
+            defaults={'value': '{"unit.dispose.disassemble": 2, "unit.dispose.scrap": 3}'},
+        )
+        unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKU-APPROVAL-DISPOSE-DIS-0001',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part,
+            expected_quantity=1,
+            actual_quantity=1,
+            status='normal',
+            is_active=True,
+        )
+        self.client.force_login(self.manager)
+        resp = self.client.post(
+            reverse('unit_disposal_create', kwargs={'unit_id': unit.id}),
+            {'action_type': 'disassemble', 'issue_desc': '审批拆解层级', 'notes': 'disassemble-level'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task = ApprovalTask.objects.filter(
+            action_code='unit.dispose',
+            target_type='inventory_unit',
+            target_id=unit.id,
+            status='pending',
+        ).first()
+        self.assertIsNotNone(task)
+        self.assertEqual(task.required_review_count, 2)
+
+    def test_admin_approve_unit_disposal_should_execute(self):
+        unit = InventoryUnit.objects.create(
+            sku=self.sku,
+            unit_no='ZSY-SKU-APPROVAL-DISPOSE-0002',
+            status='in_warehouse',
+            current_location_type='warehouse',
+            is_active=True,
+        )
+        InventoryUnitPart.objects.create(
+            unit=unit,
+            part=self.part,
+            expected_quantity=1,
+            actual_quantity=1,
+            status='normal',
+            is_active=True,
+        )
+        task = ApprovalTask.objects.create(
+            action_code='unit.dispose',
+            module='在外库存',
+            target_type='inventory_unit',
+            target_id=unit.id,
+            target_label=unit.unit_no,
+            summary='审批报废单套',
+            payload={
+                'unit_id': unit.id,
+                'unit_no': unit.unit_no,
+                'action_type': 'scrap',
+                'issue_desc': '审批执行报废',
+                'notes': '审批通过后执行',
+            },
+            requested_by=self.manager,
+        )
+        self.client.force_login(self.admin)
+        resp = self.client.post(
+            reverse('approval_task_approve', kwargs={'task_id': task.id}),
+            {'note': '同意报废'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        unit.refresh_from_db()
+        self.assertEqual(task.status, 'executed')
+        self.assertFalse(unit.is_active)
+        self.assertEqual(unit.status, 'scrapped')
+        self.assertTrue(UnitDisposalOrder.objects.filter(unit=unit, status='completed').exists())
+
+    def test_admin_remind_pending_approval_should_increment_counter(self):
+        task = ApprovalTask.objects.create(
+            action_code='order.force_cancel',
+            module='订单',
+            target_type='order',
+            target_id=self.target_order.id,
+            target_label=self.target_order.order_no,
+            summary='申请取消',
+            payload={'order_id': self.target_order.id},
+            requested_by=self.manager,
+        )
+        self.client.force_login(self.admin)
+        resp = self.client.post(
+            reverse('approval_task_remind', kwargs={'task_id': task.id}),
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.remind_count, 1)
+        self.assertIsNotNone(task.last_reminded_at)
+
+    def test_approval_sla_remind_command_should_increment_overdue_tasks(self):
+        task = ApprovalTask.objects.create(
+            action_code='order.force_cancel',
+            module='订单',
+            target_type='order',
+            target_id=self.target_order.id,
+            target_label=self.target_order.order_no,
+            summary='申请取消',
+            payload={'order_id': self.target_order.id},
+            requested_by=self.manager,
+        )
+        ApprovalTask.objects.filter(id=task.id).update(created_at=timezone.now() - timedelta(hours=30))
+        out = StringIO()
+        call_command('approval_sla_remind', '--hours=24', stdout=out)
+        task.refresh_from_db()
+        self.assertEqual(task.remind_count, 1)
+        self.assertIn('reminded=1', out.getvalue())
+
+    def test_two_level_approval_should_execute_only_after_second_reviewer(self):
+        task = ApprovalTask.objects.create(
+            action_code='order.force_cancel',
+            module='订单',
+            target_type='order',
+            target_id=self.target_order.id,
+            target_label=self.target_order.order_no,
+            summary='二级审批取消',
+            payload={
+                'order_id': self.target_order.id,
+                'order_no': self.target_order.order_no,
+                'reason': '二级审批测试',
+            },
+            requested_by=self.manager,
+            required_review_count=2,
+        )
+        self.client.force_login(self.admin)
+        resp1 = self.client.post(reverse('approval_task_approve', kwargs={'task_id': task.id}), follow=True)
+        self.assertEqual(resp1.status_code, 200)
+        task.refresh_from_db()
+        self.target_order.refresh_from_db()
+        self.assertEqual(task.status, 'pending')
+        self.assertEqual(task.current_review_count, 1)
+        self.assertEqual(self.target_order.status, 'pending')
+
+        # 同一审批人重复审批应被拒绝
+        resp_dup = self.client.post(reverse('approval_task_approve', kwargs={'task_id': task.id}), follow=True)
+        self.assertEqual(resp_dup.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.current_review_count, 1)
+
+        self.client.force_login(self.admin2)
+        resp2 = self.client.post(reverse('approval_task_approve', kwargs={'task_id': task.id}), follow=True)
+        self.assertEqual(resp2.status_code, 200)
+        task.refresh_from_db()
+        self.target_order.refresh_from_db()
+        self.assertEqual(task.status, 'executed')
+        self.assertEqual(task.current_review_count, 2)
+        self.assertEqual(self.target_order.status, 'cancelled')
+
+    def test_approval_sla_remind_dry_run_should_not_change_counter(self):
+        task = ApprovalTask.objects.create(
+            action_code='order.force_cancel',
+            module='订单',
+            target_type='order',
+            target_id=self.target_order.id,
+            target_label=self.target_order.order_no,
+            summary='申请取消',
+            payload={'order_id': self.target_order.id},
+            requested_by=self.manager,
+        )
+        ApprovalTask.objects.filter(id=task.id).update(created_at=timezone.now() - timedelta(hours=30))
+        out = StringIO()
+        call_command('approval_sla_remind', '--hours=24', '--dry-run', stdout=out)
+        task.refresh_from_db()
+        self.assertEqual(task.remind_count, 0)
+        self.assertIn('mode=dry_run', out.getvalue())
+
+    def test_approval_remind_overdue_view_should_batch_increment(self):
+        task = ApprovalTask.objects.create(
+            action_code='order.force_cancel',
+            module='订单',
+            target_type='order',
+            target_id=self.target_order.id,
+            target_label=self.target_order.order_no,
+            summary='申请取消',
+            payload={'order_id': self.target_order.id},
+            requested_by=self.manager,
+        )
+        ApprovalTask.objects.filter(id=task.id).update(created_at=timezone.now() - timedelta(hours=30))
+        self.client.force_login(self.admin)
+        resp = self.client.post(reverse('approval_remind_overdue'), follow=True)
+        self.assertEqual(resp.status_code, 200)
+        task.refresh_from_db()
+        self.assertEqual(task.remind_count, 1)
+
+    def test_approvals_list_should_support_mine_only_reviewable_only_and_export(self):
+        mine_task = ApprovalTask.objects.create(
+            action_code='order.force_cancel',
+            module='订单',
+            target_type='order',
+            target_id=self.target_order.id,
+            target_label=self.target_order.order_no,
+            summary='我发起审批',
+            payload={'order_id': self.target_order.id},
+            requested_by=self.admin,
+        )
+        other_task = ApprovalTask.objects.create(
+            action_code='transfer.cancel_task',
+            module='转寄',
+            target_type='transfer',
+            target_id=self.transfer.id,
+            target_label=f'任务#{self.transfer.id}',
+            summary='他人发起审批',
+            payload={'transfer_id': self.transfer.id},
+            requested_by=self.manager,
+        )
+
+        self.client.force_login(self.admin)
+        mine_resp = self.client.get(reverse('approvals_list') + '?mine_only=1')
+        self.assertEqual(mine_resp.status_code, 200)
+        self.assertContains(mine_resp, mine_task.task_no)
+        self.assertNotContains(mine_resp, other_task.task_no)
+
+        reviewable_resp = self.client.get(reverse('approvals_list') + '?reviewable_only=1')
+        self.assertEqual(reviewable_resp.status_code, 200)
+        self.assertContains(reviewable_resp, other_task.task_no)
+        self.assertNotContains(reviewable_resp, mine_task.task_no)
+
+        export_resp = self.client.get(reverse('approvals_list') + '?reviewable_only=1&export=1')
+        self.assertEqual(export_resp.status_code, 200)
+        self.assertIn('text/csv', export_resp['Content-Type'])
+        content = export_resp.content.decode('utf-8-sig')
+        self.assertIn(other_task.task_no, content)
+        self.assertNotIn(mine_task.task_no, content)
+
+
+class FinanceCenterTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username='finance_admin',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.client.login(username='finance_admin', password='test123')
+        self.sku = SKU.objects.create(
+            code='SKU-FIN-001',
+            name='财务中心套餐',
+            category='主题套餐',
+            rental_price=Decimal('120.00'),
+            deposit=Decimal('80.00'),
+            stock=2,
+            is_active=True,
+        )
+        self.order = Order.objects.create(
+            customer_name='财务测试客户',
+            customer_phone='18888880001',
+            delivery_address='广东省深圳市福田区',
+            event_date=date.today() + timedelta(days=5),
+            rental_days=1,
+            status='pending',
+            total_amount=Decimal('120.00'),
+            balance=Decimal('120.00'),
+            created_by=self.admin,
+        )
+        OrderItem.objects.create(
+            order=self.order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=Decimal('120.00'),
+        )
+
+    def test_order_detail_should_support_manual_finance_add(self):
+        resp = self.client.post(
+            reverse('order_finance_add', kwargs={'order_id': self.order.id}),
+            {
+                'transaction_type': 'penalty_charge',
+                'amount': '66.50',
+                'notes': '损坏扣罚',
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        tx = FinanceTransaction.objects.filter(order=self.order).order_by('-id').first()
+        self.assertIsNotNone(tx)
+        self.assertEqual(tx.transaction_type, 'penalty_charge')
+        self.assertEqual(tx.amount, Decimal('66.50'))
+
+    def test_finance_transactions_list_export_should_work(self):
+        FinanceTransaction.objects.create(
+            order=self.order,
+            transaction_type='deposit_received',
+            amount=Decimal('80.00'),
+            notes='测试',
+            created_by=self.admin,
+        )
+        resp = self.client.get(reverse('finance_transactions_list') + '?export=1')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp['Content-Type'], 'text/csv; charset=utf-8-sig')
+        self.assertIn('finance_transactions.csv', resp['Content-Disposition'])
+
+
+class TransferRecommendationReplayTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username='replay_admin',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.client.login(username='replay_admin', password='test123')
+        for key, value in (
+            ('buffer_days', '1'),
+            ('max_transfer_gap_days', '15'),
+        ):
+            SystemSettings.objects.update_or_create(key=key, defaults={'value': value})
+        self.sku = SKU.objects.create(
+            code='SKU-REPLAY-1',
+            name='推荐回放套餐',
+            category='主题套餐',
+            rental_price=Decimal('168.00'),
+            deposit=Decimal('200.00'),
+            stock=5,
+            is_active=True,
+        )
+        self.source = Order.objects.create(
+            customer_name='来源用户',
+            customer_phone='13600000001',
+            delivery_address='广东省广州市天河区体育西路1号',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.admin,
+            ship_date=date.today() - timedelta(days=1),
+            return_date=date.today() + timedelta(days=1),
+        )
+        self.target = Order.objects.create(
+            customer_name='目标用户',
+            customer_phone='13600000002',
+            delivery_address='广东省广州市越秀区中山一路2号',
+            event_date=date.today() + timedelta(days=7),
+            rental_days=1,
+            status='pending',
+            created_by=self.admin,
+        )
+        OrderItem.objects.create(
+            order=self.source,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=self.sku.rental_price,
+        )
+        OrderItem.objects.create(
+            order=self.target,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=self.sku.rental_price,
+        )
+        TransferAllocation.objects.create(
+            source_order=self.source,
+            target_order=self.target,
+            sku=self.sku,
+            quantity=1,
+            target_event_date=self.target.event_date,
+            window_start=self.target.event_date - timedelta(days=5),
+            window_end=self.target.event_date + timedelta(days=5),
+            distance_score=Decimal('10.0000'),
+            status='locked',
+            created_by=self.admin,
+        )
+
+    def test_transfer_recommend_should_write_replay_log(self):
+        resp = self.client.post(
+            reverse('transfer_recommend'),
+            {'rows[]': [f'{self.target.id}:{self.sku.id}']},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        log = TransferRecommendationLog.objects.filter(order=self.target, sku=self.sku).order_by('-id').first()
+        self.assertIsNotNone(log)
+        self.assertEqual(log.trigger_type, 'recommend')
+        self.assertTrue((log.score_summary or {}).get('weights'))
+        self.assertGreaterEqual(int((log.score_summary or {}).get('candidate_count', 0)), 1)
+        self.assertTrue(log.candidates and log.candidates[0].get('score_total') is not None)
+
+    def test_transfer_recommendation_logs_page_should_render(self):
+        TransferRecommendationLog.objects.create(
+            order=self.target,
+            sku=self.sku,
+            trigger_type='recommend',
+            target_event_date=self.target.event_date,
+            target_address=self.target.delivery_address,
+            before_source_order_ids=[self.source.id],
+            selected_source_order_id=self.source.id,
+            selected_source_order_no=self.source.order_no,
+            warehouse_needed=0,
+            candidates=[],
+            score_summary={'candidate_count': 1},
+            operator=self.admin,
+        )
+        resp = self.client.get(reverse('transfer_recommendation_logs'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, self.target.order_no)
+        self.assertContains(resp, '查看评分')
+
+    def test_transfer_recommendation_logs_export_should_return_csv(self):
+        TransferRecommendationLog.objects.create(
+            order=self.target,
+            sku=self.sku,
+            trigger_type='recommend',
+            target_event_date=self.target.event_date,
+            target_address=self.target.delivery_address,
+            before_source_order_ids=[self.source.id],
+            selected_source_order_id=self.source.id,
+            selected_source_order_no=self.source.order_no,
+            warehouse_needed=0,
+            candidates=[],
+            score_summary={'candidate_count': 1},
+            operator=self.admin,
+        )
+        resp = self.client.get(reverse('transfer_recommendation_logs') + '?trigger_type=recommend&export=1')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('text/csv', resp['Content-Type'])
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn('目标订单号', content)
+        self.assertIn('命中排名', content)
+        self.assertIn(self.target.order_no, content)
+        self.assertIn('转寄中心重推', content)
+
+    def test_transfer_recommendation_logs_page_should_support_decision_filter(self):
+        TransferRecommendationLog.objects.create(
+            order=self.target,
+            sku=self.sku,
+            trigger_type='recommend',
+            target_event_date=self.target.event_date,
+            target_address=self.target.delivery_address,
+            before_source_order_ids=[],
+            selected_source_order_id=None,
+            selected_source_order_no='',
+            warehouse_needed=1,
+            candidates=[],
+            score_summary={'candidate_count': 0},
+            operator=self.admin,
+        )
+        resp = self.client.get(reverse('transfer_recommendation_logs') + '?decision_type=warehouse')
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '仓库补量')
+
+
+class FinanceReconciliationTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username='recon_admin',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.client.login(username='recon_admin', password='test123')
+        self.sku = SKU.objects.create(
+            code='SKU-REC-001',
+            name='对账套餐',
+            category='主题套餐',
+            rental_price=Decimal('200.00'),
+            deposit=Decimal('100.00'),
+            stock=2,
+            is_active=True,
+        )
+        self.order = Order.objects.create(
+            customer_name='对账客户',
+            customer_phone='17700000001',
+            delivery_address='广东省深圳市南山区',
+            event_date=date.today() + timedelta(days=5),
+            rental_days=1,
+            status='completed',
+            total_amount=Decimal('200.00'),
+            deposit_paid=Decimal('100.00'),
+            balance=Decimal('0.00'),
+            created_by=self.admin,
+        )
+        OrderItem.objects.create(
+            order=self.order,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=self.sku.rental_price,
+        )
+        FinanceTransaction.objects.create(order=self.order, transaction_type='deposit_received', amount=Decimal('100.00'), created_by=self.admin)
+        FinanceTransaction.objects.create(order=self.order, transaction_type='balance_received', amount=Decimal('200.00'), created_by=self.admin)
+        FinanceTransaction.objects.create(order=self.order, transaction_type='deposit_refund', amount=Decimal('100.00'), created_by=self.admin)
+
+    def test_finance_reconciliation_page_should_render(self):
+        resp = self.client.get(reverse('finance_reconciliation'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, self.order.order_no)
+        self.assertContains(resp, '一致')
+        self.assertContains(resp, '最大差异金额')
+
+    def test_finance_reconciliation_mismatch_filter_should_work(self):
+        FinanceTransaction.objects.create(order=self.order, transaction_type='deposit_refund', amount=Decimal('10.00'), created_by=self.admin)
+        resp = self.client.get(reverse('finance_reconciliation') + '?mismatch_only=1')
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, self.order.order_no)
+
+    def test_finance_reconciliation_should_render_suggestions_for_mismatch(self):
+        FinanceTransaction.objects.create(
+            order=self.order,
+            transaction_type='deposit_refund',
+            amount=Decimal('10.00'),
+            created_by=self.admin
+        )
+        resp = self.client.get(reverse('finance_reconciliation'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '退押超额')
+
+    def test_finance_reconciliation_raise_risk_should_create_event(self):
+        FinanceTransaction.objects.create(
+            order=self.order,
+            transaction_type='deposit_refund',
+            amount=Decimal('10.00'),
+            created_by=self.admin
+        )
+        before = RiskEvent.objects.count()
+        resp = self.client.post(
+            reverse('finance_reconciliation_raise_risk', kwargs={'order_id': self.order.id}),
+            {'note': '对账异常测试'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(RiskEvent.objects.count(), before + 1)
+        event = RiskEvent.objects.order_by('-id').first()
+        self.assertIn('财务对账异常', event.title)
+
+    def test_finance_reconciliation_export_should_include_suggestions_and_diff_summary(self):
+        FinanceTransaction.objects.create(
+            order=self.order,
+            transaction_type='deposit_refund',
+            amount=Decimal('10.00'),
+            created_by=self.admin
+        )
+        resp = self.client.get(reverse('finance_reconciliation') + '?mismatch_only=1&export=1')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('text/csv', resp['Content-Type'])
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn('建议', content)
+        self.assertIn('差异摘要', content)
+        self.assertIn(self.order.order_no, content)
+        self.assertIn('退押超额', content)
+        self.assertIn('退押', content)
+
+    def test_finance_reconciliation_should_support_mismatch_field_and_min_amount_filter(self):
+        FinanceTransaction.objects.create(
+            order=self.order,
+            transaction_type='deposit_refund',
+            amount=Decimal('10.00'),
+            created_by=self.admin
+        )
+        # 退押差异=110-100=10，命中 refund 且满足最小差异 5
+        resp = self.client.get(reverse('finance_reconciliation') + '?mismatch_only=1&mismatch_field=refund&min_diff_amount=5')
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, self.order.order_no)
+        # 提高阈值后应过滤掉
+        resp2 = self.client.get(reverse('finance_reconciliation') + '?mismatch_only=1&mismatch_field=refund&min_diff_amount=20')
+        self.assertEqual(resp2.status_code, 200)
+        self.assertNotContains(resp2, self.order.order_no)
+
+    def test_finance_reconciliation_context_should_include_mismatch_stats(self):
+        FinanceTransaction.objects.create(
+            order=self.order,
+            transaction_type='deposit_refund',
+            amount=Decimal('10.00'),
+            created_by=self.admin
+        )
+        resp = self.client.get(reverse('finance_reconciliation') + '?mismatch_only=1')
+        self.assertEqual(resp.status_code, 200)
+        stats = resp.context['mismatch_stats']
+        self.assertGreaterEqual(int(stats.get('abnormal', 0)), 1)
+        self.assertGreaterEqual(int(stats.get('refund_count', 0)), 1)
+
+
+class OpsCenterTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username='ops_admin',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.client.login(username='ops_admin', password='test123')
+        self.sku = SKU.objects.create(
+            code='SKU-OPS-001',
+            name='运维测试套餐',
+            category='主题套餐',
+            rental_price=Decimal('168.00'),
+            deposit=Decimal('200.00'),
+            stock=3,
+            is_active=True,
+        )
+        self.order_from = Order.objects.create(
+            customer_name='来源',
+            customer_phone='18800000001',
+            delivery_address='广东省深圳市南山区',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.admin,
+        )
+        self.order_to = Order.objects.create(
+            customer_name='目标',
+            customer_phone='18800000002',
+            delivery_address='广东省深圳市福田区',
+            event_date=date.today() + timedelta(days=6),
+            rental_days=1,
+            status='pending',
+            created_by=self.admin,
+        )
+        self.transfer = Transfer.objects.create(
+            order_from=self.order_from,
+            order_to=self.order_to,
+            sku=self.sku,
+            quantity=1,
+            gap_days=6,
+            status='pending',
+            created_by=self.admin,
+        )
+        Transfer.objects.filter(id=self.transfer.id).update(
+            created_at=timezone.now() - timedelta(hours=50)
+        )
+        self.approval = ApprovalTask.objects.create(
+            action_code='order.force_cancel',
+            module='订单',
+            target_type='order',
+            target_id=self.order_to.id,
+            target_label=self.order_to.order_no,
+            summary='运维超时审批',
+            payload={'order_id': self.order_to.id},
+            requested_by=self.admin,
+            status='pending',
+        )
+        ApprovalTask.objects.filter(id=self.approval.id).update(
+            created_at=timezone.now() - timedelta(hours=50)
+        )
+        RiskEvent.objects.create(
+            event_type='frequent_cancel',
+            level='high',
+            status='open',
+            module='订单',
+            title='运维风险事件',
+            description='测试',
+            order=self.order_to,
+            detected_by=self.admin,
+        )
+        DataConsistencyCheckRun.objects.create(
+            source='manual',
+            total_issues=2,
+            summary={'total': 2},
+            issues=[{'type': 'finance_reconciliation_mismatch', 'msg': 'x'}],
+            executed_by=self.admin,
+        )
+
+    def test_ops_center_should_render_and_contain_alerts(self):
+        resp = self.client.get(reverse('ops_center'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '转寄任务超时')
+        self.assertContains(resp, '审批任务超时')
+        self.assertContains(resp, '待处理风险事件')
+        self.assertContains(resp, '一致性巡检存在问题')
+        self.assertContains(resp, '财务对账异常')
+
+    def test_ops_center_should_support_filter_and_export(self):
+        resp = self.client.get(reverse('ops_center') + '?source=approval&severity=danger')
+        self.assertEqual(resp.status_code, 200)
+        alerts = resp.context['alerts']
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]['source'], 'approval')
+        self.assertEqual(alerts[0]['severity'], 'danger')
+        self.assertEqual(alerts[0]['title'], '审批任务超时')
+        export_resp = self.client.get(reverse('ops_center') + '?source=approval&severity=danger&export=1')
+        self.assertEqual(export_resp.status_code, 200)
+        self.assertEqual(export_resp['Content-Type'], 'text/csv; charset=utf-8-sig')
+        self.assertIn('ops_alerts.csv', export_resp['Content-Disposition'])
+
+
+class ConsistencyRepairCommandTests(TestCase):
+    def setUp(self):
+        self.sku = SKU.objects.create(
+            code='SKU-REPAIR-001',
+            name='修复测试套餐',
+            category='主题套餐',
+            rental_price=Decimal('168.00'),
+            deposit=Decimal('200.00'),
+            stock=3,
+            is_active=True,
+        )
+
+    def test_repair_consistency_dry_run_should_not_update_stock(self):
+        out = StringIO()
+        call_command('repair_consistency', stdout=out)
+        self.sku.refresh_from_db()
+        self.assertEqual(self.sku.stock, 3)
+        self.assertIn('预览模式', out.getvalue())
+
+    def test_check_consistency_should_output_type_counts_in_text_mode(self):
+        out = StringIO()
+        call_command('check_consistency', stdout=out)
+        content = out.getvalue()
+        self.assertIn('按类型统计', content)
+        self.assertIn('legacy_stock_mismatch', content)
+
+    def test_repair_consistency_apply_should_update_stock(self):
+        out = StringIO()
+        call_command('repair_consistency', '--apply', stdout=out)
+        self.sku.refresh_from_db()
+        # 未创建单套实例时，激活单套数=0，库存应被自动修复到0
+        self.assertEqual(self.sku.stock, 0)
+        self.assertIn('已应用=1', out.getvalue())
+
+    def test_repair_consistency_apply_should_merge_duplicate_locked_when_enabled(self):
+        source = Order.objects.create(
+            customer_name='source-r',
+            customer_phone='18000000001',
+            delivery_address='A',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+        )
+        target = Order.objects.create(
+            customer_name='target-r',
+            customer_phone='18000000002',
+            delivery_address='B',
+            event_date=date.today() + timedelta(days=7),
+            rental_days=1,
+            status='pending',
+        )
+        a1 = TransferAllocation.objects.create(
+            source_order=source,
+            target_order=target,
+            sku=self.sku,
+            quantity=1,
+            target_event_date=target.event_date,
+            window_start=target.event_date - timedelta(days=5),
+            window_end=target.event_date + timedelta(days=5),
+            status='locked',
+        )
+        a2 = TransferAllocation.objects.create(
+            source_order=source,
+            target_order=target,
+            sku=self.sku,
+            quantity=2,
+            target_event_date=target.event_date,
+            window_start=target.event_date - timedelta(days=5),
+            window_end=target.event_date + timedelta(days=5),
+            status='locked',
+        )
+        out = StringIO()
+        call_command('repair_consistency', '--apply', '--fix-duplicate-locked', stdout=out)
+        rows = list(
+            TransferAllocation.objects.filter(
+                source_order=source, target_order=target, sku=self.sku
+            ).order_by('id')
+        )
+        self.assertEqual(len(rows), 2)
+        locked_rows = [r for r in rows if r.status == 'locked']
+        released_rows = [r for r in rows if r.status == 'released']
+        self.assertEqual(len(locked_rows), 1)
+        self.assertEqual(len(released_rows), 1)
+        self.assertEqual(locked_rows[0].quantity, 3)
+        self.assertIn('已应用', out.getvalue())
+
+
+class OpsWatchdogCommandTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='watchdog_user',
+            password='test123',
+            role='admin',
+            is_superuser=True,
+            is_staff=True,
+        )
+        self.sku = SKU.objects.create(
+            code='SKU-WD-001',
+            name='巡检套餐',
+            category='主题套餐',
+            rental_price=Decimal('168.00'),
+            deposit=Decimal('200.00'),
+            stock=2,
+            is_active=True,
+        )
+        self.order_from = Order.objects.create(
+            customer_name='来源',
+            customer_phone='18800000011',
+            delivery_address='广东省深圳市南山区',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        self.order_to = Order.objects.create(
+            customer_name='目标',
+            customer_phone='18800000012',
+            delivery_address='广东省深圳市福田区',
+            event_date=date.today() + timedelta(days=7),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        transfer = Transfer.objects.create(
+            order_from=self.order_from,
+            order_to=self.order_to,
+            sku=self.sku,
+            quantity=1,
+            gap_days=7,
+            status='pending',
+            created_by=self.user,
+        )
+        Transfer.objects.filter(id=transfer.id).update(created_at=timezone.now() - timedelta(hours=50))
+        task = ApprovalTask.objects.create(
+            action_code='order.force_cancel',
+            module='订单',
+            target_type='order',
+            target_id=self.order_to.id,
+            target_label=self.order_to.order_no,
+            summary='待审批',
+            payload={'order_id': self.order_to.id},
+            requested_by=self.user,
+        )
+        ApprovalTask.objects.filter(id=task.id).update(created_at=timezone.now() - timedelta(hours=50))
+        RiskEvent.objects.create(
+            event_type='frequent_cancel',
+            level='medium',
+            status='open',
+            module='订单',
+            title='风控事件',
+            description='测试',
+            detected_by=self.user,
+        )
+        DataConsistencyCheckRun.objects.create(
+            source='manual',
+            total_issues=2,
+            summary={'total': 2, 'type_counts': {'x': 1, 'finance_reconciliation_mismatch': 1}},
+            issues=[{'type': 'x'}, {'type': 'finance_reconciliation_mismatch'}],
+            executed_by=self.user,
+        )
+
+    def test_ops_watchdog_json_should_output_alerts(self):
+        out = StringIO()
+        call_command('ops_watchdog', '--json', stdout=out)
+        payload = json.loads(out.getvalue())
+        self.assertIn('summary', payload)
+        self.assertIn('alerts', payload)
+        self.assertGreaterEqual(payload['summary']['alert_count'], 1)
+        self.assertEqual(payload['summary'].get('finance_mismatch_count'), 1)
+        self.assertTrue(any(a.get('source') == 'finance' for a in payload.get('alerts', [])))
+
+    def test_ops_watchdog_save_audit_should_write_log(self):
+        before = AuditLog.objects.filter(module='运维中心', target='ops_watchdog').count()
+        out = StringIO()
+        call_command('ops_watchdog', '--save-audit', stdout=out)
+        after = AuditLog.objects.filter(module='运维中心', target='ops_watchdog').count()
+        self.assertEqual(after, before + 1)
+
+
+class SmokeFlowCommandTests(TestCase):
+    def test_smoke_flow_should_run_successfully(self):
+        out = StringIO()
+        call_command('smoke_flow', stdout=out)
+        content = out.getvalue()
+        self.assertIn('冒烟通过', content)
+        self.assertIn('页面/API连通性检查通过', content)
+        self.assertIn('已清理冒烟数据', content)
+
+    def test_smoke_flow_skip_http_check_should_run_successfully(self):
+        out = StringIO()
+        call_command('smoke_flow', '--skip-http-check', stdout=out)
+        content = out.getvalue()
+        self.assertIn('冒烟通过', content)
+        self.assertNotIn('页面/API连通性检查通过', content)

@@ -119,6 +119,18 @@ python manage.py runserver
 
 可自定义输出文件：
 
+### 生产部署
+
+- 生产设置模块：`config.settings_prod`
+- 环境变量模板：根目录 `.env.prod.example`
+- 容器化部署样板：
+  - `docker-compose.prod.yml`
+  - `scripts/start_prod.sh`
+  - `deploy/nginx.prod.conf`
+- 部署说明：
+  - [docs/PRODUCTION_DEPLOYMENT_GUIDE_20260312.md](docs/PRODUCTION_DEPLOYMENT_GUIDE_20260312.md)
+  - [docs/PRODUCTION_RELEASE_CHECKLIST_20260312.md](docs/PRODUCTION_RELEASE_CHECKLIST_20260312.md)
+
 ```powershell
 .\.venv\Scripts\python scripts\generate_acceptance_report.py --output docs\ACCEPTANCE_REPORT_CUSTOM.md
 ```

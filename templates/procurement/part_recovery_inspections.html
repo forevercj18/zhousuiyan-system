@@ -1,0 +1,227 @@
+{% extends "base.html" %}
+
+{% block title %}回件质检池 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}回件质检池{% endblock %}
+
+{% block extra_css %}
+<style>
+.summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; }
+.summary-card { background:#fff; border:1px solid #e6ebf2; border-radius:14px; padding:14px 16px; box-shadow:0 8px 24px rgba(15,23,42,.04); }
+.summary-card span { display:block; color:#6b7280; font-size:12px; margin-bottom:6px; }
+.summary-card strong { font-size:24px; color:#111827; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="parts-inventory">
+    {% if from_report %}
+    <div class="alert alert-info d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span>当前数据来自仓储报表下钻，已继承报表筛选口径。</span>
+        <a class="btn btn-sm btn-outline-primary" href="{% url 'warehouse_reports' %}{% if report_back_query %}?{{ report_back_query }}{% endif %}">返回仓储报表</a>
+    </div>
+    {% endif %}
+    <div class="page-header">
+        <div class="header-left">
+            <div class="filter-group">
+                <label>处理状态：</label>
+                <select id="statusFilter" class="form-select" onchange="filterInspections()">
+                    <option value="">全部状态</option>
+                    {% for value, label in status_choices %}
+                    <option value="{{ value }}" {% if status_filter == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>关键词：</label>
+                <input id="keywordInput" type="text" class="form-control" placeholder="处置单/单套/SKU/部件/订单号/备注"
+                       value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterInspections();}">
+            </div>
+            <div class="filter-group">
+                <label>SKU：</label>
+                <select id="skuFilter" class="form-select">
+                    <option value="">全部SKU</option>
+                    {% for sku in sku_choices %}
+                    <option value="{{ sku.id }}" {% if sku_filter == sku.id|stringformat:"s" %}selected{% endif %}>{{ sku.code }} - {{ sku.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>部件：</label>
+                <select id="partFilter" class="form-select">
+                    <option value="">全部部件</option>
+                    {% for part in part_choices %}
+                    <option value="{{ part.id }}" {% if part_filter == part.id|stringformat:"s" %}selected{% endif %}>{{ part.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button class="btn btn-secondary" type="button" onclick="filterInspections()">查询</button>
+            <a class="btn btn-sm" href="{% url 'part_recovery_inspections_list' %}">重置</a>
+        </div>
+        <div class="header-right">
+            <a class="btn btn-secondary" href="{% url 'part_recovery_inspections_export' %}?{{ request.GET.urlencode }}">导出CSV</a>
+            <a class="btn btn-outline-secondary" href="{% url 'unit_disposal_orders_list' %}">查看单套处置单</a>
+        </div>
+    </div>
+
+    <div class="summary-grid mb-3">
+        <div class="summary-card"><span>待质检</span><strong>{{ summary.pending_count }}</strong></div>
+        <div class="summary-card"><span>已回库</span><strong>{{ summary.returned_count }}</strong></div>
+        <div class="summary-card"><span>待维修</span><strong>{{ summary.repair_count }}</strong></div>
+        <div class="summary-card"><span>已报废</span><strong>{{ summary.scrapped_count }}</strong></div>
+    </div>
+
+    <div class="table-container">
+        <div class="table-responsive">
+            <table class="table table-hover table-striped align-middle data-table mb-0">
+                <thead>
+                    <tr>
+                        <th>来源处置单</th>
+                        <th>单套编号</th>
+                        <th>SKU</th>
+                        <th>部件</th>
+                        <th>数量</th>
+                        <th>状态</th>
+                        <th>处理信息</th>
+                        <th>创建时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for inspection in inspections %}
+                    <tr>
+                        <td>{{ inspection.disposal_order.disposal_no }}</td>
+                        <td>{{ inspection.unit.unit_no }}</td>
+                        <td>{{ inspection.sku.code }} - {{ inspection.sku.name }}</td>
+                        <td>{{ inspection.part.name }}</td>
+                        <td>{{ inspection.quantity }}</td>
+                        <td>
+                            {% if inspection.status == 'pending' %}
+                            <span class="badge text-bg-warning">待质检</span>
+                            {% elif inspection.status == 'returned' %}
+                            <span class="badge text-bg-success">已回库</span>
+                            {% elif inspection.status == 'repair' %}
+                            <span class="badge text-bg-info">待维修</span>
+                            {% else %}
+                            <span class="badge text-bg-secondary">已报废</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if inspection.processed_by %}
+                            {{ inspection.processed_by.full_name|default:inspection.processed_by.username }}
+                            <div class="text-muted small">{{ inspection.processed_at|date:"Y-m-d H:i" }}</div>
+                            {% else %}
+                            <span class="text-muted">-</span>
+                            {% endif %}
+                            {% if inspection.notes %}
+                            <div class="text-muted small mt-1">{{ inspection.notes }}</div>
+                            {% endif %}
+                        </td>
+                        <td>{{ inspection.created_at|date:"Y-m-d H:i" }}</td>
+                        <td>
+                            {% if inspection.status == 'pending' %}
+                            <div class="action-buttons flex-wrap">
+                                <form method="post" action="{% url 'part_recovery_inspection_process' inspection.id %}" class="d-inline">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action_type" value="returned">
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button type="submit" class="btn btn-sm btn-success">合格回库</button>
+                                </form>
+                                <form method="post" action="{% url 'part_recovery_inspection_process' inspection.id %}" class="d-inline">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action_type" value="repair">
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button type="submit" class="btn btn-sm btn-warning">转待维修</button>
+                                </form>
+                                <form method="post" action="{% url 'part_recovery_inspection_process' inspection.id %}" class="d-inline">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action_type" value="scrapped">
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button type="submit" class="btn btn-sm btn-danger">报废</button>
+                                </form>
+                            </div>
+                            {% elif inspection.status == 'repair' %}
+                            <div class="action-buttons flex-wrap">
+                                <form method="post" action="{% url 'part_recovery_inspection_process' inspection.id %}" class="d-inline">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action_type" value="returned">
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button type="submit" class="btn btn-sm btn-success">维修完成回库</button>
+                                </form>
+                                <form method="post" action="{% url 'part_recovery_inspection_process' inspection.id %}" class="d-inline">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="action_type" value="scrapped">
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button type="submit" class="btn btn-sm btn-danger">维修失败报废</button>
+                                </form>
+                            </div>
+                            {% else %}
+                            <span class="text-muted">已处理</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="9" class="text-center text-muted py-4">暂无回件质检记录</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    {% if inspections_page %}
+    <div class="pagination-bar">
+        <div class="pagination-summary">
+            共 {{ inspections_page.paginator.count }} 条，第 {{ inspections_page.number }}/{{ inspections_page.paginator.num_pages }} 页
+        </div>
+        <div class="pagination-actions">
+            {% if inspections_page.has_previous %}
+            <a class="btn btn-sm" href="?{{ pagination_query }}{% if pagination_query %}&{% endif %}page={{ inspections_page.previous_page_number }}">上一页</a>
+            {% else %}
+            <button class="btn btn-sm" type="button" disabled>上一页</button>
+            {% endif %}
+            <span class="page-indicator">{{ inspections_page.number }}/{{ inspections_page.paginator.num_pages }}</span>
+            {% if inspections_page.has_next %}
+            <a class="btn btn-sm btn-primary" href="?{{ pagination_query }}{% if pagination_query %}&{% endif %}page={{ inspections_page.next_page_number }}">下一页</a>
+            {% else %}
+            <button class="btn btn-sm btn-primary" type="button" disabled>下一页</button>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function filterInspections() {
+    const params = new URLSearchParams(window.location.search);
+    const status = document.getElementById('statusFilter').value;
+    const keyword = document.getElementById('keywordInput').value.trim();
+    const skuId = document.getElementById('skuFilter').value;
+    const partId = document.getElementById('partFilter').value;
+    if (status) {
+        params.set('status', status);
+    } else {
+        params.delete('status');
+    }
+    if (keyword) {
+        params.set('keyword', keyword);
+    } else {
+        params.delete('keyword');
+    }
+    if (skuId) {
+        params.set('sku_id', skuId);
+    } else {
+        params.delete('sku_id');
+    }
+    if (partId) {
+        params.set('part_id', partId);
+    } else {
+        params.delete('part_id');
+    }
+    params.delete('page');
+    window.location.href = '{% url "part_recovery_inspections_list" %}' + (params.toString() ? ('?' + params.toString()) : '');
+}
+</script>
+{% endblock %}

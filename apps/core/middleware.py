@@ -2,8 +2,12 @@
 操作日志中间件
 自动记录用户的关键操作
 """
+import logging
+
 from django.utils.deprecation import MiddlewareMixin
 from apps.core.services import AuditService
+
+logger = logging.getLogger(__name__)
 
 
 class AuditLogMiddleware(MiddlewareMixin):
@@ -66,7 +70,7 @@ class AuditLogMiddleware(MiddlewareMixin):
                 )
             except Exception as e:
                 # 日志记录失败不应影响正常业务
-                print(f"Failed to create audit log: {e}")
+                logger.exception("Failed to create audit log: %s", e)
 
         return response
 

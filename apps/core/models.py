@@ -62,6 +62,19 @@ class SKU(models.Model):
     def __str__(self):
         return f"{self.code} - {self.name}"
 
+    @property
+    def effective_stock(self):
+        """
+        统一库存口径：
+        - 若已生成单套，则以激活且未报废的单套数量为准
+        - 否则回退到旧 stock 字段，兼容历史测试数据和初始化数据
+        """
+        unit_qs = self.units.filter(is_active=True).exclude(status='scrapped')
+        unit_count = unit_qs.count()
+        if unit_count > 0:
+            return unit_count
+        return int(self.stock or 0)
+
     def get_available_count(self, date):
         """获取仓库实时可用数量（date 参数保留兼容）"""
         # 查询当前未回仓的占用数量
@@ -70,7 +83,7 @@ class SKU(models.Model):
             sku=self
         ).aggregate(total=models.Sum('quantity'))['total'] or 0
 
-        return self.stock - occupied
+        return self.effective_stock - occupied
 
 
 class InventoryUnit(models.Model):
@@ -90,6 +103,14 @@ class InventoryUnit(models.Model):
     ]
 
     sku = models.ForeignKey(SKU, on_delete=models.CASCADE, related_name='units', verbose_name='SKU')
+    source_assembly_order = models.ForeignKey(
+        'AssemblyOrder',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_units',
+        verbose_name='来源装配单'
+    )
     unit_no = models.CharField('单套编号', max_length=64, unique=True)
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='in_warehouse')
     current_order = models.ForeignKey('Order', on_delete=models.SET_NULL, null=True, blank=True, related_name='inventory_units', verbose_name='当前归属订单')
@@ -123,6 +144,11 @@ class UnitMovement(models.Model):
         ('TRANSFER_COMPLETED', '转寄完成'),
         ('RETURN_SHIPPED', '回仓在途'),
         ('RETURNED_WAREHOUSE', '已回仓'),
+        ('MAINTENANCE_CREATED', '维修工单创建'),
+        ('MAINTENANCE_COMPLETED', '维修完成'),
+        ('MAINTENANCE_REVERSED', '维修工单冲销'),
+        ('UNIT_DISASSEMBLED', '单套拆解'),
+        ('UNIT_SCRAPPED', '单套报废'),
         ('EXCEPTION', '异常'),
     ]
 
@@ -173,6 +199,8 @@ class Order(models.Model):
     order_no = models.CharField('订单号', max_length=50, unique=True)
     customer_name = models.CharField('客户姓名', max_length=100)
     customer_phone = models.CharField('联系电话', max_length=20)
+    customer_wechat = models.CharField('微信号', max_length=100, blank=True)
+    xianyu_order_no = models.CharField('闲鱼订单号', max_length=100, blank=True)
     customer_email = models.EmailField('邮箱', blank=True)
 
     # 地址信息
@@ -308,6 +336,307 @@ class Part(models.Model):
     def is_low_stock(self):
         """是否库存不足"""
         return self.current_stock < self.safety_stock
+
+
+class SKUComponent(models.Model):
+    """SKU部件组成（BOM）"""
+    sku = models.ForeignKey(SKU, on_delete=models.CASCADE, related_name='components', verbose_name='SKU')
+    part = models.ForeignKey(Part, on_delete=models.PROTECT, related_name='sku_components', verbose_name='部件')
+    quantity_per_set = models.IntegerField('单套用量', default=1, validators=[MinValueValidator(1)])
+    notes = models.CharField('备注', max_length=200, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'sku_components'
+        verbose_name = 'SKU部件组成'
+        verbose_name_plural = 'SKU部件组成'
+        ordering = ['sku_id', 'part__name']
+        constraints = [
+            models.UniqueConstraint(fields=['sku', 'part'], name='uniq_sku_part_component')
+        ]
+        indexes = [
+            models.Index(fields=['sku']),
+            models.Index(fields=['part']),
+        ]
+
+    def __str__(self):
+        return f"{self.sku.code} - {self.part.name} x {self.quantity_per_set}"
+
+
+class InventoryUnitPart(models.Model):
+    """单套库存对应部件状态快照"""
+    STATUS_CHOICES = [
+        ('normal', '正常'),
+        ('missing', '缺件'),
+        ('damaged', '损坏'),
+        ('lost', '丢失'),
+    ]
+
+    unit = models.ForeignKey(InventoryUnit, on_delete=models.CASCADE, related_name='unit_parts', verbose_name='单套实例')
+    part = models.ForeignKey(Part, on_delete=models.PROTECT, related_name='inventory_unit_parts', verbose_name='部件')
+    expected_quantity = models.IntegerField('应有数量', default=1, validators=[MinValueValidator(1)])
+    actual_quantity = models.IntegerField('实有数量', default=1, validators=[MinValueValidator(0)])
+    status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='normal')
+    notes = models.CharField('备注', max_length=200, blank=True)
+    is_active = models.BooleanField('是否启用', default=True)
+    last_checked_at = models.DateTimeField('最近盘点时间', null=True, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'inventory_unit_parts'
+        verbose_name = '单套部件状态'
+        verbose_name_plural = '单套部件状态'
+        ordering = ['unit_id', 'part__name']
+        constraints = [
+            models.UniqueConstraint(fields=['unit', 'part'], name='uniq_unit_part_status')
+        ]
+        indexes = [
+            models.Index(fields=['unit', 'is_active']),
+            models.Index(fields=['part']),
+            models.Index(fields=['status']),
+        ]
+
+    def __str__(self):
+        return f"{self.unit.unit_no} - {self.part.name} ({self.get_status_display()})"
+
+
+class AssemblyOrder(models.Model):
+    """SKU 装配单：通过部件装配新增套餐库存"""
+    STATUS_CHOICES = [
+        ('draft', '草稿'),
+        ('completed', '已完成'),
+        ('reversed', '已冲销'),
+        ('cancelled', '已取消'),
+    ]
+
+    assembly_no = models.CharField('装配单号', max_length=50, unique=True)
+    sku = models.ForeignKey(SKU, on_delete=models.PROTECT, related_name='assembly_orders', verbose_name='SKU')
+    quantity = models.IntegerField('装配套数', validators=[MinValueValidator(1)])
+    status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='completed')
+    notes = models.TextField('备注', blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_assembly_orders', verbose_name='创建人')
+    completed_at = models.DateTimeField('完成时间', null=True, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'assembly_orders'
+        verbose_name = '装配单'
+        verbose_name_plural = '装配单'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['assembly_no']),
+            models.Index(fields=['sku', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.assembly_no} - {self.sku.code}"
+
+    def save(self, *args, **kwargs):
+        if not self.assembly_no:
+            from django.utils import timezone
+            base = timezone.now().strftime('%Y%m%d%H%M%S%f')
+            self.assembly_no = f"ASM{base}"
+            suffix = 1
+            while AssemblyOrder.objects.filter(assembly_no=self.assembly_no).exists():
+                self.assembly_no = f"ASM{base}{suffix}"
+                suffix += 1
+        super().save(*args, **kwargs)
+
+
+class AssemblyOrderItem(models.Model):
+    """装配单部件扣减明细"""
+    assembly_order = models.ForeignKey(AssemblyOrder, on_delete=models.CASCADE, related_name='items', verbose_name='装配单')
+    part = models.ForeignKey(Part, on_delete=models.PROTECT, related_name='assembly_order_items', verbose_name='部件')
+    quantity_per_set = models.IntegerField('单套用量', validators=[MinValueValidator(1)])
+    required_quantity = models.IntegerField('应扣数量', validators=[MinValueValidator(1)])
+    deducted_quantity = models.IntegerField('实扣数量', validators=[MinValueValidator(1)])
+    notes = models.CharField('备注', max_length=200, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        db_table = 'assembly_order_items'
+        verbose_name = '装配单明细'
+        verbose_name_plural = '装配单明细'
+        ordering = ['assembly_order_id', 'part__name']
+
+    def __str__(self):
+        return f"{self.assembly_order.assembly_no} - {self.part.name}"
+
+
+class MaintenanceWorkOrder(models.Model):
+    """单套维修/换件工单"""
+    STATUS_CHOICES = [
+        ('draft', '草稿'),
+        ('completed', '已完成'),
+        ('cancelled', '已取消'),
+    ]
+
+    work_order_no = models.CharField('工单号', max_length=50, unique=True)
+    unit = models.ForeignKey(InventoryUnit, on_delete=models.PROTECT, related_name='maintenance_work_orders', verbose_name='单套')
+    sku = models.ForeignKey(SKU, on_delete=models.PROTECT, related_name='maintenance_work_orders', verbose_name='SKU')
+    issue_desc = models.TextField('问题描述', blank=True)
+    status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='draft')
+    notes = models.TextField('备注', blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_maintenance_orders', verbose_name='创建人')
+    completed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='completed_maintenance_orders', verbose_name='完成人')
+    completed_at = models.DateTimeField('完成时间', null=True, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'maintenance_work_orders'
+        verbose_name = '维修工单'
+        verbose_name_plural = '维修工单'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['work_order_no']),
+            models.Index(fields=['status']),
+            models.Index(fields=['unit']),
+        ]
+
+    def __str__(self):
+        return f"{self.work_order_no} - {self.unit.unit_no}"
+
+    def save(self, *args, **kwargs):
+        if not self.work_order_no:
+            from django.utils import timezone
+            base = timezone.now().strftime('%Y%m%d%H%M%S%f')
+            self.work_order_no = f"MWO{base}"
+            suffix = 1
+            while MaintenanceWorkOrder.objects.filter(work_order_no=self.work_order_no).exists():
+                self.work_order_no = f"MWO{base}{suffix}"
+                suffix += 1
+        super().save(*args, **kwargs)
+
+
+class MaintenanceWorkOrderItem(models.Model):
+    """维修工单换件明细"""
+    work_order = models.ForeignKey(MaintenanceWorkOrder, on_delete=models.CASCADE, related_name='items', verbose_name='维修工单')
+    old_part = models.ForeignKey(Part, on_delete=models.PROTECT, related_name='maintenance_old_items', verbose_name='故障部件')
+    new_part = models.ForeignKey(Part, on_delete=models.PROTECT, related_name='maintenance_new_items', verbose_name='替换部件')
+    replace_quantity = models.IntegerField('更换数量', validators=[MinValueValidator(1)])
+    notes = models.CharField('备注', max_length=200, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        db_table = 'maintenance_work_order_items'
+        verbose_name = '维修工单明细'
+        verbose_name_plural = '维修工单明细'
+        ordering = ['work_order_id', 'id']
+
+    def __str__(self):
+        return f"{self.work_order.work_order_no} - {self.old_part.name}->{self.new_part.name}"
+
+
+class UnitDisposalOrder(models.Model):
+    """单套拆解/报废工单"""
+    ACTION_CHOICES = [
+        ('disassemble', '拆解回件'),
+        ('scrap', '报废停用'),
+    ]
+    STATUS_CHOICES = [
+        ('draft', '草稿'),
+        ('completed', '已完成'),
+        ('cancelled', '已取消'),
+    ]
+
+    disposal_no = models.CharField('工单号', max_length=50, unique=True)
+    action_type = models.CharField('动作类型', max_length=20, choices=ACTION_CHOICES)
+    unit = models.ForeignKey(InventoryUnit, on_delete=models.PROTECT, related_name='disposal_orders', verbose_name='单套')
+    sku = models.ForeignKey(SKU, on_delete=models.PROTECT, related_name='disposal_orders', verbose_name='SKU')
+    status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='completed')
+    issue_desc = models.TextField('原因说明', blank=True)
+    notes = models.TextField('备注', blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_disposal_orders', verbose_name='创建人')
+    completed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='completed_disposal_orders', verbose_name='完成人')
+    completed_at = models.DateTimeField('完成时间', null=True, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'unit_disposal_orders'
+        verbose_name = '单套处置工单'
+        verbose_name_plural = '单套处置工单'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['disposal_no']),
+            models.Index(fields=['status']),
+            models.Index(fields=['action_type', 'status']),
+            models.Index(fields=['unit']),
+        ]
+
+    def __str__(self):
+        return f"{self.disposal_no} - {self.unit.unit_no}"
+
+    def save(self, *args, **kwargs):
+        if not self.disposal_no:
+            from django.utils import timezone
+            base = timezone.now().strftime('%Y%m%d%H%M%S%f')
+            self.disposal_no = f"UDO{base}"
+            suffix = 1
+            while UnitDisposalOrder.objects.filter(disposal_no=self.disposal_no).exists():
+                self.disposal_no = f"UDO{base}{suffix}"
+                suffix += 1
+        super().save(*args, **kwargs)
+
+
+class UnitDisposalOrderItem(models.Model):
+    """单套处置工单部件明细"""
+    disposal_order = models.ForeignKey(UnitDisposalOrder, on_delete=models.CASCADE, related_name='items', verbose_name='处置工单')
+    part = models.ForeignKey(Part, on_delete=models.PROTECT, related_name='unit_disposal_items', verbose_name='部件')
+    quantity = models.IntegerField('数量', validators=[MinValueValidator(0)])
+    returned_quantity = models.IntegerField('回收入库数量', validators=[MinValueValidator(0)], default=0)
+    notes = models.CharField('备注', max_length=200, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        db_table = 'unit_disposal_order_items'
+        verbose_name = '单套处置明细'
+        verbose_name_plural = '单套处置明细'
+        ordering = ['disposal_order_id', 'part__name']
+
+    def __str__(self):
+        return f"{self.disposal_order.disposal_no} - {self.part.name}"
+
+
+class PartRecoveryInspection(models.Model):
+    """拆解回件质检记录"""
+    STATUS_CHOICES = [
+        ('pending', '待质检'),
+        ('returned', '已回库'),
+        ('repair', '待维修'),
+        ('scrapped', '已报废'),
+    ]
+
+    disposal_order = models.ForeignKey(UnitDisposalOrder, on_delete=models.CASCADE, related_name='recovery_inspections', verbose_name='来源处置单')
+    disposal_item = models.ForeignKey(UnitDisposalOrderItem, on_delete=models.CASCADE, related_name='recovery_inspections', verbose_name='来源处置明细')
+    unit = models.ForeignKey(InventoryUnit, on_delete=models.PROTECT, related_name='recovery_inspections', verbose_name='来源单套')
+    sku = models.ForeignKey(SKU, on_delete=models.PROTECT, related_name='part_recovery_inspections', verbose_name='SKU')
+    part = models.ForeignKey(Part, on_delete=models.PROTECT, related_name='recovery_inspections', verbose_name='部件')
+    quantity = models.IntegerField('待质检数量', validators=[MinValueValidator(1)])
+    status = models.CharField('处理状态', max_length=20, choices=STATUS_CHOICES, default='pending')
+    notes = models.CharField('备注', max_length=200, blank=True)
+    processed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='processed_part_recovery_inspections', verbose_name='处理人')
+    processed_at = models.DateTimeField('处理时间', null=True, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'part_recovery_inspections'
+        verbose_name = '拆解回件质检记录'
+        verbose_name_plural = '拆解回件质检记录'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['part', 'status']),
+            models.Index(fields=['unit']),
+        ]
+
+    def __str__(self):
+        return f"{self.disposal_order.disposal_no} - {self.part.name} x {self.quantity}"
 
 
 class PurchaseOrder(models.Model):
@@ -529,6 +858,206 @@ class SystemSettings(models.Model):
 
     def __str__(self):
         return f"{self.key} = {self.value}"
+
+
+class FinanceTransaction(models.Model):
+    """订单资金流水"""
+    TYPE_CHOICES = [
+        ('deposit_received', '收押金'),
+        ('balance_received', '收尾款'),
+        ('deposit_refund', '退押金'),
+        ('penalty_charge', '扣罚'),
+        ('manual_adjust', '人工调整'),
+    ]
+
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='finance_transactions', verbose_name='订单')
+    transaction_type = models.CharField('交易类型', max_length=30, choices=TYPE_CHOICES)
+    amount = models.DecimalField('金额', max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    reference_no = models.CharField('关联单号', max_length=100, blank=True)
+    notes = models.TextField('备注', blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='操作人')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        db_table = 'finance_transactions'
+        verbose_name = '资金流水'
+        verbose_name_plural = '资金流水'
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['order', 'transaction_type']),
+            models.Index(fields=['created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.order.order_no} {self.transaction_type} {self.amount}"
+
+
+class RiskEvent(models.Model):
+    """风险事件（轻量工单）"""
+    TYPE_CHOICES = [
+        ('delivered_recommend_change', '已发货改单挂靠'),
+        ('delivered_order_cancel', '已发货订单取消'),
+        ('frequent_cancel', '高频取消'),
+    ]
+    LEVEL_CHOICES = [
+        ('low', '低'),
+        ('medium', '中'),
+        ('high', '高'),
+        ('critical', '严重'),
+    ]
+    STATUS_CHOICES = [
+        ('open', '待处理'),
+        ('processing', '处理中'),
+        ('closed', '已关闭'),
+    ]
+
+    event_type = models.CharField('事件类型', max_length=40, choices=TYPE_CHOICES)
+    level = models.CharField('风险级别', max_length=20, choices=LEVEL_CHOICES, default='medium')
+    status = models.CharField('处理状态', max_length=20, choices=STATUS_CHOICES, default='open')
+    module = models.CharField('模块', max_length=50, blank=True, default='')
+    title = models.CharField('标题', max_length=200)
+    description = models.TextField('描述', blank=True)
+    event_data = models.JSONField('事件数据', default=dict, blank=True)
+
+    order = models.ForeignKey(Order, on_delete=models.SET_NULL, null=True, blank=True, related_name='risk_events', verbose_name='关联订单')
+    transfer = models.ForeignKey(Transfer, on_delete=models.SET_NULL, null=True, blank=True, related_name='risk_events', verbose_name='关联转寄任务')
+    detected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='risk_events_detected', verbose_name='触发人')
+    assignee = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='risk_events_assigned', verbose_name='负责人')
+    resolved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='risk_events_resolved', verbose_name='处理人')
+    processing_note = models.TextField('处理备注', blank=True)
+    resolved_at = models.DateTimeField('处理时间', null=True, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'risk_events'
+        verbose_name = '风险事件'
+        verbose_name_plural = '风险事件'
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['status', 'level']),
+            models.Index(fields=['event_type', 'created_at']),
+            models.Index(fields=['order', 'status']),
+        ]
+
+    def __str__(self):
+        return f"[{self.level}] {self.title}"
+
+
+class ApprovalTask(models.Model):
+    """高风险动作审批任务"""
+    STATUS_CHOICES = [
+        ('pending', '待审批'),
+        ('executed', '已执行'),
+        ('rejected', '已驳回'),
+    ]
+
+    task_no = models.CharField('审批单号', max_length=50, unique=True)
+    action_code = models.CharField('动作编码', max_length=50)
+    module = models.CharField('模块', max_length=50, blank=True, default='')
+    target_type = models.CharField('目标类型', max_length=50)
+    target_id = models.IntegerField('目标ID')
+    target_label = models.CharField('目标标识', max_length=120, blank=True, default='')
+    summary = models.CharField('摘要', max_length=200)
+    payload = models.JSONField('审批参数', default=dict, blank=True)
+    status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
+    required_review_count = models.IntegerField('所需审批人数', default=1)
+    current_review_count = models.IntegerField('已审批人数', default=0)
+    reviewed_user_ids = models.JSONField('已审批用户ID列表', default=list, blank=True)
+    review_trail = models.JSONField('审批轨迹', default=list, blank=True)
+    requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='approval_tasks_requested', verbose_name='申请人')
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approval_tasks_reviewed', verbose_name='审批人')
+    review_note = models.CharField('审批备注', max_length=300, blank=True, default='')
+    reviewed_at = models.DateTimeField('审批时间', null=True, blank=True)
+    executed_at = models.DateTimeField('执行时间', null=True, blank=True)
+    remind_count = models.IntegerField('催办次数', default=0)
+    last_reminded_at = models.DateTimeField('最近催办时间', null=True, blank=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'approval_tasks'
+        verbose_name = '审批任务'
+        verbose_name_plural = '审批任务'
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['status', 'action_code']),
+            models.Index(fields=['target_type', 'target_id']),
+            models.Index(fields=['requested_by', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.task_no} {self.action_code} ({self.get_status_display()})"
+
+    def save(self, *args, **kwargs):
+        if not self.task_no:
+            from django.utils import timezone
+            base = timezone.now().strftime('%Y%m%d%H%M%S%f')
+            self.task_no = f"APR{base}"
+            suffix = 1
+            while ApprovalTask.objects.filter(task_no=self.task_no).exists():
+                self.task_no = f"APR{base}{suffix}"
+                suffix += 1
+        super().save(*args, **kwargs)
+
+
+class DataConsistencyCheckRun(models.Model):
+    """数据一致性巡检执行记录"""
+    source = models.CharField('来源', max_length=30, default='manual')
+    total_issues = models.IntegerField('问题总数', default=0)
+    summary = models.JSONField('汇总信息', default=dict, blank=True)
+    issues = models.JSONField('问题明细', default=list, blank=True)
+    executed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='consistency_check_runs', verbose_name='执行人')
+    created_at = models.DateTimeField('执行时间', auto_now_add=True)
+
+    class Meta:
+        db_table = 'data_consistency_check_runs'
+        verbose_name = '一致性巡检记录'
+        verbose_name_plural = '一致性巡检记录'
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['created_at']),
+            models.Index(fields=['source']),
+        ]
+
+    def __str__(self):
+        return f"巡检#{self.id} ({self.total_issues})"
+
+
+class TransferRecommendationLog(models.Model):
+    """转寄推荐决策回放日志"""
+    TRIGGER_CHOICES = [
+        ('recommend', '转寄中心重推'),
+        ('create', '创建订单自动推荐'),
+        ('manual', '手工触发'),
+    ]
+
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='transfer_recommendation_logs', verbose_name='目标订单')
+    sku = models.ForeignKey(SKU, on_delete=models.PROTECT, related_name='transfer_recommendation_logs', verbose_name='SKU')
+    trigger_type = models.CharField('触发类型', max_length=20, choices=TRIGGER_CHOICES, default='recommend')
+    target_event_date = models.DateField('目标预定日期')
+    target_address = models.TextField('目标地址', blank=True)
+    before_source_order_ids = models.JSONField('推荐前来源单ID集合', default=list, blank=True)
+    selected_source_order_id = models.IntegerField('推荐后来源单ID', null=True, blank=True)
+    selected_source_order_no = models.CharField('推荐后来源单号', max_length=60, blank=True, default='')
+    warehouse_needed = models.IntegerField('需仓库补量', default=0)
+    candidates = models.JSONField('候选快照', default=list, blank=True)
+    score_summary = models.JSONField('评分摘要', default=dict, blank=True)
+    operator = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='transfer_recommendation_logs', verbose_name='触发人')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        db_table = 'transfer_recommendation_logs'
+        verbose_name = '转寄推荐日志'
+        verbose_name_plural = '转寄推荐日志'
+        ordering = ['-created_at', '-id']
+        indexes = [
+            models.Index(fields=['order', 'sku', 'created_at']),
+            models.Index(fields=['trigger_type', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.order.order_no} / {self.sku.code} / {self.trigger_type}"
 
 
 class AuditLog(models.Model):

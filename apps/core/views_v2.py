@@ -439,7 +439,7 @@ def api_get_sku_details(request, sku_id):
                 'name': sku.name,
                 'rental_price': str(sku.rental_price),
                 'deposit': str(sku.deposit),
-                'stock': sku.stock,
+                'stock': sku.effective_stock,
             }
         })
     except SKU.DoesNotExist:

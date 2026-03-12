@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+
+{% block title %}维修工单 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}维修工单{% endblock %}
+
+{% block extra_css %}
+<style>
+.summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:16px; }
+.summary-card { background:#fff; border:1px solid #e6ebf2; border-radius:14px; padding:14px 16px; box-shadow:0 8px 24px rgba(15,23,42,.04); }
+.summary-card span { display:block; color:#6b7280; font-size:12px; margin-bottom:6px; }
+.summary-card strong { font-size:24px; color:#111827; }
+</style>
+{% endblock %}
+
+{% block content %}
+{% if from_report %}
+<div class="alert alert-info d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span>当前数据来自仓储报表下钻，已继承报表筛选口径。</span>
+    <a class="btn btn-sm btn-outline-primary" href="{% url 'warehouse_reports' %}{% if report_back_query %}?{{ report_back_query }}{% endif %}">返回仓储报表</a>
+</div>
+{% endif %}
+<div class="page-header">
+    <div class="header-left">
+        <form method="get" class="d-flex flex-wrap gap-2 align-items-center">
+            <input type="text" name="keyword" class="form-control" style="max-width:280px;" value="{{ keyword }}" placeholder="工单号/单套号/SKU/部件/订单号">
+            <select name="sku_id" class="form-select" style="max-width:220px;">
+                <option value="">全部SKU</option>
+                {% for sku in sku_choices %}
+                <option value="{{ sku.id }}" {% if sku_filter == sku.id|stringformat:"s" %}selected{% endif %}>{{ sku.code }} - {{ sku.name }}</option>
+                {% endfor %}
+            </select>
+            <select name="part_id" class="form-select" style="max-width:220px;">
+                <option value="">全部部件</option>
+                {% for part in part_choices %}
+                <option value="{{ part.id }}" {% if part_filter == part.id|stringformat:"s" %}selected{% endif %}>{{ part.name }}</option>
+                {% endfor %}
+            </select>
+            <select name="status" class="form-select" style="max-width:180px;">
+                <option value="">全部状态</option>
+                {% for key, label in status_choices %}
+                <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="btn btn-secondary">查询</button>
+            <a class="btn btn-sm" href="{% url 'maintenance_work_orders_list' %}">重置</a>
+        </form>
+    </div>
+    <div class="header-right">
+        <a class="btn btn-secondary" href="{% url 'maintenance_work_orders_export' %}?{{ request.GET.urlencode }}">导出CSV</a>
+        <a class="btn btn-primary" href="{% url 'outbound_inventory_dashboard' %}">去单套明细提工单</a>
+    </div>
+</div>
+
+<div class="summary-grid">
+    <div class="summary-card"><span>工单总数</span><strong>{{ summary.total_count }}</strong></div>
+    <div class="summary-card"><span>待执行</span><strong>{{ summary.draft_count }}</strong></div>
+    <div class="summary-card"><span>已完成</span><strong>{{ summary.completed_count }}</strong></div>
+    <div class="summary-card"><span>已冲销</span><strong>{{ summary.reversed_count }}</strong></div>
+</div>
+
+<div class="table-container">
+    <div class="table-responsive">
+        <table class="table table-hover table-striped align-middle data-table mb-0">
+            <thead>
+                <tr>
+                    <th>工单号</th>
+                    <th>单套编号</th>
+                    <th>SKU</th>
+                    <th>换件明细</th>
+                    <th>问题描述</th>
+                    <th>状态</th>
+                    <th>创建人</th>
+                    <th>创建时间</th>
+                    <th>完成时间</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for order in maintenance_orders %}
+                <tr>
+                    <td>{{ order.work_order_no }}</td>
+                    <td>{{ order.unit.unit_no }}</td>
+                    <td>{{ order.sku.code }} - {{ order.sku.name }}</td>
+                    <td>{{ order.items_summary }}</td>
+                    <td>{{ order.issue_desc|default:"-" }}</td>
+                    <td>{{ order.get_status_display }}</td>
+                    <td>{{ order.created_by.username|default:"-" }}</td>
+                    <td>{{ order.created_at|date:"Y-m-d H:i" }}</td>
+                    <td>{% if order.completed_at %}{{ order.completed_at|date:"Y-m-d H:i" }}{% else %}-{% endif %}</td>
+                    <td>
+                        {% if order.status == 'draft' %}
+                        <form method="post" action="{% url 'maintenance_work_order_complete' order.id %}" class="d-inline">
+                            {% csrf_token %}
+                            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                            <button type="submit" class="btn btn-sm btn-success">执行工单</button>
+                        </form>
+                        <form method="post" action="{% url 'maintenance_work_order_cancel' order.id %}" class="d-inline ms-1">
+                            {% csrf_token %}
+                            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                            <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('确认取消该维修工单？')">取消工单</button>
+                        </form>
+                        {% elif order.status == 'completed' %}
+                        <form method="post" action="{% url 'maintenance_work_order_reverse' order.id %}" class="d-inline">
+                            {% csrf_token %}
+                            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                            <button type="submit" class="btn btn-sm btn-outline-warning" onclick="return confirm('确认冲销该维修工单？')">冲销工单</button>
+                        </form>
+                        {% else %}
+                        <span class="text-muted">-</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="10" class="text-center">暂无维修工单</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% if maintenance_orders_page and maintenance_orders_page.paginator.num_pages > 1 %}
+<nav aria-label="维修工单分页" class="d-flex justify-content-between align-items-center mt-3">
+    <span class="page-info">第 {{ maintenance_orders_page.number }} 页，共 {{ maintenance_orders_page.paginator.num_pages }} 页（共 {{ maintenance_orders_page.paginator.count }} 条）</span>
+    <ul class="pagination pagination-sm mb-0">
+        <li class="page-item {% if not maintenance_orders_page.has_previous %}disabled{% endif %}">
+            {% if maintenance_orders_page.has_previous %}
+            <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ maintenance_orders_page.previous_page_number }}">上一页</a>
+            {% else %}
+            <span class="page-link">上一页</span>
+            {% endif %}
+        </li>
+        <li class="page-item disabled"><span class="page-link">{{ maintenance_orders_page.number }} / {{ maintenance_orders_page.paginator.num_pages }}</span></li>
+        <li class="page-item {% if not maintenance_orders_page.has_next %}disabled{% endif %}">
+            {% if maintenance_orders_page.has_next %}
+            <a class="page-link" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}page={{ maintenance_orders_page.next_page_number }}">下一页</a>
+            {% else %}
+            <span class="page-link">下一页</span>
+            {% endif %}
+        </li>
+    </ul>
+</nav>
+{% endif %}
+{% endblock %}

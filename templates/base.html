@@ -25,57 +25,109 @@
                 <h1>周岁宴系统</h1>
             </div>
             <nav class="nav-menu">
-                <a href="{% url 'dashboard' %}" class="nav-item {% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}">
-                    <span class="icon"><i class="bi bi-house-fill"></i></span>
-                    <span>工作台</span>
-                </a>
-                <a href="{% url 'orders_list' %}" class="nav-item {% if 'orders' in request.path or request.resolver_match.url_name == 'workbench' %}active{% endif %}">
-                    <span class="icon"><i class="bi bi-receipt-cutoff"></i></span>
-                    <span>订单中心</span>
-                </a>
-                <a href="{% url 'calendar' %}" class="nav-item {% if request.resolver_match.url_name == 'calendar' %}active{% endif %}">
-                    <span class="icon"><i class="bi bi-calendar3"></i></span>
-                    <span>日历排期</span>
-                </a>
-                <a href="{% url 'skus_list' %}" class="nav-item {% if request.resolver_match.url_name == 'skus_list' %}active{% endif %}">
-                    <span class="icon"><i class="bi bi-box-seam"></i></span>
-                    <span>产品管理</span>
-                </a>
-                <a href="{% url 'transfers_list' %}" class="nav-item {% if request.resolver_match.url_name == 'transfers_list' %}active{% endif %}">
-                    <span class="icon"><i class="bi bi-arrow-left-right"></i></span>
-                    <span>转寄中心</span>
-                </a>
-                <a href="{% url 'outbound_inventory_dashboard' %}" class="nav-item {% if request.resolver_match.url_name == 'outbound_inventory_dashboard' %}active{% endif %}">
-                    <span class="icon"><i class="bi bi-diagram-3"></i></span>
-                    <span>在外库存看板</span>
-                </a>
                 <div class="nav-group">
-                    <div class="nav-group-title">采购管理</div>
-                    <a href="{% url 'purchase_orders_list' %}" class="nav-item {% if 'purchase-orders' in request.path %}active{% endif %}">
+                    <div class="nav-group-title">业务中心</div>
+                    <a href="{% url 'dashboard' %}" class="nav-item {% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-house-fill"></i></span>
+                        <span>工作台</span>
+                    </a>
+                    <a href="{% url 'orders_list' %}" class="nav-item {% if request.resolver_match.url_name == 'orders_list' or request.resolver_match.url_name == 'order_create' or request.resolver_match.url_name == 'order_edit' or request.resolver_match.url_name == 'order_detail' or request.resolver_match.url_name == 'workbench' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-receipt-cutoff"></i></span>
+                        <span>订单中心</span>
+                    </a>
+                    <a href="{% url 'calendar' %}" class="nav-item {% if request.resolver_match.url_name == 'calendar' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-calendar3"></i></span>
+                        <span>日历排期</span>
+                    </a>
+                    <a href="{% url 'transfers_list' %}" class="nav-item {% if request.resolver_match.url_name == 'transfers_list' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-arrow-left-right"></i></span>
+                        <span>转寄中心</span>
+                    </a>
+                    <a href="{% url 'outbound_inventory_dashboard' %}" class="nav-item {% if request.resolver_match.url_name == 'outbound_inventory_dashboard' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-diagram-3"></i></span>
+                        <span>在外库存看板</span>
+                    </a>
+                </div>
+
+                <div class="nav-group">
+                    <div class="nav-group-title">仓储与采购</div>
+                    <a href="{% url 'skus_list' %}" class="nav-item {% if request.resolver_match.url_name == 'skus_list' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-box-seam"></i></span>
+                        <span>产品管理</span>
+                    </a>
+                    <a href="{% url 'assembly_orders_list' %}" class="nav-item {% if request.resolver_match.url_name == 'assembly_orders_list' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-hammer"></i></span>
+                        <span>装配单</span>
+                    </a>
+                    <a href="{% url 'purchase_orders_list' %}" class="nav-item {% if request.resolver_match.url_name == 'purchase_orders_list' or request.resolver_match.url_name == 'purchase_order_create' or request.resolver_match.url_name == 'purchase_order_edit' or request.resolver_match.url_name == 'purchase_order_delete' or request.resolver_match.url_name == 'purchase_orders_bulk_delete' or request.resolver_match.url_name == 'purchase_order_mark_ordered' or request.resolver_match.url_name == 'purchase_order_mark_arrived' or request.resolver_match.url_name == 'purchase_order_mark_stocked' %}active{% endif %}">
                         <span class="icon"><i class="bi bi-cart3"></i></span>
                         <span>采购单</span>
                     </a>
-                    <a href="{% url 'parts_inventory_list' %}" class="nav-item {% if 'parts-inventory' in request.path %}active{% endif %}">
+                    <a href="{% url 'parts_inventory_list' %}" class="nav-item {% if request.resolver_match.url_name == 'parts_inventory_list' or request.resolver_match.url_name == 'part_create' or request.resolver_match.url_name == 'part_edit' or request.resolver_match.url_name == 'part_delete' or request.resolver_match.url_name == 'parts_bulk_delete' or request.resolver_match.url_name == 'part_inbound' or request.resolver_match.url_name == 'part_outbound' %}active{% endif %}">
                         <span class="icon"><i class="bi bi-archive"></i></span>
                         <span>部件库存</span>
                     </a>
-                    <a href="{% url 'parts_movements_list' %}" class="nav-item {% if 'parts-movements' in request.path %}active{% endif %}">
+                    <a href="{% url 'parts_movements_list' %}" class="nav-item {% if request.resolver_match.url_name == 'parts_movements_list' %}active{% endif %}">
                         <span class="icon"><i class="bi bi-journal-text"></i></span>
                         <span>部件流水</span>
                     </a>
+                    <a href="{% url 'part_issue_pool' %}" class="nav-item {% if request.resolver_match.url_name == 'part_issue_pool' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-cone-striped"></i></span>
+                        <span>部件折损池</span>
+                    </a>
+                    <a href="{% url 'part_recovery_inspections_list' %}" class="nav-item {% if request.resolver_match.url_name == 'part_recovery_inspections_list' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-clipboard2-check"></i></span>
+                        <span>回件质检池</span>
+                    </a>
+                    <a href="{% url 'warehouse_reports' %}" class="nav-item {% if request.resolver_match.url_name == 'warehouse_reports' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-bar-chart-line"></i></span>
+                        <span>仓储报表</span>
+                    </a>
+                    <a href="{% url 'maintenance_work_orders_list' %}" class="nav-item {% if request.resolver_match.url_name == 'maintenance_work_orders_list' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-wrench-adjustable-circle"></i></span>
+                        <span>维修工单</span>
+                    </a>
+                    <a href="{% url 'unit_disposal_orders_list' %}" class="nav-item {% if request.resolver_match.url_name == 'unit_disposal_orders_list' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-recycle"></i></span>
+                        <span>单套处置单</span>
+                    </a>
                 </div>
-                <a href="{% url 'audit_logs' %}" class="nav-item {% if request.resolver_match.url_name == 'audit_logs' %}active{% endif %}">
-                    <span class="icon"><i class="bi bi-shield-check"></i></span>
-                    <span>审计日志</span>
-                </a>
-                <a href="{% url 'users_list' %}" class="nav-item {% if request.resolver_match.url_name == 'users_list' %}active{% endif %}">
-                    <span class="icon"><i class="bi bi-people"></i></span>
-                    <span>用户管理</span>
-                </a>
-                <a href="{% url 'settings' %}" class="nav-item {% if request.resolver_match.url_name == 'settings' %}active{% endif %}">
-                    <span class="icon"><i class="bi bi-gear"></i></span>
-                    <span>系统设置</span>
-                </a>
+
+                <div class="nav-group">
+                    <div class="nav-group-title">风控与运营</div>
+                    <a href="{% url 'finance_transactions_list' %}" class="nav-item {% if request.resolver_match.url_name == 'finance_transactions_list' or request.resolver_match.url_name == 'finance_reconciliation' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-cash-coin"></i></span>
+                        <span>财务流水</span>
+                    </a>
+                    <a href="{% url 'risk_events_list' %}" class="nav-item {% if request.resolver_match.url_name == 'risk_events_list' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-exclamation-triangle"></i></span>
+                        <span>风险事件</span>
+                    </a>
+                    <a href="{% url 'approvals_list' %}" class="nav-item {% if request.resolver_match.url_name == 'approvals_list' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-check2-square"></i></span>
+                        <span>审批中心</span>
+                    </a>
+                    <a href="{% url 'audit_logs' %}" class="nav-item {% if request.resolver_match.url_name == 'audit_logs' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-shield-check"></i></span>
+                        <span>审计日志</span>
+                    </a>
+                    <a href="{% url 'ops_center' %}" class="nav-item {% if request.resolver_match.url_name == 'ops_center' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-tools"></i></span>
+                        <span>运维中心</span>
+                    </a>
+                </div>
+
+                <div class="nav-group">
+                    <div class="nav-group-title">系统管理</div>
+                    <a href="{% url 'users_list' %}" class="nav-item {% if request.resolver_match.url_name == 'users_list' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-people"></i></span>
+                        <span>用户管理</span>
+                    </a>
+                    <a href="{% url 'settings' %}" class="nav-item {% if request.resolver_match.url_name == 'settings' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-gear"></i></span>
+                        <span>系统设置</span>
+                    </a>
+                </div>
             </nav>
         </aside>
 

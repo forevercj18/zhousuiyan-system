@@ -6,7 +6,7 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 from decimal import Decimal
-from ..models import Order, OrderItem, SKU, TransferAllocation
+from ..models import Order, OrderItem, SKU, TransferAllocation, FinanceTransaction
 from .inventory_unit_service import InventoryUnitService
 from .audit_service import AuditService
 from ..utils import (
@@ -20,6 +20,47 @@ from ..utils import (
 
 class OrderService:
     """订单服务"""
+
+    @staticmethod
+    def _create_finance_transaction(order, transaction_type, amount, user, notes=''):
+        amount_decimal = Decimal(str(amount or 0))
+        if amount_decimal <= 0:
+            return None
+        return FinanceTransaction.objects.create(
+            order=order,
+            transaction_type=transaction_type,
+            amount=amount_decimal,
+            notes=notes,
+            created_by=user,
+        )
+
+    @staticmethod
+    def record_deposit_refund(order, user, notes=''):
+        """记录押金退还流水（金额<=0时忽略）"""
+        return OrderService._create_finance_transaction(
+            order=order,
+            transaction_type='deposit_refund',
+            amount=order.deposit_paid,
+            user=user,
+            notes=notes or '订单完成退还押金',
+        )
+
+    @staticmethod
+    def record_manual_finance(order, transaction_type, amount, user, notes=''):
+        """手工记账（扣罚/调整/退款等）"""
+        supported = {'deposit_refund', 'penalty_charge', 'manual_adjust', 'balance_received', 'deposit_received'}
+        if transaction_type not in supported:
+            raise ValueError('不支持的交易类型')
+        amount_decimal = Decimal(str(amount or 0))
+        if amount_decimal <= 0:
+            raise ValueError('金额必须大于0')
+        return OrderService._create_finance_transaction(
+            order=order,
+            transaction_type=transaction_type,
+            amount=amount_decimal,
+            user=user,
+            notes=notes or '手工记账',
+        )
 
     @staticmethod
     def _snapshot_order(order):
@@ -55,6 +96,8 @@ class OrderService:
             'status': order.status,
             'customer_name': order.customer_name,
             'customer_phone': order.customer_phone,
+            'customer_wechat': order.customer_wechat,
+            'xianyu_order_no': order.xianyu_order_no,
             'delivery_address': order.delivery_address,
             'event_date': order.event_date,
             'rental_days': order.rental_days,
@@ -78,6 +121,8 @@ class OrderService:
             data: 订单数据 {
                 'customer_name': str,
                 'customer_phone': str,
+                'customer_wechat': str,
+                'xianyu_order_no': str,
                 'customer_email': str,
                 'delivery_address': str,
                 'return_address': str,
@@ -138,6 +183,8 @@ class OrderService:
         order = Order.objects.create(
             customer_name=data['customer_name'],
             customer_phone=data['customer_phone'],
+            customer_wechat=data.get('customer_wechat', ''),
+            xianyu_order_no=data.get('xianyu_order_no', ''),
             customer_email=data.get('customer_email', ''),
             delivery_address=data['delivery_address'],
             return_address=data.get('return_address', data['delivery_address']),
@@ -268,6 +315,8 @@ class OrderService:
         # 更新基本信息
         order.customer_name = data.get('customer_name', order.customer_name)
         order.customer_phone = data.get('customer_phone', order.customer_phone)
+        order.customer_wechat = data.get('customer_wechat', order.customer_wechat)
+        order.xianyu_order_no = data.get('xianyu_order_no', order.xianyu_order_no)
         order.customer_email = data.get('customer_email', order.customer_email)
         order.delivery_address = delivery_address
         order.return_address = data.get('return_address', order.return_address)
@@ -354,6 +403,13 @@ class OrderService:
         # 押金不冲抵租金尾款
         order.balance = order.total_amount
         order.save()
+        OrderService._create_finance_transaction(
+            order=order,
+            transaction_type='deposit_received',
+            amount=order.deposit_paid,
+            user=user,
+            notes='确认订单收取押金',
+        )
 
         # 记录日志
         AuditService.log_with_diff(
@@ -384,9 +440,12 @@ class OrderService:
             Order: 订单对象
         """
         order = Order.objects.get(id=order_id)
+        ship_tracking = (ship_tracking or '').strip()
 
         if order.status != 'confirmed':
             raise ValueError(f"订单状态为 {order.get_status_display()}，无法标记发货")
+        if not ship_tracking:
+            raise ValueError('快递单号不能为空')
         before_snapshot = OrderService._snapshot_order(order)
 
         order.status = 'delivered'
@@ -451,9 +510,12 @@ class OrderService:
             Order: 订单对象
         """
         order = Order.objects.get(id=order_id)
+        return_tracking = (return_tracking or '').strip()
 
         if order.status not in ['delivered', 'in_use']:
             raise ValueError(f"订单状态为 {order.get_status_display()}，无法标记归还")
+        if not return_tracking:
+            raise ValueError('回收快递单号不能为空')
         before_snapshot = OrderService._snapshot_order(order)
 
         order.status = 'returned'
@@ -464,6 +526,13 @@ class OrderService:
             order.balance = order.balance - Decimal(str(balance_paid))
 
         order.save()
+        OrderService._create_finance_transaction(
+            order=order,
+            transaction_type='balance_received',
+            amount=balance_paid,
+            user=user,
+            notes='标记归还收取尾款',
+        )
         InventoryUnitService.return_to_warehouse(order, return_tracking or '', operator=user)
 
         # 记录日志
@@ -504,6 +573,7 @@ class OrderService:
 
         order.status = 'completed'
         order.save()
+        OrderService.record_deposit_refund(order, user, notes='订单完成退还押金')
 
         # 记录日志
         AuditService.log_with_diff(
@@ -535,7 +605,8 @@ class OrderService:
         """
         order = Order.objects.get(id=order_id)
 
-        if order.status in ['completed', 'cancelled']:
+        cancellable_statuses = ['pending', 'confirmed']
+        if order.status not in cancellable_statuses:
             raise ValueError(f"订单状态为 {order.get_status_display()}，无法取消")
         before_snapshot = OrderService._snapshot_order(order)
 
