@@ -8,11 +8,17 @@ $ErrorActionPreference = "Stop"
 $env:PYTHONIOENCODING = "utf-8"
 
 # Development defaults for local run
+if (-not $env:DJANGO_SETTINGS_MODULE) {
+    $env:DJANGO_SETTINGS_MODULE = "config.settings_dev"
+}
 if (-not $env:DEBUG) {
     $env:DEBUG = "True"
 }
 if (-not $env:ALLOWED_HOSTS) {
-    $env:ALLOWED_HOSTS = "127.0.0.1,localhost"
+    $env:ALLOWED_HOSTS = "127.0.0.1,localhost,.trycloudflare.com"
+}
+if (-not $env:CSRF_TRUSTED_ORIGINS) {
+    $env:CSRF_TRUSTED_ORIGINS = "https://*.trycloudflare.com,http://*.trycloudflare.com"
 }
 
 function Write-Step($msg) {

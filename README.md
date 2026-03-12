@@ -42,8 +42,18 @@
 ```bash
 SECRET_KEY=replace-with-your-secret-key
 DEBUG=True
-ALLOWED_HOSTS=127.0.0.1,localhost
+ALLOWED_HOSTS=127.0.0.1,localhost,.trycloudflare.com
+CSRF_TRUSTED_ORIGINS=https://*.trycloudflare.com,http://*.trycloudflare.com
 ```
+
+如果你是通过 Cloudflare Tunnel 暴露本地开发环境，至少需要：
+
+```bash
+ALLOWED_HOSTS=127.0.0.1,localhost,.trycloudflare.com
+CSRF_TRUSTED_ORIGINS=https://*.trycloudflare.com,http://*.trycloudflare.com
+```
+
+否则 Django 会报 `DisallowedHost` 或 CSRF 校验失败。
 
 ### 安装步骤
 
