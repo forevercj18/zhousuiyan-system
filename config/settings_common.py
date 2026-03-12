@@ -45,7 +45,7 @@ def get_database_config():
 # Compatibility default. Production settings must override this requirement.
 SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-zhousuiyan-baby-party-props-rental-system-2024")
 DEBUG = env_bool("DEBUG", False)
-ALLOWED_HOSTS = env_list("ALLOWED_HOSTS", "127.0.0.1,localhost")
+ALLOWED_HOSTS = env_list("ALLOWED_HOSTS", "127.0.0.1,localhost,.trycloudflare.com")
 CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS", "")
 
 AUTH_USER_MODEL = "core.User"
