@@ -3,6 +3,7 @@ __pycache__/
 *.sqlite3
 *.log
 .env
+.env.prod
 venv/
 .venv/
 .vscode/

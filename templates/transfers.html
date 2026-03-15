@@ -126,14 +126,17 @@
                             {% endif %}
                         </td>
                         <td>
-                            {% if item.task_status == 'pending' %}
-                            <span class="badge text-bg-primary">已生成任务</span>
-                            {% elif item.task_status == 'completed' %}
-                            <span class="badge text-bg-success">已完成任务</span>
-                            {% elif item.current_source_type == 'warehouse' %}
-                            <span class="badge text-bg-warning">仓库挂靠</span>
+                            {% if item.current_source_type == 'warehouse' %}
+                                <span class="badge text-bg-warning">仓库挂靠</span>
                             {% else %}
-                            <span class="badge text-bg-success">转寄挂靠</span>
+                                <span class="badge text-bg-success">转寄挂靠</span>
+                            {% endif %}
+                            {% if item.task_status == 'pending' %}
+                                <div class="small text-primary mt-1">任务：待执行</div>
+                            {% elif item.task_status == 'completed' %}
+                                <div class="small text-success mt-1">任务：已完成</div>
+                            {% elif item.task_status == 'cancelled' %}
+                                <div class="small text-secondary mt-1">任务：已取消，可重新生成</div>
                             {% endif %}
                         </td>
                         <td>
@@ -153,6 +156,13 @@
                                 </form>
                                 {% endif %}
                             </div>
+                            {% if item.task_status == 'cancelled' and item.can_generate_task %}
+                                <div class="small text-success mt-2 text-end">当前任务已取消，可重新生成新的转寄任务</div>
+                            {% elif not item.can_generate_task and item.can_generate_reason %}
+                                <div class="small text-danger mt-2 text-end">{{ item.can_generate_reason }}</div>
+                            {% elif not item.can_recommend and item.can_recommend_reason %}
+                                <div class="small text-secondary mt-2 text-end">{{ item.can_recommend_reason }}</div>
+                            {% endif %}
                         </td>
                     </tr>
                     {% empty %}
@@ -295,6 +305,9 @@
     </div>
     </div>
 </div>
+{% if transfer_complete_feedback_json %}
+{{ transfer_complete_feedback_json|json_script:"transferCompleteFeedbackData" }}
+{% endif %}
 <div class="modal fade" id="taskChainModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-scrollable">
         <div class="modal-content">
@@ -312,6 +325,21 @@
     </div>
 </div>
 <script>
+function parseTransferScriptData(elementId, fallbackValue) {
+    const el = document.getElementById(elementId);
+    if (!el) return fallbackValue;
+    try {
+        const firstPass = JSON.parse(el.textContent || 'null');
+        if (typeof firstPass === 'string') {
+            return JSON.parse(firstPass);
+        }
+        return firstPass ?? fallbackValue;
+    } catch (e) {
+        console.error(`parseTransferScriptData failed for ${elementId}`, e);
+        return fallbackValue;
+    }
+}
+
 function filterTransfers() {
     const keyword = (document.getElementById('keywordInput')?.value || '').trim();
     const candidateAction = (document.getElementById('candidateActionInput')?.value || 'all').trim();
@@ -390,6 +418,14 @@ async function generateTasksSelected() {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
+    const feedback = parseTransferScriptData('transferCompleteFeedbackData', null);
+    if (feedback && feedback.message) {
+        if (window.AppUI) {
+            window.AppUI.alert(feedback.message, feedback.title || '提示');
+        } else {
+            alert(feedback.message);
+        }
+    }
     document.querySelectorAll('.transfer-complete-form').forEach((form) => {
         form.addEventListener('submit', async function(e) {
             e.preventDefault();

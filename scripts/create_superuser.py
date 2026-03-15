@@ -3,6 +3,7 @@
 import os
 import sys
 import django
+from django.core.management.utils import get_random_secret_key
 
 # 添加项目根目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14,13 +15,21 @@ from django.contrib.auth import get_user_model
 
 User = get_user_model()
 
-# 检查是否已存在超级用户
-if not User.objects.filter(username='admin').exists():
+username = os.getenv("ADMIN_USERNAME", "admin")
+email = os.getenv("ADMIN_EMAIL", "admin@example.com")
+password = os.getenv("ADMIN_PASSWORD")
+
+if not password:
+    password = get_random_secret_key()
+    print("未提供 ADMIN_PASSWORD，已生成随机初始密码。")
+
+if not User.objects.filter(username=username).exists():
     User.objects.create_superuser(
-        username='admin',
-        email='admin@example.com',
-        password='admin123'
+        username=username,
+        email=email,
+        password=password
     )
-    print('超级用户创建成功: admin / admin123')
+    print(f"超级用户创建成功: {username}")
+    print(f"初始密码: {password}")
 else:
-    print('超级用户已存在')
+    print(f"超级用户已存在: {username}")

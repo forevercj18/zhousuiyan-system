@@ -149,11 +149,13 @@
 
             <!-- 消息提示 -->
             {% if messages %}
-            <div class="messages">
+            <div id="pageMessagesData" class="d-none" aria-hidden="true">
                 {% for message in messages %}
-                <div class="alert alert-{{ message.tags }}">
-                    {{ message }}
-                </div>
+                <div
+                    class="page-message-item"
+                    data-tags="{{ message.tags }}"
+                    data-message="{{ message|escape }}"
+                ></div>
                 {% endfor %}
             </div>
             {% endif %}

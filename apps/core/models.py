@@ -18,8 +18,16 @@ class User(AbstractUser):
         ('warehouse_staff', '仓库操作员'),
         ('customer_service', '客服'),
     ]
+    PERMISSION_MODE_CHOICES = [
+        ('role', '固定角色'),
+        ('custom', '自定义搭配'),
+    ]
 
     role = models.CharField('角色', max_length=20, choices=ROLE_CHOICES, default='warehouse_staff')
+    permission_mode = models.CharField('权限模式', max_length=20, choices=PERMISSION_MODE_CHOICES, default='role')
+    custom_modules = models.JSONField('自定义模块权限', default=list, blank=True)
+    custom_actions = models.JSONField('自定义操作权限', default=list, blank=True)
+    custom_action_permissions = models.JSONField('自定义业务动作权限', default=list, blank=True)
     phone = models.CharField('手机号', max_length=20, blank=True)
     full_name = models.CharField('真实姓名', max_length=50, blank=True)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
@@ -33,6 +41,44 @@ class User(AbstractUser):
 
     def __str__(self):
         return f"{self.username} ({self.get_role_display()})"
+
+    @property
+    def permission_profile_display(self):
+        if self.permission_mode == 'custom':
+            return f'自定义搭配 / {self.get_role_display()}'
+        return self.get_role_display()
+
+    @property
+    def role_display(self):
+        return self.permission_profile_display
+
+    @property
+    def role_badge_class(self):
+        if self.permission_mode == 'custom':
+            return 'role-custom'
+        return f'role-{self.role.replace("_", "-")}'
+
+
+class PermissionTemplate(models.Model):
+    """可复用权限模板"""
+    name = models.CharField('模板名称', max_length=50, unique=True)
+    base_role = models.CharField('基础角色', max_length=20, choices=User.ROLE_CHOICES, default='warehouse_staff')
+    description = models.CharField('说明', max_length=200, blank=True)
+    modules = models.JSONField('模块权限', default=list, blank=True)
+    actions = models.JSONField('操作权限', default=list, blank=True)
+    action_permissions = models.JSONField('业务动作权限', default=list, blank=True)
+    is_active = models.BooleanField('是否启用', default=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'permission_templates'
+        verbose_name = '权限模板'
+        verbose_name_plural = '权限模板'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
 
 
 class SKU(models.Model):

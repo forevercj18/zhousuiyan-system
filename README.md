@@ -42,15 +42,15 @@
 ```bash
 SECRET_KEY=replace-with-your-secret-key
 DEBUG=True
-ALLOWED_HOSTS=127.0.0.1,localhost,.trycloudflare.com
-CSRF_TRUSTED_ORIGINS=https://*.trycloudflare.com,http://*.trycloudflare.com
+ALLOWED_HOSTS=127.0.0.1,localhost,.trycloudflare.com,.yanli.net.cn,erp.yanli.net.cn
+CSRF_TRUSTED_ORIGINS=https://*.trycloudflare.com,http://*.trycloudflare.com,https://erp.yanli.net.cn,http://erp.yanli.net.cn
 ```
 
 如果你是通过 Cloudflare Tunnel 暴露本地开发环境，至少需要：
 
 ```bash
-ALLOWED_HOSTS=127.0.0.1,localhost,.trycloudflare.com
-CSRF_TRUSTED_ORIGINS=https://*.trycloudflare.com,http://*.trycloudflare.com
+ALLOWED_HOSTS=127.0.0.1,localhost,.trycloudflare.com,.yanli.net.cn,erp.yanli.net.cn
+CSRF_TRUSTED_ORIGINS=https://*.trycloudflare.com,http://*.trycloudflare.com,https://erp.yanli.net.cn,http://erp.yanli.net.cn
 ```
 
 否则 Django 会报 `DisallowedHost` 或 CSRF 校验失败。

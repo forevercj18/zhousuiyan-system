@@ -97,6 +97,11 @@
     color: #c2185b;
 }
 
+.role-custom {
+    background: #e0f2fe;
+    color: #0f4c81;
+}
+
 .status-badge {
     display: inline-block;
     padding: 4px 12px;
@@ -133,6 +138,82 @@
 
 .permission-list strong {
     color: #333;
+}
+
+.permission-group {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 16px;
+    margin-top: 12px;
+}
+
+.permission-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: #495057;
+}
+
+.section-card {
+    background: white;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    margin-top: 24px;
+}
+
+.section-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 18px 20px;
+    border-bottom: 1px solid #eef2f7;
+}
+
+.section-card-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: #1f2937;
+    margin: 0;
+}
+
+.muted-note {
+    font-size: 12px;
+    color: #6b7280;
+}
+
+.preview-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+
+.preview-card {
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: #f8fafc;
+}
+
+.preview-card h6 {
+    margin: 0 0 10px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #1f2937;
+}
+
+.preview-list {
+    margin: 0;
+    padding-left: 18px;
+    color: #475569;
+    font-size: 13px;
+    line-height: 1.8;
+}
+
+.preview-list-empty {
+    color: #94a3b8;
+    font-size: 13px;
 }
 </style>
 
@@ -182,7 +263,7 @@
                     <td><strong>{{ user.username }}</strong></td>
                     <td>{{ user.full_name }}</td>
                     <td>
-                        <span class="role-badge role-{{ user.role }}">
+                        <span class="role-badge {{ user.role_badge_class }}">
                             {{ user.role_display }}
                         </span>
                     </td>
@@ -198,11 +279,38 @@
                     <td>{{ user.last_login|default:"从未登录" }}</td>
                     <td>
                         <div class="action-buttons">
-                            <button class="btn btn-primary btn-sm" onclick="editUser({{ user.id }})">编辑</button>
+                            <button
+                                class="btn btn-outline-primary btn-sm"
+                                data-id="{{ user.id }}"
+                                data-username="{{ user.username }}"
+                                data-full-name="{{ user.full_name|default:'' }}"
+                                data-role="{{ user.role }}"
+                                data-permission-mode="{{ user.permission_mode }}"
+                                data-custom-modules="{{ user.custom_modules|join:',' }}"
+                                data-custom-actions="{{ user.custom_actions|join:',' }}"
+                                data-custom-action-permissions="{{ user.custom_action_permissions|join:',' }}"
+                                data-email="{{ user.email|default:'' }}"
+                                data-phone="{{ user.phone|default:'' }}"
+                                type="button"
+                                onclick="previewUserPermissions({{ user.id }})">预览</button>
+                            <button
+                                class="btn btn-primary btn-sm"
+                                data-id="{{ user.id }}"
+                                data-username="{{ user.username }}"
+                                data-full-name="{{ user.full_name|default:'' }}"
+                                data-role="{{ user.role }}"
+                                data-permission-mode="{{ user.permission_mode }}"
+                                data-custom-modules="{{ user.custom_modules|join:',' }}"
+                                data-custom-actions="{{ user.custom_actions|join:',' }}"
+                                data-custom-action-permissions="{{ user.custom_action_permissions|join:',' }}"
+                                data-email="{{ user.email|default:'' }}"
+                                data-phone="{{ user.phone|default:'' }}"
+                                type="button"
+                                onclick="editUser(this)">编辑</button>
                             {% if user.is_active %}
-                            <button class="btn btn-outline-secondary btn-sm" onclick="toggleUserStatus({{ user.id }}, false)">禁用</button>
+                            <button class="btn btn-outline-secondary btn-sm" onclick="toggleUserStatus({{ user.id }}, false, '{{ user.username|escapejs }}')">禁用</button>
                             {% else %}
-                            <button class="btn btn-success btn-sm" onclick="toggleUserStatus({{ user.id }}, true)">启用</button>
+                            <button class="btn btn-success btn-sm" onclick="toggleUserStatus({{ user.id }}, true, '{{ user.username|escapejs }}')">启用</button>
                             {% endif %}
                         </div>
                     </td>
@@ -240,6 +348,111 @@
         </ul>
     </nav>
     {% endif %}
+
+    <div class="section-card">
+        <div class="section-card-header">
+            <div>
+                <h4 class="section-card-title">权限模板库</h4>
+                <div class="muted-note">把常用搭配沉淀成模板，给用户一键套用。</div>
+            </div>
+            <button class="btn btn-outline-primary btn-sm" type="button" onclick="openPermissionTemplateModal()">+ 添加模板</button>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>模板名称</th>
+                        <th>基础角色</th>
+                        <th>说明</th>
+                        <th>模块数</th>
+                        <th>操作数</th>
+                        <th>业务动作数</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for template in permission_templates %}
+                    <tr>
+                        <td><strong>{{ template.name }}</strong></td>
+                        <td>{{ template.get_base_role_display }}</td>
+                        <td>{{ template.description|default:"-" }}</td>
+                        <td>{{ template.modules|length }}</td>
+                        <td>{{ template.actions|length }}</td>
+                        <td>{{ template.action_permissions|length }}</td>
+                        <td>
+                            <div class="action-buttons">
+                                <button
+                                    class="btn btn-primary btn-sm"
+                                    type="button"
+                                    data-id="{{ template.id }}"
+                                    data-name="{{ template.name }}"
+                                    data-base-role="{{ template.base_role }}"
+                                    data-description="{{ template.description|default:'' }}"
+                                    data-modules="{{ template.modules|join:',' }}"
+                                    data-actions="{{ template.actions|join:',' }}"
+                                    data-action-permissions="{{ template.action_permissions|join:',' }}"
+                                    onclick="editPermissionTemplate(this)">编辑</button>
+                                <button class="btn btn-outline-danger btn-sm" type="button" onclick="deletePermissionTemplate({{ template.id }}, '{{ template.name|escapejs }}')">删除</button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="7" style="text-align:center; padding: 36px; color:#94a3b8;">暂无权限模板</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="section-card">
+        <div class="section-card-header">
+            <div>
+                <h4 class="section-card-title">最近权限变更记录</h4>
+                <div class="muted-note">记录谁在什么时间调整了哪个用户/模板，以及改动了哪些字段。</div>
+            </div>
+            <a class="btn btn-outline-secondary btn-sm" href="{% url 'audit_logs' %}?module=%E7%94%A8%E6%88%B7%E7%AE%A1%E7%90%86&changed_only=1">查看全部审计</a>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>操作人</th>
+                        <th>模块</th>
+                        <th>对象</th>
+                        <th>动作</th>
+                        <th>摘要</th>
+                        <th>变更字段</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for log in recent_permission_audits %}
+                    <tr>
+                        <td>{{ log.created_at|date:"Y-m-d H:i:s" }}</td>
+                        <td>{% if log.user %}{{ log.user.full_name|default:log.user.username }}{% else %}-{% endif %}</td>
+                        <td>{{ log.module }}</td>
+                        <td>{{ log.target }}</td>
+                        <td>{{ log.get_action_display }}</td>
+                        <td>{{ log.details_parsed.summary|default:"-" }}</td>
+                        <td>
+                            {% if log.details_parsed.changed_fields %}
+                                {{ log.details_parsed.changed_fields|join:"、" }}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="7" style="text-align:center; padding: 36px; color:#94a3b8;">暂无权限变更记录</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
 </div>
 
 <!-- 添加/编辑用户模态框 -->
@@ -251,7 +464,8 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <div class="modal-body">
-                <form id="userForm">
+                <form id="userForm" method="post">
+                    <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
                     <div class="mb-3">
                         <label class="form-label">用户名 *</label>
                         <input class="form-control" type="text" name="username" required placeholder="请输入用户名">
@@ -261,16 +475,73 @@
                         <input class="form-control" type="text" name="full_name" required placeholder="请输入真实姓名">
                     </div>
                     <div class="mb-3">
+                        <label class="form-label">权限模式 *</label>
+                        <select class="form-select" name="permission_mode" required onchange="togglePermissionMode(this.value)">
+                            {% for value, label in permission_mode_choices %}
+                            <option value="{{ value }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="mb-3">
                         <label class="form-label">角色 *</label>
                         <select class="form-select" name="role" required onchange="showRolePermissions(this.value)">
-                            <option value="">请选择角色</option>
-                            <option value="admin">超级管理员</option>
-                            <option value="manager">业务经理</option>
-                            <option value="warehouse-manager">仓库主管</option>
-                            <option value="warehouse-staff">仓库操作员</option>
-                            <option value="customer-service">客服</option>
+                            <option value="">请选择角色模板</option>
+                            {% for value, label in role_choices %}
+                            <option value="{{ value }}">{{ label }}</option>
+                            {% endfor %}
                         </select>
                         <div id="rolePermissions" class="permission-list" style="display: none;"></div>
+                    </div>
+                    <div class="mb-3" id="permissionTemplateSelectWrap" style="display:none;">
+                        <label class="form-label">套用权限模板</label>
+                        <select class="form-select" name="permission_template" onchange="applyPermissionTemplate(this)">
+                            <option value="">不套用模板，手动搭配</option>
+                            {% for template in permission_templates %}
+                            <option
+                                value="{{ template.id }}"
+                                data-base-role="{{ template.base_role }}"
+                                data-modules="{{ template.modules|join:',' }}"
+                                data-actions="{{ template.actions|join:',' }}"
+                                data-action-permissions="{{ template.action_permissions|join:',' }}">
+                                {{ template.name }} / {{ template.get_base_role_display }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div id="customPermissionPanel" class="mb-3" style="display:none;">
+                        <div class="permission-list">
+                            <strong>自定义模块权限</strong>
+                            <div class="permission-group">
+                                {% for value, label in permission_modules %}
+                                <label class="permission-check">
+                                    <input type="checkbox" name="custom_modules" value="{{ value }}">
+                                    <span>{{ label }}</span>
+                                </label>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        <div class="permission-list">
+                            <strong>自定义操作权限</strong>
+                            <div class="permission-group">
+                                {% for value, label in permission_actions %}
+                                <label class="permission-check">
+                                    <input type="checkbox" name="custom_actions" value="{{ value }}">
+                                    <span>{{ label }}</span>
+                                </label>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        <div class="permission-list">
+                            <strong>自定义业务动作权限</strong>
+                            <div class="permission-group">
+                                {% for value, label in action_permission_choices %}
+                                <label class="permission-check">
+                                    <input type="checkbox" name="custom_action_permissions" value="{{ value }}">
+                                    <span>{{ label }}</span>
+                                </label>
+                                {% endfor %}
+                            </div>
+                        </div>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">邮箱</label>
@@ -294,7 +565,124 @@
     </div>
 </div>
 
+<div class="modal fade" id="permissionTemplateModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 id="permissionTemplateModalTitle" class="modal-title">添加权限模板</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <form id="permissionTemplateForm" method="post">
+                    <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+                    <div class="mb-3">
+                        <label class="form-label">模板名称 *</label>
+                        <input class="form-control" type="text" name="name" required placeholder="例如：财务查看专员">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">基础角色 *</label>
+                        <select class="form-select" name="base_role" required>
+                            <option value="">请选择基础角色</option>
+                            {% for value, label in role_choices %}
+                            <option value="{{ value }}">{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">说明</label>
+                        <input class="form-control" type="text" name="description" placeholder="说明这个模板适合谁用">
+                    </div>
+                    <div class="permission-list">
+                        <strong>模块权限</strong>
+                        <div class="permission-group">
+                            {% for value, label in permission_modules %}
+                            <label class="permission-check">
+                                <input type="checkbox" name="modules" value="{{ value }}">
+                                <span>{{ label }}</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div class="permission-list">
+                        <strong>操作权限</strong>
+                        <div class="permission-group">
+                            {% for value, label in permission_actions %}
+                            <label class="permission-check">
+                                <input type="checkbox" name="actions" value="{{ value }}">
+                                <span>{{ label }}</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div class="permission-list">
+                        <strong>业务动作权限</strong>
+                        <div class="permission-group">
+                            {% for value, label in action_permission_choices %}
+                            <label class="permission-check">
+                                <input type="checkbox" name="action_permissions" value="{{ value }}">
+                                <span>{{ label }}</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline-secondary" type="button" onclick="closePermissionTemplateModal()">取消</button>
+                <button class="btn btn-primary" type="button" onclick="savePermissionTemplate()">保存模板</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="permissionPreviewModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">权限预览</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <div class="muted-note">当前预览对象</div>
+                    <div id="permissionPreviewUser" style="font-size:18px; font-weight:700; color:#1f2937;"></div>
+                    <div id="permissionPreviewProfile" style="margin-top:6px;"></div>
+                </div>
+                <div class="preview-grid">
+                    <div class="preview-card">
+                        <h6>可见菜单</h6>
+                        <div id="permissionPreviewMenus"></div>
+                    </div>
+                    <div class="preview-card">
+                        <h6>模块与操作</h6>
+                        <div id="permissionPreviewModules"></div>
+                    </div>
+                    <div class="preview-card">
+                        <h6>业务动作权限</h6>
+                        <div id="permissionPreviewActions"></div>
+                    </div>
+                    <div class="preview-card">
+                        <h6>数据范围</h6>
+                        <div id="permissionPreviewScopes"></div>
+                    </div>
+                </div>
+                <div class="preview-card mt-3">
+                    <h6>相对基础角色差异</h6>
+                    <div id="permissionPreviewDiffs"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" type="button" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{{ user_permission_previews|json_script:"userPermissionPreviewData" }}
+
 <script>
+const userPermissionPreviewData = JSON.parse(document.getElementById('userPermissionPreviewData').textContent || '{}');
+
 function filterUsers() {
     const keyword = (document.getElementById('keywordInput')?.value || '').trim();
     const role = (document.getElementById('roleFilter')?.value || '').trim();
@@ -311,13 +699,19 @@ function filterUsers() {
 const rolePermissions = {
     'admin': '<strong>超级管理员</strong><br>• 查看所有数据<br>• 管理用户和角色<br>• 系统设置<br>• 操作日志',
     'manager': '<strong>业务经理</strong><br>• 查看所有订单和统计<br>• 创建/编辑订单<br>• 查看财务数据<br>• 排期看板<br>• 转寄中心',
-    'warehouse-manager': '<strong>仓库主管</strong><br>• 订单处理中心<br>• 产品管理<br>• 采购管理<br>• 部件库存管理<br>• 出入库流水',
-    'warehouse-staff': '<strong>仓库操作员</strong><br>• 订单处理中心（标记状态）<br>• 查看SKU<br>• 部件出入库操作',
-    'customer-service': '<strong>客服</strong><br>• 查看订单列表<br>• 创建订单<br>• 编辑订单基本信息<br>• 查看排期看板'
+    'warehouse_manager': '<strong>仓库主管</strong><br>• 订单处理中心<br>• 产品管理<br>• 采购管理<br>• 部件库存管理<br>• 出入库流水',
+    'warehouse_staff': '<strong>仓库操作员</strong><br>• 订单处理中心（标记状态）<br>• 查看SKU<br>• 部件出入库操作',
+    'customer_service': '<strong>客服</strong><br>• 查看订单列表<br>• 创建订单<br>• 编辑订单基本信息<br>• 查看排期看板'
 };
 
 function showRolePermissions(role) {
     const permDiv = document.getElementById('rolePermissions');
+    const mode = document.querySelector('#userForm select[name="permission_mode"]')?.value || 'role';
+    if (mode === 'custom') {
+        permDiv.innerHTML = '<strong>自定义搭配</strong><br>• 当前角色作为数据范围模板保留<br>• 可单独勾选模块、操作和业务动作权限';
+        permDiv.style.display = 'block';
+        return;
+    }
     if (role && rolePermissions[role]) {
         permDiv.innerHTML = rolePermissions[role];
         permDiv.style.display = 'block';
@@ -326,9 +720,57 @@ function showRolePermissions(role) {
     }
 }
 
+function togglePermissionMode(mode) {
+    const panel = document.getElementById('customPermissionPanel');
+    const templateWrap = document.getElementById('permissionTemplateSelectWrap');
+    panel.style.display = mode === 'custom' ? 'block' : 'none';
+    templateWrap.style.display = mode === 'custom' ? 'block' : 'none';
+    const role = document.querySelector('#userForm select[name="role"]')?.value || '';
+    showRolePermissions(role);
+}
+
+function setCheckedValues(fieldName, values) {
+    const wanted = new Set((values || []).filter(Boolean));
+    document.querySelectorAll(`#userForm input[name="${fieldName}"]`).forEach((input) => {
+        input.checked = wanted.has(input.value);
+    });
+}
+
+function clearCustomPermissionChecks() {
+    ['custom_modules', 'custom_actions', 'custom_action_permissions'].forEach((fieldName) => {
+        setCheckedValues(fieldName, []);
+    });
+}
+
+function applyPermissionTemplate(select) {
+    const option = select.options[select.selectedIndex];
+    if (!option || !option.value) return;
+    const baseRole = option.getAttribute('data-base-role') || '';
+    const modules = (option.getAttribute('data-modules') || '').split(',');
+    const actions = (option.getAttribute('data-actions') || '').split(',');
+    const actionPermissions = (option.getAttribute('data-action-permissions') || '').split(',');
+    const form = document.getElementById('userForm');
+    form.querySelector('select[name="role"]').value = baseRole;
+    setCheckedValues('custom_modules', modules);
+    setCheckedValues('custom_actions', actions);
+    setCheckedValues('custom_action_permissions', actionPermissions);
+    showRolePermissions(baseRole);
+}
+
 function openAddUserModal() {
     document.getElementById('modalTitle').textContent = '添加用户';
-    document.getElementById('userForm').reset();
+    const form = document.getElementById('userForm');
+    form.reset();
+    form.action = '{% url "user_create" %}';
+    form.dataset.mode = 'create';
+    form.querySelector('select[name="permission_mode"]').value = 'role';
+    form.querySelector('select[name="role"]').value = '';
+    form.querySelector('select[name="permission_template"]').value = '';
+    clearCustomPermissionChecks();
+    const passwordInput = form.querySelector('input[name="password"]');
+    passwordInput.required = true;
+    passwordInput.placeholder = '请输入密码（至少6位）';
+    togglePermissionMode('role');
     document.getElementById('rolePermissions').style.display = 'none';
     getUserModal().show();
 }
@@ -337,41 +779,144 @@ function closeUserModal() {
     getUserModal().hide();
 }
 
-function editUser(userId) {
-    // 第一阶段：显示toast提示
-    showToast('编辑用户功能（模拟）');
-    // 第二阶段：加载用户数据并打开模态框
+function editUser(button) {
+    const form = document.getElementById('userForm');
+    form.reset();
+    form.action = `/users/${button.getAttribute('data-id')}/edit/`;
+    form.dataset.mode = 'edit';
+    document.getElementById('modalTitle').textContent = '编辑用户';
+    form.querySelector('input[name="username"]').value = button.getAttribute('data-username') || '';
+    form.querySelector('input[name="full_name"]').value = button.getAttribute('data-full-name') || '';
+    const permissionMode = button.getAttribute('data-permission-mode') || 'role';
+    form.querySelector('select[name="permission_mode"]').value = permissionMode;
+    form.querySelector('select[name="permission_template"]').value = '';
+    form.querySelector('select[name="role"]').value = button.getAttribute('data-role') || '';
+    form.querySelector('input[name="email"]').value = button.getAttribute('data-email') || '';
+    form.querySelector('input[name="phone"]').value = button.getAttribute('data-phone') || '';
+    setCheckedValues('custom_modules', (button.getAttribute('data-custom-modules') || '').split(','));
+    setCheckedValues('custom_actions', (button.getAttribute('data-custom-actions') || '').split(','));
+    setCheckedValues('custom_action_permissions', (button.getAttribute('data-custom-action-permissions') || '').split(','));
+    const passwordInput = form.querySelector('input[name="password"]');
+    passwordInput.value = '';
+    passwordInput.required = false;
+    passwordInput.placeholder = '留空则不修改密码';
+    togglePermissionMode(permissionMode);
+    showRolePermissions(button.getAttribute('data-role') || '');
+    getUserModal().show();
 }
 
 function saveUser() {
     const form = document.getElementById('userForm');
+    const permissionMode = form.querySelector('select[name="permission_mode"]').value;
+    if (permissionMode === 'custom') {
+        const moduleCount = form.querySelectorAll('input[name="custom_modules"]:checked').length;
+        const actionCount = form.querySelectorAll('input[name="custom_actions"]:checked').length;
+        if (!moduleCount || !actionCount) {
+            if (window.AppUI) {
+                window.AppUI.alert('自定义搭配至少要勾选一个模块和一个操作权限', '表单校验');
+            } else {
+                alert('自定义搭配至少要勾选一个模块和一个操作权限');
+            }
+            return;
+        }
+    }
     if (form.checkValidity()) {
-        showToast('用户保存成功（模拟）');
-        closeUserModal();
+        form.submit();
     } else {
         form.reportValidity();
     }
 }
 
-function toggleUserStatus(userId, enable) {
+function toggleUserStatus(userId, enable, username) {
     const action = enable ? '启用' : '禁用';
     const run = async () => {
         const ok = window.AppUI
-            ? await window.AppUI.confirm(`确定要${action}该用户吗？`, '用户状态确认')
-            : confirm(`确定要${action}该用户吗？`);
+            ? await window.AppUI.confirm(`确定要${action}用户 ${username} 吗？`, '用户状态确认')
+            : confirm(`确定要${action}用户 ${username} 吗？`);
         if (!ok) return;
-        showToast(`用户${action}成功（模拟）`);
-        // 第二阶段：调用API更新状态
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = `/users/${userId}/toggle-status/`;
+
+        const csrf = document.createElement('input');
+        csrf.type = 'hidden';
+        csrf.name = 'csrfmiddlewaretoken';
+        csrf.value = '{{ csrf_token }}';
+        form.appendChild(csrf);
+
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'enable';
+        input.value = enable ? '1' : '0';
+        form.appendChild(input);
+
+        document.body.appendChild(form);
+        form.submit();
     };
     run();
 }
 
-function showToast(message) {
-    if (window.AppUI) {
-        window.AppUI.toast(message, 'info');
-    } else {
-        alert(message);
+function buildPreviewList(items) {
+    const list = (items || []).filter(Boolean);
+    if (!list.length) {
+        return '<div class="preview-list-empty">无</div>';
     }
+    return `<ul class="preview-list">${list.map((item) => `<li>${item}</li>`).join('')}</ul>`;
+}
+
+function buildDiffBlock(title, diff) {
+    if (!diff) {
+        return '';
+    }
+    if (diff.summary) {
+        return `
+            <div style="margin-bottom:12px;">
+                <strong>${title}</strong>
+                <div class="preview-list-empty" style="margin-top:6px;">${diff.summary}</div>
+            </div>
+        `;
+    }
+    const added = (diff.added || []).length ? `新增：${diff.added.join('、')}` : '新增：无';
+    const removed = (diff.removed || []).length ? `减少：${diff.removed.join('、')}` : '减少：无';
+    return `
+        <div style="margin-bottom:12px;">
+            <strong>${title}</strong>
+            <ul class="preview-list">
+                <li>${added}</li>
+                <li>${removed}</li>
+            </ul>
+        </div>
+    `;
+}
+
+let permissionPreviewModalInstance = null;
+function getPermissionPreviewModal() {
+    if (!permissionPreviewModalInstance) {
+        permissionPreviewModalInstance = new bootstrap.Modal(document.getElementById('permissionPreviewModal'));
+    }
+    return permissionPreviewModalInstance;
+}
+
+function previewUserPermissions(userId) {
+    const preview = userPermissionPreviewData[String(userId)];
+    const rowButton = document.querySelector(`button[onclick="previewUserPermissions(${userId})"]`);
+    if (!preview || !rowButton) return;
+    document.getElementById('permissionPreviewUser').textContent = rowButton.getAttribute('data-username') || '用户';
+    document.getElementById('permissionPreviewProfile').innerHTML = `<span class="role-badge role-custom">${preview.profile || '-'}</span>`;
+    document.getElementById('permissionPreviewMenus').innerHTML = buildPreviewList(preview.menus);
+    document.getElementById('permissionPreviewModules').innerHTML = buildPreviewList([
+        `模块：${(preview.modules || []).join('、') || '无'}`,
+        `操作：${(preview.actions || []).join('、') || '无'}`,
+    ]);
+    document.getElementById('permissionPreviewActions').innerHTML = buildPreviewList(preview.action_permissions);
+    document.getElementById('permissionPreviewScopes').innerHTML = buildPreviewList(preview.data_scopes);
+    document.getElementById('permissionPreviewDiffs').innerHTML = `
+        <div class="preview-list-empty" style="margin-bottom:10px;">基线角色：${preview.baseline_role || '-'}</div>
+        ${buildDiffBlock('模块权限', preview.diffs?.modules)}
+        ${buildDiffBlock('操作权限', preview.diffs?.actions)}
+        ${buildDiffBlock('业务动作权限', preview.diffs?.action_permissions)}
+    `;
+    getPermissionPreviewModal().show();
 }
 
 let userModalInstance = null;
@@ -380,6 +925,89 @@ function getUserModal() {
         userModalInstance = new bootstrap.Modal(document.getElementById('userModal'));
     }
     return userModalInstance;
+}
+
+function setTemplateCheckedValues(fieldName, values) {
+    const wanted = new Set((values || []).filter(Boolean));
+    document.querySelectorAll(`#permissionTemplateForm input[name="${fieldName}"]`).forEach((input) => {
+        input.checked = wanted.has(input.value);
+    });
+}
+
+let permissionTemplateModalInstance = null;
+function getPermissionTemplateModal() {
+    if (!permissionTemplateModalInstance) {
+        permissionTemplateModalInstance = new bootstrap.Modal(document.getElementById('permissionTemplateModal'));
+    }
+    return permissionTemplateModalInstance;
+}
+
+function openPermissionTemplateModal() {
+    const form = document.getElementById('permissionTemplateForm');
+    form.reset();
+    form.action = '{% url "permission_template_create" %}';
+    document.getElementById('permissionTemplateModalTitle').textContent = '添加权限模板';
+    setTemplateCheckedValues('modules', []);
+    setTemplateCheckedValues('actions', []);
+    setTemplateCheckedValues('action_permissions', []);
+    getPermissionTemplateModal().show();
+}
+
+function editPermissionTemplate(button) {
+    const form = document.getElementById('permissionTemplateForm');
+    form.reset();
+    form.action = `/users/permission-templates/${button.getAttribute('data-id')}/edit/`;
+    document.getElementById('permissionTemplateModalTitle').textContent = '编辑权限模板';
+    form.querySelector('input[name="name"]').value = button.getAttribute('data-name') || '';
+    form.querySelector('select[name="base_role"]').value = button.getAttribute('data-base-role') || '';
+    form.querySelector('input[name="description"]').value = button.getAttribute('data-description') || '';
+    setTemplateCheckedValues('modules', (button.getAttribute('data-modules') || '').split(','));
+    setTemplateCheckedValues('actions', (button.getAttribute('data-actions') || '').split(','));
+    setTemplateCheckedValues('action_permissions', (button.getAttribute('data-action-permissions') || '').split(','));
+    getPermissionTemplateModal().show();
+}
+
+function closePermissionTemplateModal() {
+    getPermissionTemplateModal().hide();
+}
+
+function savePermissionTemplate() {
+    const form = document.getElementById('permissionTemplateForm');
+    const moduleCount = form.querySelectorAll('input[name="modules"]:checked').length;
+    const actionCount = form.querySelectorAll('input[name="actions"]:checked').length;
+    if (!moduleCount || !actionCount) {
+        if (window.AppUI) {
+            window.AppUI.alert('权限模板至少要勾选一个模块和一个操作权限', '表单校验');
+        } else {
+            alert('权限模板至少要勾选一个模块和一个操作权限');
+        }
+        return;
+    }
+    if (form.checkValidity()) {
+        form.submit();
+    } else {
+        form.reportValidity();
+    }
+}
+
+function deletePermissionTemplate(templateId, templateName) {
+    const run = async () => {
+        const ok = window.AppUI
+            ? await window.AppUI.confirm(`确定删除权限模板 ${templateName} 吗？`, '删除权限模板')
+            : confirm(`确定删除权限模板 ${templateName} 吗？`);
+        if (!ok) return;
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = `/users/permission-templates/${templateId}/delete/`;
+        const csrf = document.createElement('input');
+        csrf.type = 'hidden';
+        csrf.name = 'csrfmiddlewaretoken';
+        csrf.value = '{{ csrf_token }}';
+        form.appendChild(csrf);
+        document.body.appendChild(form);
+        form.submit();
+    };
+    run();
 }
 </script>
 {% endblock %}

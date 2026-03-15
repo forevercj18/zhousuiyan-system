@@ -217,7 +217,21 @@ def get_dashboard_stats_payload(include_transfer_available=False):
             ship_date__gt=warning_cutoff,
             ship_date__lte=warning_end,
         )
-        .exclude(status__in=shipped_statuses)
+        .exclude(
+            Q(status__in=shipped_statuses) |
+            Q(ship_tracking__isnull=False, ship_tracking__gt='')
+        )
+        .count()
+    )
+    overdue_orders_count = (
+        Order.objects.filter(
+            ship_date__isnull=False,
+            ship_date__lte=warning_cutoff,
+        )
+        .exclude(
+            Q(status__in=shipped_statuses) |
+            Q(ship_tracking__isnull=False, ship_tracking__gt='')
+        )
         .count()
     )
 
@@ -237,6 +251,7 @@ def get_dashboard_stats_payload(include_transfer_available=False):
         'cancel_rate': cancel_rate,
         'avg_transit_days': avg_transit_days,
         'due_within_7_days_count': due_within_7_days_count,
+        'overdue_orders_count': overdue_orders_count,
         'pending_recovery_inspections': PartRecoveryInspection.objects.filter(status='pending').count(),
         'repair_recovery_inspections': PartRecoveryInspection.objects.filter(status='repair').count(),
         'draft_maintenance_work_orders': MaintenanceWorkOrder.objects.filter(status='draft').count(),
@@ -246,13 +261,13 @@ def get_dashboard_stats_payload(include_transfer_available=False):
     return stats
 
 
-def get_role_dashboard_payload(user, view_role=None):
+def get_role_dashboard_payload(user, view_role=None, base_stats=None):
     """
     角色看板数据层V1（只读聚合）：
     - 输出基础统计
     - 根据角色输出推荐关注卡片
     """
-    base = get_dashboard_stats_payload(include_transfer_available=True)
+    base = base_stats or get_dashboard_stats_payload(include_transfer_available=True)
     role = (view_role or getattr(user, 'role', 'warehouse_staff') or 'warehouse_staff').strip()
     valid_roles = {'admin', 'manager', 'warehouse_manager', 'warehouse_staff', 'customer_service'}
     if role not in valid_roles:
@@ -320,6 +335,7 @@ def get_role_dashboard_payload(user, view_role=None):
             {'key': 'total_revenue', 'label': '总营收', 'value': base['total_revenue'], 'url_name': 'finance_transactions_list', 'query': ''},
             {'key': 'pending_revenue', 'label': '待收款', 'value': base['pending_revenue'], 'url_name': 'orders_list', 'query': ''},
             {'key': 'pending_orders', 'label': '待处理订单', 'value': base['pending_orders'], 'url_name': 'orders_list', 'query': 'status=pending'},
+            {'key': 'overdue_orders_count', 'label': '已超时订单', 'value': base['overdue_orders_count'], 'url_name': 'orders_list', 'query': 'sla=overdue'},
             {'key': 'due_within_7_days_count', 'label': '7天内到期', 'value': base['due_within_7_days_count'], 'url_name': 'orders_list', 'query': 'sla=warning'},
             {'key': 'completed_orders', 'label': '已完成订单', 'value': base['completed_orders'], 'url_name': 'orders_list', 'query': 'status=completed'},
             {'key': 'transfer_available_count', 'label': '可转寄候选', 'value': base['transfer_available_count'], 'url_name': 'transfers_list', 'query': 'panel=candidates'},
@@ -367,6 +383,7 @@ def get_role_dashboard_payload(user, view_role=None):
             {'key': 'repair_recovery_inspections', 'label': '待维修回件', 'value': base['repair_recovery_inspections'], 'url_name': 'part_recovery_inspections_list', 'query': 'status=repair'},
             {'key': 'draft_maintenance_work_orders', 'label': '待执行维修单', 'value': base['draft_maintenance_work_orders'], 'url_name': 'maintenance_work_orders_list', 'query': 'status=draft'},
             {'key': 'pending_transfer_tasks', 'label': '待执行转寄任务', 'value': pending_transfer_tasks, 'url_name': 'transfers_list', 'query': 'panel=tasks&status=pending'},
+            {'key': 'overdue_orders_count', 'label': '已超时订单', 'value': base['overdue_orders_count'], 'url_name': 'orders_list', 'query': 'sla=overdue'},
             {'key': 'due_within_7_days_count', 'label': '7天内到期', 'value': base['due_within_7_days_count'], 'url_name': 'orders_list', 'query': 'sla=warning'},
             {'key': 'delivered_orders', 'label': '已发货订单', 'value': base['delivered_orders'], 'url_name': 'orders_list', 'query': 'status=delivered'},
         ]
@@ -422,6 +439,7 @@ def get_role_dashboard_payload(user, view_role=None):
         warehouse_insights = []
         focus_cards = [
             {'key': 'pending_orders', 'label': '待处理订单', 'value': base['pending_orders'], 'url_name': 'orders_list', 'query': 'status=pending'},
+            {'key': 'overdue_orders_count', 'label': '已超时订单', 'value': base['overdue_orders_count'], 'url_name': 'orders_list', 'query': 'sla=overdue'},
             {'key': 'due_within_7_days_count', 'label': '7天内到期', 'value': base['due_within_7_days_count'], 'url_name': 'orders_list', 'query': 'sla=warning'},
             {'key': 'delivered_orders', 'label': '已发货订单', 'value': base['delivered_orders'], 'url_name': 'orders_list', 'query': 'status=delivered'},
             {'key': 'pending_revenue', 'label': '待收款', 'value': base['pending_revenue'], 'url_name': 'orders_list', 'query': ''},
@@ -1439,21 +1457,25 @@ def build_transfer_pool_rows():
     for alloc in allocations:
         alloc_map.setdefault((alloc.target_order_id, alloc.sku_id), []).append(alloc)
 
-    active_task_map = {
-        (order_to_id, sku_id): status
-        for order_to_id, sku_id, status in Transfer.objects.filter(
-            order_to__status__in=['pending', 'confirmed', 'delivered'],
-            status__in=['pending', 'completed']
-        ).values_list('order_to_id', 'sku_id', 'status')
-    }
+    latest_task_map = {}
+    blocking_task_map = {}
+    for order_to_id, sku_id, status in Transfer.objects.filter(
+        order_to__status__in=['pending', 'confirmed', 'delivered'],
+        status__in=['pending', 'completed', 'cancelled']
+    ).order_by('order_to_id', 'sku_id', '-id').values_list('order_to_id', 'sku_id', 'status'):
+        key = (order_to_id, sku_id)
+        latest_task_map.setdefault(key, status)
+        if status in ['pending', 'completed']:
+            blocking_task_map.setdefault(key, status)
 
     rows = []
     for order in target_orders:
         for item in order.items.all():
             key = (order.id, item.sku_id)
             allocs = alloc_map.get(key, [])
-            task_status = active_task_map.get(key)
-            has_pending_task = task_status in ['pending', 'completed']
+            task_status = latest_task_map.get(key)
+            blocking_task_status = blocking_task_map.get(key)
+            has_pending_task = blocking_task_status in ['pending', 'completed']
             recommended = get_transfer_match_candidates(
                 order.delivery_address,
                 order.event_date,
@@ -1509,7 +1531,7 @@ def build_transfer_pool_rows():
             can_recommend = not has_pending_task
             if can_recommend:
                 can_recommend_reason = ''
-            elif task_status == 'completed':
+            elif blocking_task_status == 'completed':
                 can_recommend_reason = '已存在已完成转寄任务，不可重推'
             else:
                 can_recommend_reason = '已存在转寄任务，不可重推'
@@ -1521,9 +1543,9 @@ def build_transfer_pool_rows():
             )
             if can_generate_task:
                 can_generate_reason = ''
-            elif task_status == 'pending':
+            elif blocking_task_status == 'pending':
                 can_generate_reason = '已存在待执行转寄任务'
-            elif task_status == 'completed':
+            elif blocking_task_status == 'completed':
                 can_generate_reason = '已存在已完成转寄任务'
             elif order.status != 'delivered':
                 can_generate_reason = '目标订单未发货，暂不可生成任务'

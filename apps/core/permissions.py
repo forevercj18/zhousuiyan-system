@@ -75,6 +75,179 @@ ROLE_ACTION_PERMISSIONS = {
 }
 
 
+PERMISSION_MODULE_LABELS = {
+    'dashboard': '工作台',
+    'workbench': '业务工作台',
+    'orders': '订单中心',
+    'calendar': '日历排期',
+    'transfers': '转寄中心',
+    'outbound_inventory': '在外库存看板',
+    'skus': '产品管理',
+    'procurement': '采购单',
+    'parts': '部件库存与流水',
+    'audit_logs': '审计日志',
+    'finance': '财务流水',
+    'ops_center': '运维中心',
+    'risk_events': '风险事件',
+    'approvals': '审批中心',
+    'users': '用户管理',
+    'settings': '系统设置',
+}
+
+PERMISSION_ACTION_LABELS = {
+    'view': '查看',
+    'create': '新增',
+    'update': '编辑',
+    'delete': '删除',
+}
+
+ACTION_PERMISSION_LABELS = {
+    'order.confirm_delivery': '订单确认/发货',
+    'order.mark_returned': '订单回库',
+    'order.change_amount': '手工改价',
+    'order.force_cancel': '订单强制取消',
+    'transfer.recommend': '转寄重新推荐',
+    'transfer.create_task': '生成转寄任务',
+    'transfer.complete_task': '完成转寄任务',
+    'transfer.cancel_task': '取消转寄任务',
+    'inventory.export_topology': '导出库存拓扑',
+    'inventory.init_units': '初始化单套库存',
+    'unit.dispose': '单套处置',
+    'sku.upload_image': '上传产品图片',
+    'parts.adjust_stock': '调整部件库存',
+    'risk.resolve_event': '处理风险事件',
+    'approval.review': '审批处理',
+    'finance.manual_adjust': '财务手工调整',
+}
+
+ROLE_DATA_SCOPE_DESCRIPTIONS = {
+    'admin': [
+        '可查看和处理全系统数据',
+        '不受订单、库存、审批范围限制',
+    ],
+    'manager': [
+        '订单类数据默认可查看全部',
+        '审批、风险、财务等模块按已授权功能访问',
+    ],
+    'warehouse_manager': [
+        '订单、SKU、部件、采购单默认可查看全部',
+        '审批中心默认只能处理自己发起的任务',
+    ],
+    'warehouse_staff': [
+        '订单中心仅能看到已确认/已发货订单',
+        '其余模块以页面权限和业务动作权限为准',
+    ],
+    'customer_service': [
+        '订单中心仅能看到自己创建的订单',
+        '其余模块以页面权限和业务动作权限为准',
+    ],
+}
+
+
+def get_user_permission_config(user):
+    """获取用户当前生效的权限配置"""
+    role = getattr(user, 'role', '')
+    if getattr(user, 'permission_mode', 'role') == 'custom':
+        return {
+            'modules': list(getattr(user, 'custom_modules', []) or []),
+            'actions': list(getattr(user, 'custom_actions', []) or []),
+            'action_permissions': list(getattr(user, 'custom_action_permissions', []) or []),
+        }
+    return {
+        'modules': list(ROLE_PERMISSIONS.get(role, {}).get('modules', [])),
+        'actions': list(ROLE_PERMISSIONS.get(role, {}).get('actions', [])),
+        'action_permissions': list(ROLE_ACTION_PERMISSIONS.get(role, [])),
+    }
+
+
+def get_role_permission_config(role):
+    return {
+        'modules': list(ROLE_PERMISSIONS.get(role, {}).get('modules', [])),
+        'actions': list(ROLE_PERMISSIONS.get(role, {}).get('actions', [])),
+        'action_permissions': list(ROLE_ACTION_PERMISSIONS.get(role, [])),
+    }
+
+
+def _build_permission_diff(current_items, baseline_items, label_map):
+    current_set = set(current_items or [])
+    baseline_set = set(baseline_items or [])
+    if '*' in current_set or '*' in baseline_set:
+        return {
+            'added': [],
+            'removed': [],
+            'summary': '包含全量权限，差异无需逐项列出',
+        }
+    return {
+        'added': [label_map.get(code, code) for code in sorted(current_set - baseline_set)],
+        'removed': [label_map.get(code, code) for code in sorted(baseline_set - current_set)],
+        'summary': '',
+    }
+
+
+def get_user_data_scope_descriptions(user):
+    if not getattr(user, 'is_authenticated', False):
+        return []
+    if user.is_superuser:
+        return [
+            '超级用户：可查看和处理全系统数据',
+            '不受模块、动作和数据范围限制',
+        ]
+    scopes = list(ROLE_DATA_SCOPE_DESCRIPTIONS.get(getattr(user, 'role', ''), []))
+    if getattr(user, 'permission_mode', 'role') == 'custom':
+        scopes.insert(0, '当前为自定义搭配权限；数据范围仍按基础角色模板生效')
+    return scopes
+
+
+def get_user_permission_preview(user):
+    config = get_user_permission_config(user)
+    baseline_config = get_role_permission_config(getattr(user, 'role', ''))
+    menus = get_user_menu(user)
+    menu_titles = []
+    for menu in menus:
+        if 'children' in menu:
+            menu_titles.extend(child['title'] for child in menu['children'])
+        else:
+            menu_titles.append(menu['title'])
+    modules_diff = _build_permission_diff(
+        config.get('modules', []),
+        baseline_config.get('modules', []),
+        PERMISSION_MODULE_LABELS,
+    )
+    actions_diff = _build_permission_diff(
+        config.get('actions', []),
+        baseline_config.get('actions', []),
+        PERMISSION_ACTION_LABELS,
+    )
+    action_permissions_diff = _build_permission_diff(
+        config.get('action_permissions', []),
+        baseline_config.get('action_permissions', []),
+        ACTION_PERMISSION_LABELS,
+    )
+    return {
+        'profile': getattr(user, 'permission_profile_display', ''),
+        'baseline_role': getattr(user, 'get_role_display', lambda: '')(),
+        'modules': [
+            PERMISSION_MODULE_LABELS.get(code, code)
+            for code in config.get('modules', [])
+        ],
+        'actions': [
+            PERMISSION_ACTION_LABELS.get(code, code)
+            for code in config.get('actions', [])
+        ],
+        'action_permissions': [
+            ACTION_PERMISSION_LABELS.get(code, code)
+            for code in config.get('action_permissions', [])
+        ],
+        'menus': menu_titles,
+        'data_scopes': get_user_data_scope_descriptions(user),
+        'diffs': {
+            'modules': modules_diff,
+            'actions': actions_diff,
+            'action_permissions': action_permissions_diff,
+        },
+    }
+
+
 def has_permission(user, module, action='view'):
     """
     检查用户是否有权限
@@ -94,13 +267,9 @@ def has_permission(user, module, action='view'):
     if user.is_superuser:
         return True
 
-    role = user.role
-    permissions = ROLE_PERMISSIONS.get(role, {})
-
-    # 检查模块权限
+    permissions = get_user_permission_config(user)
     modules = permissions.get('modules', [])
     if '*' in modules or module in modules:
-        # 检查操作权限
         actions = permissions.get('actions', [])
         if '*' in actions or action in actions:
             return True
@@ -116,8 +285,7 @@ def has_action_permission(user, action_code):
     if user.is_superuser:
         return True
 
-    role = user.role
-    actions = ROLE_ACTION_PERMISSIONS.get(role, [])
+    actions = get_user_permission_config(user).get('action_permissions', [])
     return '*' in actions or action_code in actions
 
 

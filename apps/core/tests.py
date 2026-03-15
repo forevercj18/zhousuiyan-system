@@ -42,6 +42,7 @@ from .models import (
     UnitDisposalOrder,
     UnitDisposalOrderItem,
     PartRecoveryInspection,
+    PermissionTemplate,
 )
 from .services import OrderService, PartsService, ProcurementService
 from .utils import (
@@ -835,6 +836,71 @@ class CoreServicesTestCase(TestCase):
         self.assertEqual(row['can_generate_reason'], '已存在已完成转寄任务')
         self.assertFalse(row['can_generate_task'])
 
+    def test_transfer_pool_row_should_allow_generate_again_when_task_cancelled(self):
+        sku = SKU.objects.create(
+            code='SKU-TX-P2-CANCEL',
+            name='候选池套餐2取消',
+            category='主题套餐',
+            rental_price=Decimal('80.00'),
+            deposit=Decimal('20.00'),
+            stock=5,
+            is_active=True
+        )
+        source = Order.objects.create(
+            customer_name='来源候选2取消',
+            customer_phone='13052000011',
+            delivery_address='广东省广州市天河区体育西路31号',
+            event_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        target = Order.objects.create(
+            customer_name='目标候选2取消',
+            customer_phone='13052000012',
+            delivery_address='广东省广州市越秀区中山一路31号',
+            event_date=date.today() + timedelta(days=8),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=source,
+            sku=sku,
+            quantity=1,
+            rental_price=sku.rental_price,
+            deposit=sku.deposit,
+            subtotal=Decimal('80.00'),
+        )
+        OrderItem.objects.create(
+            order=target,
+            sku=sku,
+            quantity=1,
+            rental_price=sku.rental_price,
+            deposit=sku.deposit,
+            subtotal=Decimal('80.00'),
+        )
+        Transfer.objects.create(
+            order_from=source,
+            order_to=target,
+            sku=sku,
+            quantity=1,
+            gap_days=8,
+            cost_saved=Decimal('100.00'),
+            status='cancelled',
+            created_by=self.user,
+        )
+
+        rows = build_transfer_pool_rows()
+        row = next((r for r in rows if r['order'].id == target.id and r['item'].sku_id == sku.id), None)
+        self.assertIsNotNone(row)
+        self.assertFalse(row['has_pending_task'])
+        self.assertEqual(row['task_status'], 'cancelled')
+        self.assertTrue(row['can_recommend'])
+        self.assertEqual(row['can_recommend_reason'], '')
+        self.assertTrue(row['can_generate_task'])
+        self.assertEqual(row['can_generate_reason'], '')
+
     def test_transfer_pool_row_should_expose_generate_reason_when_target_not_delivered(self):
         sku = SKU.objects.create(
             code='SKU-TX-P4',
@@ -1442,6 +1508,8 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(order_codes, ['overdue', 'warning', 'normal', 'shipped'])
         self.assertEqual(rows[0].shipping_timeliness_label, '🔴 已超时，请尽快发货')
         self.assertEqual(rows[1].shipping_timeliness_label, '🟠 即将超时（7天内）')
+        self.assertEqual(rows[2].shipping_timeliness_label, '🟢 正常时效')
+        self.assertEqual(rows[3].shipping_timeliness_label, '🔵 已发货')
         self.assertEqual(rows[3].shipping_remaining_days, 0)
 
     def test_orders_list_should_support_sla_filter(self):
@@ -1482,6 +1550,99 @@ class CoreViewsFlowTestCase(TestCase):
         rows = list(resp.context['orders_page'].object_list)
         self.assertTrue(rows)
         self.assertTrue(all(r.shipping_timeliness_code == 'overdue' for r in rows))
+
+    def test_dashboard_due_within_7_days_should_exclude_orders_with_tracking_no(self):
+        today = timezone.localdate()
+        warning_order = Order.objects.create(
+            customer_name='7天内预警单',
+            customer_phone='13920000011',
+            delivery_address='预警地址',
+            event_date=today + timedelta(days=8),
+            ship_date=today + timedelta(days=2),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        tracked_order = Order.objects.create(
+            customer_name='已录运单但未改状态',
+            customer_phone='13920000012',
+            delivery_address='运单地址',
+            event_date=today + timedelta(days=9),
+            ship_date=today + timedelta(days=3),
+            rental_days=1,
+            status='pending',
+            ship_tracking='SF99887766',
+            created_by=self.user,
+        )
+        for o in [warning_order, tracked_order]:
+            OrderItem.objects.create(
+                order=o,
+                sku=self.sku,
+                quantity=1,
+                rental_price=self.sku.rental_price,
+                deposit=self.sku.deposit,
+                subtotal=self.sku.rental_price,
+            )
+
+        dashboard_resp = self.client.get(reverse('dashboard'))
+        self.assertEqual(dashboard_resp.status_code, 200)
+        role_dashboard = dashboard_resp.context['role_dashboard']
+        due_card = next((card for card in role_dashboard['focus_cards'] if card['key'] == 'due_within_7_days_count'), None)
+        self.assertIsNotNone(due_card)
+        self.assertEqual(due_card['value'], 1)
+
+        list_resp = self.client.get(reverse('orders_list') + '?sla=warning')
+        self.assertEqual(list_resp.status_code, 200)
+        rows = list(list_resp.context['orders_page'].object_list)
+        self.assertTrue(any(row.id == warning_order.id for row in rows))
+        self.assertFalse(any(row.id == tracked_order.id for row in rows))
+
+    def test_dashboard_should_expose_overdue_orders_card_and_match_orders_list_filter(self):
+        today = timezone.localdate()
+        overdue_order = Order.objects.create(
+            customer_name='已超时订单',
+            customer_phone='13920000021',
+            delivery_address='超时地址',
+            event_date=today + timedelta(days=2),
+            ship_date=today - timedelta(days=1),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        tracked_overdue = Order.objects.create(
+            customer_name='已录运单超时单',
+            customer_phone='13920000022',
+            delivery_address='超时运单地址',
+            event_date=today + timedelta(days=2),
+            ship_date=today - timedelta(days=2),
+            rental_days=1,
+            status='pending',
+            ship_tracking='SF11223344',
+            created_by=self.user,
+        )
+        for o in [overdue_order, tracked_overdue]:
+            OrderItem.objects.create(
+                order=o,
+                sku=self.sku,
+                quantity=1,
+                rental_price=self.sku.rental_price,
+                deposit=self.sku.deposit,
+                subtotal=self.sku.rental_price,
+            )
+
+        dashboard_resp = self.client.get(reverse('dashboard'))
+        self.assertEqual(dashboard_resp.status_code, 200)
+        role_dashboard = dashboard_resp.context['role_dashboard']
+        overdue_card = next((card for card in role_dashboard['focus_cards'] if card['key'] == 'overdue_orders_count'), None)
+        self.assertIsNotNone(overdue_card)
+        self.assertEqual(overdue_card['value'], 1)
+        self.assertEqual(overdue_card['query'], 'sla=overdue')
+
+        list_resp = self.client.get(reverse('orders_list') + '?sla=overdue')
+        self.assertEqual(list_resp.status_code, 200)
+        rows = list(list_resp.context['orders_page'].object_list)
+        self.assertTrue(any(row.id == overdue_order.id for row in rows))
+        self.assertFalse(any(row.id == tracked_overdue.id for row in rows))
 
     def test_order_mark_returned_should_block_for_transfer_source_order(self):
         source_order = Order.objects.create(
@@ -1716,6 +1877,316 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertContains(resp, '<a href="/procurement/purchase-orders/" class="nav-item active">', html=False)
         self.assertContains(resp, '<a href="/orders/" class="nav-item ">')
 
+    def test_base_should_render_page_messages_as_hidden_dialog_payload(self):
+        resp = self.client.post(reverse('orders_bulk_delete'), {}, follow=True)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="pageMessagesData"')
+        self.assertContains(resp, 'page-message-item')
+        self.assertNotContains(resp, '<div class="messages">', html=False)
+
+    def test_user_edit_should_update_basic_fields(self):
+        target = User.objects.create_user(
+            username='edit_target',
+            password='test123',
+            role='warehouse_staff',
+            full_name='原姓名',
+            email='old@example.com',
+            phone='13800001234',
+        )
+
+        resp = self.client.post(
+            reverse('user_edit', kwargs={'user_id': target.id}),
+            {
+                'username': 'edit_target_new',
+                'full_name': '新姓名',
+                'role': 'manager',
+                'permission_mode': 'custom',
+                'custom_modules': ['orders', 'calendar', 'users'],
+                'custom_actions': ['view', 'update'],
+                'custom_action_permissions': ['transfer.complete_task', 'finance.manual_adjust'],
+                'email': 'new@example.com',
+                'phone': '13900005678',
+                'password': '',
+            },
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        target.refresh_from_db()
+        self.assertEqual(target.username, 'edit_target_new')
+        self.assertEqual(target.full_name, '新姓名')
+        self.assertEqual(target.role, 'manager')
+        self.assertEqual(target.permission_mode, 'custom')
+        self.assertEqual(target.custom_modules, ['orders', 'calendar', 'users'])
+        self.assertEqual(target.custom_actions, ['view', 'update'])
+        self.assertEqual(target.custom_action_permissions, ['transfer.complete_task', 'finance.manual_adjust'])
+        self.assertEqual(target.email, 'new@example.com')
+        self.assertEqual(target.phone, '13900005678')
+        log = AuditLog.objects.filter(module='用户管理', target='用户:edit_target_new', action='update').order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertEqual(payload['summary'], '编辑用户')
+        self.assertEqual(payload['before']['username'], 'edit_target')
+        self.assertEqual(payload['after']['username'], 'edit_target_new')
+        self.assertIn('permission_mode', payload['changed_fields'])
+        self.assertIn('custom_modules', payload['changed_fields'])
+
+    def test_user_create_should_add_new_user(self):
+        resp = self.client.post(
+            reverse('user_create'),
+            {
+                'username': 'new_user_case',
+                'full_name': '新增用户',
+                'role': 'customer_service',
+                'permission_mode': 'custom',
+                'custom_modules': ['orders', 'calendar', 'finance'],
+                'custom_actions': ['view', 'create'],
+                'custom_action_permissions': ['order.confirm_delivery'],
+                'email': 'new_user@example.com',
+                'phone': '13700001111',
+                'password': 'test123',
+            },
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        created = User.objects.get(username='new_user_case')
+        self.assertEqual(created.full_name, '新增用户')
+        self.assertEqual(created.role, 'customer_service')
+        self.assertEqual(created.permission_mode, 'custom')
+        self.assertEqual(created.custom_modules, ['orders', 'calendar', 'finance'])
+        self.assertEqual(created.custom_actions, ['view', 'create'])
+        self.assertEqual(created.custom_action_permissions, ['order.confirm_delivery'])
+        self.assertEqual(created.email, 'new_user@example.com')
+        self.assertEqual(created.phone, '13700001111')
+        self.assertTrue(created.is_active)
+        log = AuditLog.objects.filter(module='用户管理', target='用户:new_user_case', action='create').order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertEqual(payload['summary'], '创建用户')
+        self.assertEqual(payload['after']['username'], 'new_user_case')
+        self.assertIn('username', payload['changed_fields'])
+
+    def test_user_toggle_status_should_disable_target_user(self):
+        target = User.objects.create_user(
+            username='toggle_target',
+            password='test123',
+            role='warehouse_staff',
+            full_name='切换用户',
+            is_active=True,
+        )
+
+        resp = self.client.post(
+            reverse('user_toggle_status', kwargs={'user_id': target.id}),
+            {'enable': '0'},
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        target.refresh_from_db()
+        self.assertFalse(target.is_active)
+        log = AuditLog.objects.filter(module='用户管理', target='用户:toggle_target', action='status_change').order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertEqual(payload['summary'], '用户状态变更为禁用')
+        self.assertEqual(payload['before']['is_active'], True)
+        self.assertEqual(payload['after']['is_active'], False)
+        self.assertIn('is_active', payload['changed_fields'])
+
+    def test_user_toggle_status_should_not_disable_current_user(self):
+        resp = self.client.post(
+            reverse('user_toggle_status', kwargs={'user_id': self.user.id}),
+            {'enable': '0'},
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.is_active)
+
+    def test_custom_permissions_should_allow_orders_view_for_warehouse_staff_template(self):
+        order = Order.objects.create(
+            customer_name='自定义权限客户',
+            customer_phone='13512340000',
+            delivery_address='自定义权限地址',
+            event_date=date.today() + timedelta(days=5),
+            rental_days=1,
+            status='confirmed',
+            total_amount=Decimal('168.00'),
+            balance=Decimal('168.00'),
+            created_by=self.user,
+        )
+        custom_user = User.objects.create_user(
+            username='custom_perm_user',
+            password='test123',
+            role='warehouse_staff',
+            permission_mode='custom',
+            custom_modules=['orders'],
+            custom_actions=['view'],
+            custom_action_permissions=[],
+            is_staff=True,
+        )
+
+        client = Client()
+        self.assertTrue(client.login(username='custom_perm_user', password='test123'))
+        resp = client.get(reverse('orders_list'))
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, order.order_no)
+
+    def test_permission_template_create_should_add_template(self):
+        resp = self.client.post(
+            reverse('permission_template_create'),
+            {
+                'name': '客服扩展模板',
+                'base_role': 'customer_service',
+                'description': '客服可看财务',
+                'modules': ['orders', 'calendar', 'finance'],
+                'actions': ['view', 'update'],
+                'action_permissions': ['finance.manual_adjust'],
+            },
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        template = PermissionTemplate.objects.get(name='客服扩展模板')
+        self.assertEqual(template.base_role, 'customer_service')
+        self.assertEqual(template.modules, ['orders', 'calendar', 'finance'])
+        self.assertEqual(template.actions, ['view', 'update'])
+        self.assertEqual(template.action_permissions, ['finance.manual_adjust'])
+        log = AuditLog.objects.filter(module='权限模板', target='模板:客服扩展模板', action='create').order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertEqual(payload['summary'], '创建权限模板')
+        self.assertEqual(payload['after']['name'], '客服扩展模板')
+
+    def test_permission_template_edit_should_update_template(self):
+        template = PermissionTemplate.objects.create(
+            name='原模板',
+            base_role='warehouse_staff',
+            description='原说明',
+            modules=['orders'],
+            actions=['view'],
+            action_permissions=[],
+        )
+
+        resp = self.client.post(
+            reverse('permission_template_edit', kwargs={'template_id': template.id}),
+            {
+                'name': '新模板',
+                'base_role': 'manager',
+                'description': '新说明',
+                'modules': ['orders', 'users'],
+                'actions': ['view', 'create', 'update'],
+                'action_permissions': ['transfer.complete_task'],
+            },
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        template.refresh_from_db()
+        self.assertEqual(template.name, '新模板')
+        self.assertEqual(template.base_role, 'manager')
+        self.assertEqual(template.description, '新说明')
+        self.assertEqual(template.modules, ['orders', 'users'])
+        self.assertEqual(template.actions, ['view', 'create', 'update'])
+        self.assertEqual(template.action_permissions, ['transfer.complete_task'])
+        log = AuditLog.objects.filter(module='权限模板', target='模板:新模板', action='update').order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertEqual(payload['summary'], '编辑权限模板')
+        self.assertEqual(payload['before']['name'], '原模板')
+        self.assertEqual(payload['after']['name'], '新模板')
+        self.assertIn('base_role', payload['changed_fields'])
+
+    def test_permission_template_delete_should_remove_template(self):
+        template = PermissionTemplate.objects.create(
+            name='待删模板',
+            base_role='warehouse_staff',
+            modules=['orders'],
+            actions=['view'],
+            action_permissions=[],
+        )
+
+        resp = self.client.post(
+            reverse('permission_template_delete', kwargs={'template_id': template.id}),
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(PermissionTemplate.objects.filter(id=template.id).exists())
+        log = AuditLog.objects.filter(module='权限模板', target='模板:待删模板', action='delete').order_by('-created_at').first()
+        self.assertIsNotNone(log)
+        payload = json.loads(log.details)
+        self.assertEqual(payload['summary'], '删除权限模板')
+        self.assertEqual(payload['before']['name'], '待删模板')
+        self.assertEqual(payload['after'], {})
+
+    def test_users_list_should_render_permission_template_options(self):
+        PermissionTemplate.objects.create(
+            name='财务查看模板',
+            base_role='manager',
+            modules=['finance'],
+            actions=['view'],
+            action_permissions=[],
+        )
+
+        resp = self.client.get(reverse('users_list'))
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '权限模板库')
+        self.assertContains(resp, '财务查看模板')
+        self.assertContains(resp, 'name="permission_template"')
+
+    def test_users_list_should_render_permission_preview_payload(self):
+        preview_user = User.objects.create_user(
+            username='preview_user',
+            password='test123',
+            role='warehouse_staff',
+            permission_mode='custom',
+            custom_modules=['orders', 'finance'],
+            custom_actions=['view', 'update'],
+            custom_action_permissions=['finance.manual_adjust'],
+            is_staff=True,
+        )
+
+        resp = self.client.get(reverse('users_list'))
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="userPermissionPreviewData"')
+        self.assertContains(resp, 'previewUserPermissions(')
+        self.assertContains(resp, preview_user.username)
+        preview_payload = resp.context['user_permission_previews'][str(preview_user.id)]
+        self.assertIn('当前为自定义搭配权限；数据范围仍按基础角色模板生效', preview_payload['data_scopes'])
+        self.assertEqual(preview_payload['baseline_role'], '仓库操作员')
+        self.assertIn('订单中心', preview_payload['diffs']['modules']['added'])
+        self.assertIn('产品管理', preview_payload['diffs']['modules']['removed'])
+        self.assertIn('订单确认/发货', preview_payload['diffs']['action_permissions']['removed'])
+
+    def test_users_list_should_render_recent_permission_audits(self):
+        AuditLog.objects.create(
+            user=self.user,
+            action='update',
+            module='用户管理',
+            target='用户:audit_target',
+            details=json.dumps({
+                'summary': '编辑用户',
+                'before': {'role': 'warehouse_staff'},
+                'after': {'role': 'manager'},
+                'changed_fields': ['role'],
+                'extra': {'source': 'app'},
+            }, ensure_ascii=False),
+        )
+
+        resp = self.client.get(reverse('users_list'))
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '最近权限变更记录')
+        self.assertContains(resp, '用户:audit_target')
+        self.assertContains(resp, '编辑用户')
+        self.assertContains(resp, 'role')
+
     def test_customer_service_should_not_confirm_order_without_action_permission(self):
         cs = User.objects.create_user(
             username='flow_customer_service',
@@ -1898,6 +2369,100 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(resp.status_code, 200)
         transfer.refresh_from_db()
         self.assertEqual(transfer.status, 'pending')
+        self.assertContains(resp, 'id="transferCompleteFeedbackData"')
+        session = self.client.session
+        self.assertNotIn('transfer_complete_feedback', session)
+
+    def test_transfer_complete_should_store_success_feedback_for_popup(self):
+        order_from = Order.objects.create(
+            customer_name='转寄成功来源',
+            customer_phone='13611113333',
+            delivery_address='来源成功地址',
+            event_date=date.today() + timedelta(days=1),
+            rental_days=1,
+            status='delivered',
+            deposit_paid=Decimal('80.00'),
+            created_by=self.user,
+            ship_date=date.today(),
+            return_date=date.today() + timedelta(days=2),
+        )
+        order_to = Order.objects.create(
+            customer_name='转寄成功目标',
+            customer_phone='13622224444',
+            delivery_address='目标成功地址',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+            ship_date=date.today() + timedelta(days=2),
+            return_date=date.today() + timedelta(days=5),
+        )
+        OrderItem.objects.create(order=order_from, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('280.00'))
+        OrderItem.objects.create(order=order_to, sku=self.sku, quantity=1, rental_price=self.sku.rental_price, deposit=self.sku.deposit, subtotal=Decimal('280.00'))
+        transfer = Transfer.objects.create(
+            order_from=order_from,
+            order_to=order_to,
+            sku=self.sku,
+            quantity=1,
+            gap_days=2,
+            cost_saved=Decimal('100.00'),
+            status='pending',
+            created_by=self.user,
+        )
+
+        resp = self.client.post(
+            reverse('transfer_complete', kwargs={'transfer_id': transfer.id}),
+            {'tracking_no': 'YT-SUCCESS-001'},
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="transferCompleteFeedbackData"')
+        payload = json.loads(resp.context['transfer_complete_feedback_json'])
+        self.assertEqual(payload['title'], '完成成功')
+        self.assertIn('转寄任务已完成', payload['message'])
+
+    def test_transfer_complete_should_store_error_feedback_for_popup(self):
+        order_from = Order.objects.create(
+            customer_name='转寄失败来源',
+            customer_phone='13611114444',
+            delivery_address='来源失败地址',
+            event_date=date.today() + timedelta(days=1),
+            rental_days=1,
+            status='pending',
+            created_by=self.user,
+        )
+        order_to = Order.objects.create(
+            customer_name='转寄失败目标',
+            customer_phone='13622225555',
+            delivery_address='目标失败地址',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+        )
+        transfer = Transfer.objects.create(
+            order_from=order_from,
+            order_to=order_to,
+            sku=self.sku,
+            quantity=1,
+            gap_days=2,
+            cost_saved=Decimal('100.00'),
+            status='pending',
+            created_by=self.user,
+        )
+
+        resp = self.client.post(
+            reverse('transfer_complete', kwargs={'transfer_id': transfer.id}),
+            {'tracking_no': 'YT-ERROR-001'},
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="transferCompleteFeedbackData"')
+        payload = json.loads(resp.context['transfer_complete_feedback_json'])
+        self.assertEqual(payload['title'], '操作失败')
+        self.assertIn('来源单状态为 待处理，无法执行归还完成', payload['message'])
 
     def test_transfer_complete_should_only_consume_matching_source_allocation(self):
         source_a = Order.objects.create(
@@ -2702,11 +3267,50 @@ class CoreViewsFlowTestCase(TestCase):
 
         list_resp = self.client.get(reverse('orders_list'), {'status': 'returned'})
         self.assertEqual(list_resp.status_code, 200)
-        self.assertContains(list_resp, '<span class="badge text-bg-info">已归还</span>', html=True)
+        self.assertContains(list_resp, '<span class="emphasis-badge info-soft">已归还</span>', html=True)
 
         dashboard_resp = self.client.get(reverse('dashboard'))
         self.assertEqual(dashboard_resp.status_code, 200)
         self.assertContains(dashboard_resp, '<span class="badge text-bg-info">已归还</span>', html=True)
+
+    def test_login_page_should_not_expose_default_credentials_hint(self):
+        self.client.logout()
+
+        resp = self.client.get(reverse('login'))
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, 'admin123')
+        self.assertNotContains(resp, '默认账号')
+
+    def test_skus_list_should_render_and_consume_assembly_feedback_from_session(self):
+        SKUComponent.objects.create(
+            sku=self.sku,
+            part=self.part,
+            quantity_per_set=2,
+            notes='主组件',
+        )
+        session = self.client.session
+        session['sku_assembly_feedback'] = {
+            'status': 'success',
+            'sku_code': self.sku.code,
+            'sku_name': self.sku.name,
+            'quantity': 3,
+            'assembly_no': 'ASM-TEST-001',
+        }
+        session.save()
+
+        first_resp = self.client.get(reverse('skus_list'))
+
+        self.assertEqual(first_resp.status_code, 200)
+        self.assertContains(first_resp, 'id="skuAssemblyFeedbackData"')
+        self.assertContains(first_resp, 'ASM-TEST-001')
+        self.assertContains(first_resp, 'data-components-b64=')
+
+        second_resp = self.client.get(reverse('skus_list'))
+
+        self.assertEqual(second_resp.status_code, 200)
+        self.assertNotContains(second_resp, 'id="skuAssemblyFeedbackData"')
+        self.assertNotContains(second_resp, 'ASM-TEST-001')
 
     def test_dashboard_should_render_role_risk_entries_and_quick_actions(self):
         resp = self.client.get(reverse('dashboard'))
@@ -3082,6 +3686,28 @@ class CoreViewsFlowTestCase(TestCase):
         ids = [part.id for part in resp.context['parts_page'].object_list]
         self.assertIn(low_part.id, ids)
         self.assertNotIn(normal_part.id, ids)
+
+    def test_parts_inventory_buttons_should_render_data_attributes_for_quoted_values(self):
+        quoted_part = Part.objects.create(
+            name="O'Neil支架",
+            spec="12'寸",
+            category='packaging',
+            unit='套',
+            current_stock=2,
+            safety_stock=1,
+            location="A区'1架",
+            is_active=True,
+        )
+
+        resp = self.client.get(reverse('parts_inventory_list'))
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, f'data-id="{quoted_part.id}"')
+        self.assertContains(resp, 'data-name="O&#x27;Neil支架"', html=False)
+        self.assertContains(resp, 'data-spec="12&#x27;寸"', html=False)
+        self.assertContains(resp, 'data-location="A区&#x27;1架"', html=False)
+        self.assertContains(resp, 'onclick="showEditModal(this)"', html=False)
+        self.assertContains(resp, 'onclick="deletePart(this)"', html=False)
 
     def test_outbound_inventory_dashboard_should_expose_health_score(self):
         unit = InventoryUnit.objects.create(

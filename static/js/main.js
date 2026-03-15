@@ -167,6 +167,29 @@ function createMessagesContainer() {
     return container;
 }
 
+function getMessageDialogTitle(tags) {
+    const normalized = String(tags || '').toLowerCase();
+    if (normalized.includes('error') || normalized.includes('danger')) return '操作失败';
+    if (normalized.includes('success')) return '操作成功';
+    if (normalized.includes('warning')) return '请注意';
+    return '提示';
+}
+
+async function showPageMessagesAsDialogs() {
+    const container = document.getElementById('pageMessagesData');
+    if (!container || !window.AppUI || typeof window.AppUI.alert !== 'function') {
+        return;
+    }
+    const items = Array.from(container.querySelectorAll('.page-message-item'));
+    for (const item of items) {
+        const message = item.dataset.message || '';
+        if (!message) continue;
+        const tags = item.dataset.tags || '';
+        await window.AppUI.alert(message, getMessageDialogTitle(tags));
+    }
+    container.remove();
+}
+
 // 表单验证
 function validateForm(formId) {
     const form = document.getElementById(formId);
@@ -277,18 +300,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
-    // 自动消失的消息提示
-    const alerts = document.querySelectorAll('.alert');
-    alerts.forEach(alert => {
-        if (alert.classList.contains('alert-error')) {
-            alert.classList.add('alert-danger');
-        }
-        setTimeout(() => {
-            alert.style.transition = 'opacity 0.3s';
-            alert.style.opacity = '0';
-            setTimeout(() => alert.remove(), 300);
-        }, 3000);
-    });
+    showPageMessagesAsDialogs();
 
     // 表单提交前验证
     const forms = document.querySelectorAll('form');

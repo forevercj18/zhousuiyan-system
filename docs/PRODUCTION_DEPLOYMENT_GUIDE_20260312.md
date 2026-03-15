@@ -25,6 +25,7 @@ $env:DJANGO_SETTINGS_MODULE='config.settings_prod'
 - `*.trycloudflare.com` 只适合临时开发外网访问，不建议作为正式生产域名。
 - 正式生产应填写固定域名，例如 `example.com,www.example.com`。
 - `CSRF_TRUSTED_ORIGINS` 必须写完整协议头，例如 `https://example.com,https://www.example.com`。
+- 若使用 PostgreSQL，Python 环境必须已安装驱动：`psycopg2-binary`（已写入 `requirements.txt`）。
 
 生产环境禁止：
 

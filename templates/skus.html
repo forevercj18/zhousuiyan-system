@@ -3,6 +3,14 @@
 {% block title %}产品管理 - 宝宝周岁宴道具租赁系统{% endblock %}
 {% block page_title %}产品管理{% endblock %}
 
+{% block extra_css %}
+<style>
+    #skuImagePreviewModal:not(.show) {
+        display: none !important;
+    }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="skus-list">
     <div class="page-header">
@@ -86,6 +94,7 @@
                                     data-stock="{{ sku.effective_stock }}"
                                     data-description="{{ sku.description|default:''|escape }}"
                                     data-image-url="{% if sku.image %}{{ sku.image.url }}{% endif %}"
+                                    data-components-b64="{{ sku.components_b64 }}"
                                     onclick="showEditModal(this)">编辑</button>
                             <button class="btn btn-sm btn-danger" onclick="deleteSKU({{ sku.id }}, '{{ sku.code }}')">删除</button>
                         </div>
@@ -124,154 +133,6 @@
     {% endif %}
 </div>
 
-<!-- 新建产品模态框 -->
-<div id="createModal" class="modal">
-    <div class="modal-content">
-        <span class="close" onclick="closeModal('createModal')">&times;</span>
-        <h3>新建产品</h3>
-        <form method="POST" action="{% url 'sku_create' %}" enctype="multipart/form-data">
-            {% csrf_token %}
-            <div class="form-row">
-                <div class="form-group">
-                    <label>产品编号 <span class="required">*</span></label>
-                    <input type="text" name="code" class="form-control" required>
-                </div>
-                <div class="form-group">
-                    <label>产品名称 <span class="required">*</span></label>
-                    <input type="text" name="name" class="form-control" required>
-                </div>
-            </div>
-            <div class="form-group">
-                <label>类别 <span class="required">*</span></label>
-                <input type="text" name="category" class="form-control" placeholder="如：主题套餐、单品" required>
-            </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>租金 <span class="required">*</span></label>
-                    <input type="number" name="rental_price" class="form-control" step="0.01" min="0" required>
-                </div>
-                <div class="form-group">
-                    <label>押金 <span class="required">*</span></label>
-                    <input type="number" name="deposit" class="form-control" step="0.01" min="0" required>
-                </div>
-            </div>
-            <div class="alert alert-light border text-muted small mb-3">
-                新建产品只创建套餐定义和 BOM，不直接录入库存。库存增加请在保存后使用“新增库存”装配生成。
-            </div>
-            <div class="form-group">
-                <label>描述</label>
-                <textarea name="description" class="form-control" rows="3"></textarea>
-            </div>
-            <div class="form-group">
-                <label>套餐图片</label>
-                <input type="file" name="image" class="form-control" accept="image/*">
-                <small class="form-text">建议上传 1:1 或 4:3 图片，便于快速识别</small>
-                <div id="createImagePreviewWrap" class="mt-2 text-muted">未选择图片</div>
-            </div>
-            <div class="form-group">
-                <label>部件组成（BOM）</label>
-                <div id="createBomRows" class="d-flex flex-column gap-2"></div>
-                <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addBomRow('create')">+ 添加部件</button>
-                <small class="form-text">可选：用于后续部件损耗、维修、补件统计。</small>
-            </div>
-            <div class="form-actions">
-                <button type="button" class="btn btn-secondary" onclick="closeModal('createModal')">取消</button>
-                <button type="submit" class="btn btn-primary">创建</button>
-            </div>
-        </form>
-    </div>
-</div>
-
-<!-- 编辑产品模态框 -->
-<div id="editModal" class="modal">
-    <div class="modal-content">
-        <span class="close" onclick="closeModal('editModal')">&times;</span>
-        <h3>编辑产品</h3>
-        <form method="POST" id="editForm" enctype="multipart/form-data">
-            {% csrf_token %}
-            <div class="form-row">
-                <div class="form-group">
-                    <label>产品编号 <span class="required">*</span></label>
-                    <input type="text" name="code" id="edit_code" class="form-control" required>
-                </div>
-                <div class="form-group">
-                    <label>产品名称 <span class="required">*</span></label>
-                    <input type="text" name="name" id="edit_name" class="form-control" required>
-                </div>
-            </div>
-            <div class="form-group">
-                <label>类别 <span class="required">*</span></label>
-                <input type="text" name="category" id="edit_category" class="form-control" required>
-            </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>租金 <span class="required">*</span></label>
-                    <input type="number" name="rental_price" id="edit_rental_price" class="form-control" step="0.01" min="0" required>
-                </div>
-                <div class="form-group">
-                    <label>押金 <span class="required">*</span></label>
-                    <input type="number" name="deposit" id="edit_deposit" class="form-control" step="0.01" min="0" required>
-                </div>
-            </div>
-            <div class="alert alert-light border text-muted small mb-3">
-                当前库存：<strong id="edit_stock_text">0</strong> 套。库存不支持直接手工修改，请使用“新增库存”装配生成。
-            </div>
-            <div class="form-group">
-                <label>描述</label>
-                <textarea name="description" id="edit_description" class="form-control" rows="3"></textarea>
-            </div>
-            <div class="form-group">
-                <label>当前图片</label>
-                <div id="editImagePreviewWrap" class="mb-2 text-muted">暂无图片</div>
-                <input type="file" name="image" id="edit_image" class="form-control" accept="image/*">
-                <div id="editSelectedImagePreviewWrap" class="mt-2 text-muted">未选择新图片</div>
-                <div class="mt-2">
-                    <label class="mb-0">
-                        <input type="checkbox" name="clear_image" value="1" id="edit_clear_image">
-                        清除当前图片
-                    </label>
-                </div>
-            </div>
-            <div class="form-group">
-                <label>部件组成（BOM）</label>
-                <div id="editBomRows" class="d-flex flex-column gap-2"></div>
-                <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addBomRow('edit')">+ 添加部件</button>
-                <small class="form-text">修改后将覆盖该 SKU 原有 BOM 组成。</small>
-            </div>
-            <div class="form-actions">
-                <button type="button" class="btn btn-secondary" onclick="closeModal('editModal')">取消</button>
-                <button type="submit" class="btn btn-primary">保存</button>
-            </div>
-        </form>
-    </div>
-</div>
-
-<div id="assemblyModal" class="modal">
-    <div class="modal-content">
-        <span class="close" onclick="closeModal('assemblyModal')">&times;</span>
-        <h3>新增库存（装配）</h3>
-        <form method="POST" id="assemblyForm">
-            {% csrf_token %}
-            <div class="alert alert-info small">
-                <div>SKU：<strong id="assemblySkuTitle">-</strong></div>
-                <div>说明：系统将按已配置 BOM 扣减部件库存，并自动生成单套编号。</div>
-            </div>
-            <div class="form-group">
-                <label>新增套数 <span class="required">*</span></label>
-                <input type="number" name="assembly_quantity" id="assembly_quantity" class="form-control" min="1" value="1" required>
-            </div>
-            <div class="form-group">
-                <label>备注</label>
-                <textarea name="assembly_notes" id="assembly_notes" class="form-control" rows="3" placeholder="如：新采购部件到货后装配"></textarea>
-            </div>
-            <div class="form-actions">
-                <button type="button" class="btn btn-secondary" onclick="closeModal('assemblyModal')">取消</button>
-                <button type="submit" class="btn btn-success">确认装配</button>
-            </div>
-        </form>
-    </div>
-</div>
-
 <div class="modal fade" id="skuImagePreviewModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered">
         <div class="modal-content">
@@ -287,14 +148,111 @@
 </div>
 
 {{ sku_components_map_json|json_script:"skuComponentsMapData" }}
+{% if assembly_feedback_json %}
+{{ assembly_feedback_json|json_script:"skuAssemblyFeedbackData" }}
+{% endif %}
 
 <script>
-const SKU_COMPONENTS_MAP = JSON.parse(document.getElementById('skuComponentsMapData').textContent || '{}');
+function parseJsonScriptData(elementId, fallbackValue) {
+    const el = document.getElementById(elementId);
+    if (!el) return fallbackValue;
+    try {
+        const firstPass = JSON.parse(el.textContent || 'null');
+        if (typeof firstPass === 'string') {
+            return JSON.parse(firstPass);
+        }
+        return firstPass ?? fallbackValue;
+    } catch (e) {
+        console.error(`parseJsonScriptData failed for ${elementId}`, e);
+        return fallbackValue;
+    }
+}
+
+const SKU_COMPONENTS_MAP = parseJsonScriptData('skuComponentsMapData', {});
 const BOM_PARTS = [
 {% for part in parts %}
     { id: {{ part.id }}, label: '{{ part.name|escapejs }}{% if part.spec %}（{{ part.spec|escapejs }}）{% endif %}' },
 {% endfor %}
 ];
+const BOM_EDITOR_STATES = {};
+const BOM_PAGE_SIZE = 5;
+
+function createBomRowId() {
+    return `bom_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function isBomRowMeaningful(row) {
+    if (!row) return false;
+    return !!(String(row.part_id || '').trim() || String(row.notes || '').trim() || String(row.quantity_per_set || '').trim());
+}
+
+function createBomDraftRow(row) {
+    return {
+        row_id: row && row.row_id ? row.row_id : createBomRowId(),
+        part_id: row && row.part_id ? String(row.part_id) : '',
+        quantity_per_set: row && row.quantity_per_set ? String(row.quantity_per_set) : '1',
+        notes: row && row.notes ? String(row.notes) : ''
+    };
+}
+
+function getBomState(prefix) {
+    if (!BOM_EDITOR_STATES[prefix]) {
+        BOM_EDITOR_STATES[prefix] = {
+            rows: [createBomDraftRow({})],
+            searchKeyword: '',
+            currentPage: 1,
+            pageSize: BOM_PAGE_SIZE,
+        };
+    }
+    return BOM_EDITOR_STATES[prefix];
+}
+
+function getPartLabel(partId) {
+    const pid = String(partId || '');
+    const matched = BOM_PARTS.find((part) => String(part.id) === pid);
+    return matched ? matched.label : '';
+}
+
+function getFilteredBomRows(prefix) {
+    const state = getBomState(prefix);
+    const keyword = (state.searchKeyword || '').trim().toLowerCase();
+    if (!keyword) return state.rows;
+    return state.rows.filter((row) => {
+        const label = getPartLabel(row.part_id).toLowerCase();
+        return label.includes(keyword) || String(row.notes || '').toLowerCase().includes(keyword);
+    });
+}
+
+function updateBomSummary(prefix, filteredRows) {
+    const state = getBomState(prefix);
+    const totalMeaningful = state.rows.filter(isBomRowMeaningful).length;
+    const filteredMeaningful = filteredRows.filter(isBomRowMeaningful).length;
+    const summaryEl = document.getElementById(`${prefix}BomSummary`);
+    if (summaryEl) {
+        summaryEl.textContent = state.searchKeyword
+            ? `筛选结果 ${filteredMeaningful} / 总 ${totalMeaningful} 条`
+            : `共 ${totalMeaningful} 条`;
+    }
+}
+
+function updateBomPagination(prefix, filteredRows) {
+    const state = getBomState(prefix);
+    const paginationEl = document.getElementById(`${prefix}BomPagination`);
+    if (!paginationEl) return;
+    const totalPages = Math.max(1, Math.ceil(filteredRows.length / state.pageSize));
+    state.currentPage = Math.min(Math.max(1, state.currentPage), totalPages);
+    if (filteredRows.length <= state.pageSize) {
+        paginationEl.innerHTML = '';
+        return;
+    }
+    const prevDisabled = state.currentPage <= 1 ? ' disabled' : '';
+    const nextDisabled = state.currentPage >= totalPages ? ' disabled' : '';
+    paginationEl.innerHTML = `
+        <button type="button" class="btn btn-sm btn-outline-secondary${prevDisabled}" onclick="changeBomPage('${prefix}', -1)">上一页</button>
+        <span class="small text-muted">第 ${state.currentPage} / ${totalPages} 页</span>
+        <button type="button" class="btn btn-sm btn-outline-secondary${nextDisabled}" onclick="changeBomPage('${prefix}', 1)">下一页</button>
+    `;
+}
 
 function buildPartOptions(selectedId) {
     const selected = String(selectedId || '');
@@ -312,43 +270,161 @@ function createBomRowHtml(mode, row) {
     const qty = row && row.quantity_per_set ? row.quantity_per_set : 1;
     const notes = row && row.notes ? String(row.notes).replace(/"/g, '&quot;') : '';
     return (
-        `<div class="d-flex align-items-center gap-2 bom-row">` +
-            `<select name="component_part_id[]" class="form-control" style="max-width:260px;">${buildPartOptions(partId)}</select>` +
-            `<input type="number" name="component_qty[]" class="form-control" min="1" value="${qty}" style="max-width:120px;" placeholder="单套用量">` +
-            `<input type="text" name="component_notes[]" class="form-control" value="${notes}" placeholder="备注（可选）">` +
-            `<button type="button" class="btn btn-sm btn-outline-danger" onclick="removeBomRow(this)">删除</button>` +
+        `<div class="d-flex align-items-center gap-2 bom-row mb-2">` +
+            `<select class="form-control" style="flex:1 1 auto; min-width:0;" onchange="updateBomField('${mode}', '${row.row_id}', 'part_id', this.value)">${buildPartOptions(partId)}</select>` +
+            `<input type="number" class="form-control" min="1" value="${qty}" style="flex:0 0 78px; max-width:78px;" placeholder="数量" oninput="updateBomField('${mode}', '${row.row_id}', 'quantity_per_set', this.value)">` +
+            `<input type="text" class="form-control" value="${notes}" placeholder="备注（可选）" style="flex:0 0 150px; max-width:150px;" oninput="updateBomField('${mode}', '${row.row_id}', 'notes', this.value)">` +
+            `<button type="button" class="btn btn-sm btn-outline-danger" style="flex:0 0 58px;" onclick="removeBomRow('${mode}', '${row.row_id}')">删除</button>` +
         `</div>`
     );
 }
 
-function renderBomRows(mode, rows) {
-    const wrap = document.getElementById(mode + 'BomRows');
+function normalizeBomRows(rows) {
+    if (!rows) return [];
+    if (Array.isArray(rows)) return rows;
+    if (typeof rows === 'string') {
+        try {
+            const parsed = JSON.parse(rows);
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (e) {
+            return [];
+        }
+    }
+    if (typeof rows === 'object') {
+        if (Array.isArray(rows.components)) return rows.components;
+        return [];
+    }
+    return [];
+}
+
+function decodeSkuComponents(b64Text) {
+    if (!b64Text) return [];
+    try {
+        const binary = window.atob(b64Text);
+        const bytes = Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
+        const jsonText = new TextDecoder('utf-8').decode(bytes);
+        return normalizeBomRows(JSON.parse(jsonText));
+    } catch (e) {
+        console.error('sku components decode failed', e);
+        return [];
+    }
+}
+
+function initBomEditor(prefix, rows) {
+    const normalized = normalizeBomRows(rows).map(createBomDraftRow);
+    BOM_EDITOR_STATES[prefix] = {
+        rows: normalized.length ? normalized : [createBomDraftRow({})],
+        searchKeyword: '',
+        currentPage: 1,
+        pageSize: BOM_PAGE_SIZE,
+    };
+    const searchEl = document.getElementById(`${prefix}BomSearch`);
+    if (searchEl) searchEl.value = '';
+    renderBomRows(prefix);
+}
+
+function renderBomRows(prefix) {
+    const wrap = document.getElementById(prefix + 'BomRows');
     if (!wrap) return;
-    wrap.innerHTML = '';
-    const list = rows && rows.length ? rows : [];
-    if (!list.length) {
-        wrap.innerHTML = createBomRowHtml(mode, {});
+    const state = getBomState(prefix);
+    const filteredRows = getFilteredBomRows(prefix);
+    updateBomSummary(prefix, filteredRows);
+    updateBomPagination(prefix, filteredRows);
+
+    if (!filteredRows.length) {
+        wrap.innerHTML = '<div class="text-muted small py-2">未找到匹配部件。</div>';
         return;
     }
-    list.forEach((row) => {
-        wrap.insertAdjacentHTML('beforeend', createBomRowHtml(mode, row));
+    const totalPages = Math.max(1, Math.ceil(filteredRows.length / state.pageSize));
+    state.currentPage = Math.min(Math.max(1, state.currentPage), totalPages);
+    const start = (state.currentPage - 1) * state.pageSize;
+    const pageRows = filteredRows.slice(start, start + state.pageSize);
+    wrap.innerHTML = '';
+    pageRows.forEach((row) => {
+        wrap.insertAdjacentHTML('beforeend', createBomRowHtml(prefix, row));
     });
 }
 
-function addBomRow(mode) {
-    const wrap = document.getElementById(mode + 'BomRows');
-    if (!wrap) return;
-    wrap.insertAdjacentHTML('beforeend', createBomRowHtml(mode, {}));
+function setBomSearch(prefix, keyword) {
+    const state = getBomState(prefix);
+    state.searchKeyword = String(keyword || '').trim();
+    state.currentPage = 1;
+    renderBomRows(prefix);
 }
 
-function removeBomRow(btn) {
-    const row = btn.closest('.bom-row');
+function changeBomPage(prefix, delta) {
+    const state = getBomState(prefix);
+    const filteredRows = getFilteredBomRows(prefix);
+    const totalPages = Math.max(1, Math.ceil(filteredRows.length / state.pageSize));
+    state.currentPage = Math.min(Math.max(1, state.currentPage + delta), totalPages);
+    renderBomRows(prefix);
+}
+
+function updateBomField(prefix, rowId, field, value) {
+    const state = getBomState(prefix);
+    const row = state.rows.find((item) => item.row_id === rowId);
     if (!row) return;
-    const parent = row.parentElement;
-    row.remove();
-    if (parent && !parent.querySelector('.bom-row')) {
-        parent.insertAdjacentHTML('beforeend', createBomRowHtml(parent.id.includes('edit') ? 'edit' : 'create', {}));
+    row[field] = field === 'quantity_per_set' ? String(value || '1') : String(value || '');
+}
+
+function addBomRow(prefix) {
+    const state = getBomState(prefix);
+    state.rows.push(createBomDraftRow({}));
+    state.searchKeyword = '';
+    const totalPages = Math.max(1, Math.ceil(state.rows.length / state.pageSize));
+    state.currentPage = totalPages;
+    const searchEl = document.getElementById(`${prefix}BomSearch`);
+    if (searchEl) searchEl.value = '';
+    renderBomRows(prefix);
+}
+
+function removeBomRow(prefix, rowId) {
+    const state = getBomState(prefix);
+    state.rows = state.rows.filter((row) => row.row_id !== rowId);
+    if (!state.rows.length) {
+        state.rows = [createBomDraftRow({})];
     }
+    const filteredRows = getFilteredBomRows(prefix);
+    const totalPages = Math.max(1, Math.ceil(filteredRows.length / state.pageSize));
+    state.currentPage = Math.min(state.currentPage, totalPages);
+    renderBomRows(prefix);
+}
+
+function serializeBomRows(prefix, form) {
+    const hiddenWrap = document.getElementById(`${prefix}BomHiddenInputs`);
+    if (!hiddenWrap) return true;
+    hiddenWrap.innerHTML = '';
+    const state = getBomState(prefix);
+    const meaningfulRows = state.rows.filter(isBomRowMeaningful);
+    for (const row of meaningfulRows) {
+        const partId = String(row.part_id || '').trim();
+        const qty = parseInt(String(row.quantity_per_set || '').trim() || '1', 10);
+        const notes = String(row.notes || '').trim();
+        if (!partId) {
+            if (window.AppUI && typeof window.AppUI.alert === 'function') {
+                window.AppUI.alert('提示', '存在未选择部件的 BOM 行，请修正后再保存。', 'warning');
+            } else {
+                window.alert('存在未选择部件的 BOM 行，请修正后再保存。');
+            }
+            return false;
+        }
+        if (!Number.isFinite(qty) || qty <= 0) {
+            if (window.AppUI && typeof window.AppUI.alert === 'function') {
+                window.AppUI.alert('提示', 'BOM 数量必须大于 0。', 'warning');
+            } else {
+                window.alert('BOM 数量必须大于 0。');
+            }
+            return false;
+        }
+        [['component_part_id[]', partId], ['component_qty[]', String(qty)], ['component_notes[]', notes]].forEach(([name, value]) => {
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = name;
+            input.value = value;
+            hiddenWrap.appendChild(input);
+        });
+    }
+    return true;
 }
 
 function filterSkus() {
@@ -361,60 +437,240 @@ function filterSkus() {
     window.location.href = '{% url "skus_list" %}' + (q ? ('?' + q) : '');
 }
 
+function createSkuModalDom(mode, payload) {
+    const isEdit = mode === 'edit';
+    const modalId = isEdit ? 'editModalDynamic' : 'createModalDynamic';
+    const prefix = isEdit ? 'editDynamic' : 'createDynamic';
+    const imagePreviewWrapId = `${prefix}ImagePreviewWrap`;
+    const selectedPreviewWrapId = `${prefix}SelectedImagePreviewWrap`;
+    const bomRowsId = `${prefix}BomRows`;
+    const imageInputId = `${prefix}ImageInput`;
+    const clearImageId = `${prefix}ClearImage`;
+    const stockTextId = `${prefix}StockText`;
+    const title = isEdit ? '编辑产品' : '新建产品';
+    const action = isEdit ? `/skus/${payload.id}/edit/` : '{% url "sku_create" %}';
+    const currentImageHtml = isEdit
+        ? (payload.imageUrl
+            ? `<a href="#" onclick="openSkuImagePreview('${payload.imageUrl}', '${payload.name.replace(/'/g, "\\'")}'); return false;" title="点击放大预览"><img src="${payload.imageUrl}" alt="当前图片" style="width:72px;height:72px;object-fit:cover;border-radius:8px;border:1px solid #dbe2ea;"></a>`
+            : '暂无图片')
+        : '';
+    return `
+        <div class="modal fade" id="${modalId}" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-xl" style="max-width: 1120px; width: min(1120px, calc(100vw - 48px));">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3 class="modal-title fs-5 mb-0">${title}</h3>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                    </div>
+                    <div class="modal-body" style="max-height: calc(100vh - 170px); overflow-y: auto; overflow-x: hidden;">
+                        <form method="POST" action="${action}" enctype="multipart/form-data">
+                            <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>产品编号 <span class="required">*</span></label>
+                                    <input type="text" name="code" class="form-control" value="${payload.code || ''}" required>
+                                </div>
+                                <div class="form-group">
+                                    <label>产品名称 <span class="required">*</span></label>
+                                    <input type="text" name="name" class="form-control" value="${payload.name || ''}" required>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>类别 <span class="required">*</span></label>
+                                <input type="text" name="category" class="form-control" placeholder="如：主题套餐、单品" value="${payload.category || ''}" required>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>租金 <span class="required">*</span></label>
+                                    <input type="number" name="rental_price" class="form-control" step="0.01" min="0" value="${payload.rentalPrice || ''}" required>
+                                </div>
+                                <div class="form-group">
+                                    <label>押金 <span class="required">*</span></label>
+                                    <input type="number" name="deposit" class="form-control" step="0.01" min="0" value="${payload.deposit || ''}" required>
+                                </div>
+                            </div>
+                            <div class="alert alert-light border text-muted small mb-3">
+                                ${isEdit
+                                    ? `当前库存：<strong id="${stockTextId}">${payload.stock || '0'}</strong> 套。库存不支持直接手工修改，请使用“新增库存”装配生成。`
+                                    : '新建产品只创建套餐定义和 BOM，不直接录入库存。库存增加请在保存后使用“新增库存”装配生成。'}
+                            </div>
+                            <div class="form-group">
+                                <label>描述</label>
+                                <textarea name="description" class="form-control" rows="3">${payload.description || ''}</textarea>
+                            </div>
+                            <div class="form-group">
+                                <label>${isEdit ? '当前图片' : '套餐图片'}</label>
+                                ${isEdit ? `<div id="${imagePreviewWrapId}" class="mb-2 text-muted">${currentImageHtml}</div>` : ''}
+                                <input type="file" name="image" id="${imageInputId}" class="form-control" accept="image/*">
+                                <small class="form-text">建议上传 1:1 或 4:3 图片，便于快速识别</small>
+                                <div id="${selectedPreviewWrapId}" class="mt-2 text-muted">未选择图片</div>
+                                ${isEdit ? `
+                                <div class="mt-2">
+                                    <label class="mb-0">
+                                        <input type="checkbox" name="clear_image" value="1" id="${clearImageId}">
+                                        清除当前图片
+                                    </label>
+                                </div>` : ''}
+                            </div>
+                                <div class="form-group">
+                                    <label>部件组成（BOM）</label>
+                                    <div class="d-flex justify-content-between align-items-center gap-2 mb-2 flex-wrap">
+                                        <input type="text" id="${prefix}BomSearch" class="form-control" placeholder="搜索部件名称/备注" style="max-width:240px;" oninput="setBomSearch('${prefix}', this.value)">
+                                        <div id="${prefix}BomSummary" class="small text-muted ms-auto">共 0 条</div>
+                                    </div>
+                                    <div id="${bomRowsId}" class="d-flex flex-column gap-2"></div>
+                                    <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addBomRow('${prefix}')">+ 添加部件</button>
+                                    <div class="d-flex justify-content-between align-items-center gap-2 mt-2 flex-wrap">
+                                        <small class="form-text mb-0">${isEdit ? '修改后将覆盖该 SKU 原有 BOM 组成。每页展示 5 条，保存时会整体提交。' : '可选：用于后续部件损耗、维修、补件统计。每页展示 5 条，保存时会整体提交。'}</small>
+                                        <div id="${prefix}BomPagination" class="d-flex align-items-center gap-2"></div>
+                                    </div>
+                                    <div id="${prefix}BomHiddenInputs"></div>
+                                </div>
+                            <div class="form-actions">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                                <button type="submit" class="btn btn-primary">${isEdit ? '保存' : '创建'}</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `.trim();
+}
+
+function showSkuFormModal(mode, payload) {
+    const modalId = mode === 'edit' ? 'editModalDynamic' : 'createModalDynamic';
+    const prefix = mode === 'edit' ? 'editDynamic' : 'createDynamic';
+    const existing = document.getElementById(modalId);
+    if (existing) {
+        const existingInstance = window.bootstrap ? window.bootstrap.Modal.getInstance(existing) : null;
+        if (existingInstance) existingInstance.dispose();
+        existing.remove();
+    }
+    document.querySelectorAll('.modal-backdrop').forEach((el) => el.remove());
+    document.body.classList.remove('modal-open');
+
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = createSkuModalDom(mode, payload);
+    document.body.appendChild(wrapper.firstElementChild);
+
+	    initBomEditor(prefix, mode === 'edit' ? (payload.components || []) : []);
+	    bindSkuImageInputPreview(`#${prefix}ImageInput`, `#${prefix}SelectedImagePreviewWrap`);
+
+	    const modalEl = document.getElementById(modalId);
+        const formEl = modalEl.querySelector('form');
+        if (formEl) {
+            formEl.addEventListener('submit', function (event) {
+                if (!serializeBomRows(prefix, formEl)) {
+                    event.preventDefault();
+                }
+            });
+        }
+	    if (window.bootstrap) {
+        const instance = new window.bootstrap.Modal(modalEl, { backdrop: 'static' });
+        modalEl.addEventListener('hidden.bs.modal', function () {
+            instance.dispose();
+            modalEl.remove();
+            document.querySelectorAll('.modal-backdrop').forEach((el) => el.remove());
+            document.body.classList.remove('modal-open');
+        }, { once: true });
+        instance.show();
+        return;
+    }
+    modalEl.style.display = 'block';
+}
+
 function showCreateModal() {
-    document.getElementById('createModal').style.display = 'block';
-    const createPreview = document.getElementById('createImagePreviewWrap');
-    const createFile = document.querySelector('#createModal input[name="image"]');
-    if (createPreview) createPreview.textContent = '未选择图片';
-    if (createFile) createFile.value = '';
-    renderBomRows('create', []);
+    showSkuFormModal('create', {
+        code: '',
+        name: '',
+        category: '',
+        rentalPrice: '',
+        deposit: '',
+        description: ''
+    });
 }
 
 function showEditModal(btn) {
-    const id = btn.getAttribute('data-id');
-    const code = btn.getAttribute('data-code') || '';
-    const name = btn.getAttribute('data-name') || '';
-    const category = btn.getAttribute('data-category') || '';
-    const rentalPrice = btn.getAttribute('data-rental-price') || '';
-    const deposit = btn.getAttribute('data-deposit') || '';
-    const stock = btn.getAttribute('data-stock') || '0';
-    const description = btn.getAttribute('data-description') || '';
-    const imageUrl = btn.getAttribute('data-image-url') || '';
-
-    document.getElementById('editForm').action = `/skus/${id}/edit/`;
-    document.getElementById('edit_code').value = code;
-    document.getElementById('edit_name').value = name;
-    document.getElementById('edit_category').value = category;
-    document.getElementById('edit_rental_price').value = rentalPrice;
-    document.getElementById('edit_deposit').value = deposit;
-    document.getElementById('edit_stock_text').textContent = stock;
-    document.getElementById('edit_description').value = description || '';
-    document.getElementById('edit_image').value = '';
-    document.getElementById('edit_clear_image').checked = false;
-    const editSelectedPreview = document.getElementById('editSelectedImagePreviewWrap');
-    if (editSelectedPreview) {
-        editSelectedPreview.textContent = '未选择新图片';
-    }
-
-    const previewWrap = document.getElementById('editImagePreviewWrap');
-    if (imageUrl) {
-        previewWrap.innerHTML = `<a href="#" onclick="openSkuImagePreview('${imageUrl}', '${name.replace(/'/g, "\\'")}'); return false;" title="点击放大预览"><img src="${imageUrl}" alt="当前图片" style="width:72px;height:72px;object-fit:cover;border-radius:8px;border:1px solid #dbe2ea;"></a>`;
-    } else {
-        previewWrap.textContent = '暂无图片';
-    }
-    renderBomRows('edit', SKU_COMPONENTS_MAP[String(id)] || []);
-    document.getElementById('editModal').style.display = 'block';
+    const skuId = btn.getAttribute('data-id');
+    const buttonComponents = decodeSkuComponents(btn.getAttribute('data-components-b64'));
+    showSkuFormModal('edit', {
+        id: skuId,
+        code: btn.getAttribute('data-code') || '',
+        name: btn.getAttribute('data-name') || '',
+        category: btn.getAttribute('data-category') || '',
+        rentalPrice: btn.getAttribute('data-rental-price') || '',
+        deposit: btn.getAttribute('data-deposit') || '',
+        stock: btn.getAttribute('data-stock') || '0',
+        description: btn.getAttribute('data-description') || '',
+        imageUrl: btn.getAttribute('data-image-url') || '',
+        components: buttonComponents.length ? buttonComponents : normalizeBomRows(SKU_COMPONENTS_MAP[String(skuId)] || [])
+    });
 }
 
 function showAssemblyModal(btn) {
     const id = btn.getAttribute('data-id');
     const code = btn.getAttribute('data-code') || '';
     const name = btn.getAttribute('data-name') || '';
-    document.getElementById('assemblyForm').action = `/skus/${id}/assemble/`;
-    document.getElementById('assemblySkuTitle').textContent = `${code} - ${name}`;
-    document.getElementById('assembly_quantity').value = '1';
-    document.getElementById('assembly_notes').value = '';
-    document.getElementById('assemblyModal').style.display = 'block';
+    const existing = document.getElementById('assemblyModal');
+    if (existing) {
+        const existingInstance = window.bootstrap ? window.bootstrap.Modal.getInstance(existing) : null;
+        if (existingInstance) {
+            existingInstance.dispose();
+        }
+        existing.remove();
+    }
+    document.querySelectorAll('.modal-backdrop').forEach((el) => el.remove());
+    document.body.classList.remove('modal-open');
+
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = `
+        <div class="modal fade" id="assemblyModal" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">新增库存（装配）</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                    </div>
+                    <form method="POST" action="/skus/${id}/assemble/">
+                        <div class="modal-body">
+                            <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+                            <div class="alert alert-info small mb-3">
+                                <div>SKU：<strong>${code} - ${name}</strong></div>
+                                <div>说明：系统将按已配置 BOM 扣减部件库存，并自动生成单套编号。</div>
+                            </div>
+                            <div class="form-group mb-3">
+                                <label>新增套数 <span class="required">*</span></label>
+                                <input type="number" name="assembly_quantity" class="form-control" min="1" value="1" required>
+                            </div>
+                            <div class="form-group mb-0">
+                                <label>备注</label>
+                                <textarea name="assembly_notes" class="form-control" rows="3" placeholder="如：新采购部件到货后装配"></textarea>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                            <button type="submit" class="btn btn-success">确认装配</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    `.trim();
+    document.body.appendChild(wrapper.firstElementChild);
+    const modalEl = document.getElementById('assemblyModal');
+    if (window.bootstrap) {
+        const instance = new window.bootstrap.Modal(modalEl, { backdrop: 'static' });
+        modalEl.addEventListener('hidden.bs.modal', function () {
+            instance.dispose();
+            modalEl.remove();
+            document.querySelectorAll('.modal-backdrop').forEach((el) => el.remove());
+            document.body.classList.remove('modal-open');
+        }, { once: true });
+        instance.show();
+        return;
+    }
+    modalEl.style.display = 'block';
 }
 
 function openSkuImagePreview(imageUrl, title) {
@@ -456,14 +712,54 @@ function bindSkuImageInputPreview(inputSelector, previewSelector) {
     });
 }
 
+function showAssemblyFeedbackIfReady() {
+    if (!window.AppUI) {
+        return false;
+    }
+    try {
+        const payload = parseJsonScriptData('skuAssemblyFeedbackData', {});
+        if (payload.status === 'success') {
+            const title = '装配完成';
+            const message =
+                `SKU：${payload.sku_code || '-'} ${payload.sku_name || ''}\n` +
+                `新增库存：${payload.quantity || 0} 套\n` +
+                `装配单号：${payload.assembly_no || '-'}`;
+            window.AppUI.toast(`装配完成：${payload.sku_code || ''} +${payload.quantity || 0} 套`, 'success');
+            window.AppUI.alert(message, title);
+        } else if (payload.status === 'error') {
+            const title = '装配失败';
+            const message =
+                `SKU：${payload.sku_code || '-'} ${payload.sku_name || ''}\n` +
+                `计划装配：${payload.quantity || 0} 套\n` +
+                `失败原因：${payload.error || '未知错误'}`;
+            window.AppUI.toast(`装配失败：${payload.sku_code || ''}`, 'error');
+            window.AppUI.alert(message, title);
+        }
+        return true;
+    } catch (e) {
+        console.error('skuAssemblyFeedback parse failed', e);
+        return true;
+    }
+}
+
 document.addEventListener('DOMContentLoaded', function () {
-    bindSkuImageInputPreview('#createModal input[name=\"image\"]', '#createImagePreviewWrap');
-    bindSkuImageInputPreview('#edit_image', '#editSelectedImagePreviewWrap');
-    renderBomRows('create', []);
+    if (!showAssemblyFeedbackIfReady()) {
+        window.addEventListener('load', showAssemblyFeedbackIfReady, { once: true });
+        setTimeout(showAssemblyFeedbackIfReady, 150);
+    }
 });
 
 function closeModal(modalId) {
-    document.getElementById(modalId).style.display = 'none';
+    const modalEl = document.getElementById(modalId);
+    if (!modalEl) return;
+    if (window.bootstrap && modalEl.classList.contains('fade')) {
+        const instance = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+        if (instance) {
+            instance.hide();
+            return;
+        }
+    }
+    modalEl.style.display = 'none';
 }
 
 async function deleteSKU(skuId, skuCode) {
@@ -540,11 +836,5 @@ function bulkDeleteSkus() {
     run();
 }
 
-// 点击模态框外部关闭
-window.onclick = function(event) {
-    if (event.target.classList.contains('modal')) {
-        event.target.style.display = 'none';
-    }
-}
 </script>
 {% endblock %}

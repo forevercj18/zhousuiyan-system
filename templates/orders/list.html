@@ -4,6 +4,333 @@
 {% block title %}订单中心 - 宝宝周岁宴道具租赁系统{% endblock %}
 {% block page_title %}订单中心{% endblock %}
 
+{% block extra_css %}
+<style>
+.orders-list .page-header {
+    background: #fff;
+    border: 1px solid #e6edf7;
+    border-radius: 18px;
+    padding: 16px 18px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 18px;
+}
+
+.orders-list .header-left {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 12px;
+}
+
+.orders-list .filter-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.orders-list .filter-group label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #60708a;
+    margin: 0;
+    white-space: nowrap;
+}
+
+.orders-list .filter-group .form-select,
+.orders-list .filter-group .form-control {
+    min-width: 160px;
+}
+
+.orders-list .table-container {
+    background: #fff;
+    border: 1px solid #e6edf7;
+    border-radius: 20px;
+    overflow: hidden;
+}
+
+.orders-list .selection-toolbar {
+    margin-bottom: 14px;
+    padding: 12px 14px;
+    background: #fff;
+    border: 1px solid #e6edf7;
+    border-radius: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.orders-list .selection-summary {
+    font-size: 15px;
+    color: #6f8098;
+}
+
+.orders-list .selection-summary strong {
+    color: #22324c;
+    font-weight: 800;
+}
+
+.orders-list .selection-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.orders-list .table thead th {
+    background: #f7faff;
+    border-bottom: 1px solid #e7eef8;
+    color: #60708a;
+    font-size: 14px;
+    font-weight: 700;
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
+.orders-list .table tbody td {
+    vertical-align: top;
+    padding-top: 12px;
+    padding-bottom: 12px;
+}
+
+.orders-list .table tbody tr:nth-child(even) {
+    background: #fbfdff;
+}
+
+.orders-list .cell-main {
+    font-size: 17px;
+    font-weight: 700;
+    color: #22324c;
+    line-height: 1.45;
+}
+
+.orders-list .cell-sub {
+    margin-top: 3px;
+    font-size: 14px;
+    color: #8090a8;
+    line-height: 1.45;
+}
+
+.orders-list .cell-sub + .cell-sub {
+    margin-top: 2px;
+}
+
+.orders-list .cell-address {
+    max-width: 220px;
+    white-space: normal;
+    word-break: break-all;
+}
+
+.orders-list .cell-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.orders-list .row-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.orders-list .row-block {
+    padding: 0;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+}
+
+.orders-list .meta-inline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    font-size: 14px;
+    color: #7f8da3;
+    line-height: 1.5;
+}
+
+.orders-list .meta-inline strong {
+    color: #2a3955;
+    font-weight: 700;
+}
+
+.orders-list .status-block,
+.orders-list .transfer-block,
+.orders-list .timeliness-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.orders-list .field-label {
+    font-size: 13px;
+    font-weight: 700;
+    color: #8a98ad;
+    letter-spacing: 0.04em;
+}
+
+.orders-list .emphasis-badge {
+    display: inline-flex;
+    align-items: center;
+    width: fit-content;
+    min-height: 34px;
+    padding: 0 14px;
+    border-radius: 999px;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1;
+    border: 1px solid transparent;
+    list-style: none;
+}
+
+.orders-list .emphasis-badge::before {
+    content: none !important;
+    display: none !important;
+}
+
+.orders-list .emphasis-badge.warning-soft {
+    background: #fff3cd;
+    color: #8a5900;
+    border-color: #ffe08a;
+}
+
+.orders-list .emphasis-badge.info-soft {
+    background: #dff3ff;
+    color: #005a84;
+    border-color: #a8dcff;
+}
+
+.orders-list .emphasis-badge.primary-soft {
+    background: #deebff;
+    color: #1d4ed8;
+    border-color: #bdd5ff;
+}
+
+.orders-list .emphasis-badge.success-soft {
+    background: #def7e8;
+    color: #0f7a3c;
+    border-color: #a8e0bc;
+}
+
+.orders-list .emphasis-badge.secondary-soft {
+    background: #edf1f7;
+    color: #5c6b80;
+    border-color: #d7e0eb;
+}
+
+.orders-list .finance-grid,
+.orders-list .date-grid {
+    display: grid;
+    gap: 5px;
+}
+
+.orders-list .finance-line,
+.orders-list .date-line {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 14px;
+}
+
+.orders-list .finance-line span:first-child,
+.orders-list .date-line span:first-child {
+    color: #8090a8;
+    white-space: nowrap;
+}
+
+.orders-list .finance-line strong,
+.orders-list .date-line strong {
+    color: #22324c;
+    font-weight: 700;
+    text-align: right;
+}
+
+.orders-list .status-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.orders-list .transfer-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.orders-list .transfer-item {
+    display: inline-flex;
+    align-items: center;
+    width: fit-content;
+    min-height: 32px;
+    padding: 0 12px;
+    border-radius: 999px;
+    background: #edf3ff;
+    color: #3159a6;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1;
+    border: 1px solid #d7e5ff;
+}
+
+.orders-list .transfer-item.active-source {
+    background: #cff3ff;
+    color: #006d8f;
+    border-color: #98e3f8;
+}
+
+.orders-list .transfer-item.warehouse {
+    background: #eef2ff;
+    color: #566eaa;
+    border-color: #dbe3ff;
+}
+
+.orders-list .single-value {
+    font-size: 15px;
+    color: #22324c;
+    line-height: 1.55;
+}
+
+.orders-list .single-value.muted {
+    color: #8090a8;
+}
+
+.orders-list .single-value.bold {
+    font-weight: 700;
+}
+
+.orders-list .single-value.money {
+    font-weight: 800;
+    font-size: 22px;
+}
+
+.orders-list .address-value {
+    min-width: 300px;
+    white-space: normal;
+    word-break: break-word;
+}
+
+.orders-list .single-value.nowrap {
+    white-space: nowrap;
+}
+
+@media (max-width: 1400px) {
+    .orders-list .filter-group .form-select,
+    .orders-list .filter-group .form-control {
+        min-width: 140px;
+    }
+
+    .orders-list .selection-toolbar {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+}
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="orders-list">
     <div class="page-header">
@@ -38,12 +365,21 @@
             </div>
             <button class="btn btn-secondary" type="button" onclick="filterOrders()">查询</button>
             <a class="btn btn-sm" href="{% url 'orders_list' %}">重置</a>
-            {% if request.user|has_module_perm:'orders:delete' %}
-            <button class="btn btn-sm btn-danger" type="button" onclick="bulkDeleteOrders()">批量删除</button>
-            {% endif %}
         </div>
         <div class="header-right">
             <a href="{% url 'order_create' %}" class="btn btn-primary">新建订单</a>
+        </div>
+    </div>
+
+    <div class="selection-toolbar">
+        <div class="selection-summary" id="selectionSummary">未选择订单</div>
+        <div class="selection-actions">
+            <button class="btn btn-sm" type="button" id="selectionViewBtn" onclick="openSelectedOrderDetail()" disabled>查看详情</button>
+            <button class="btn btn-sm btn-primary" type="button" id="selectionEditBtn" onclick="openSelectedOrderEdit()" disabled>编辑订单</button>
+            <button class="btn btn-sm btn-warning" type="button" id="selectionPrimaryActionBtn" onclick="runSelectedPrimaryAction()" disabled>主操作</button>
+            {% if request.user|has_module_perm:'orders:delete' %}
+            <button class="btn btn-sm btn-danger" type="button" id="selectionDeleteBtn" onclick="bulkDeleteOrders()" disabled>批量删除（仅待处理）</button>
+            {% endif %}
         </div>
     </div>
 
@@ -54,109 +390,108 @@
                 <tr>
                     <th><input type="checkbox" id="selectAllOrders" onchange="toggleAllOrders(this)"></th>
                     <th>订单号</th>
-                    <th>客户姓名</th>
-                    <th>联系电话</th>
-                    <th>微信号</th>
-                    <th>闲鱼订单号</th>
+                    <th>订单状态</th>
                     <th>预定日期</th>
                     <th>发货日期</th>
-                    <th>距离发货剩余天数</th>
+                    <th>剩余天数</th>
                     <th>时效状态</th>
+                    <th>客户</th>
+                    <th>电话</th>
                     <th>送货地址</th>
-                    <th>状态</th>
                     <th>转寄挂靠</th>
                     <th>订单金额</th>
-                    <th>已付押金</th>
-                    <th>待收尾款</th>
-                    <th>创建时间</th>
-                    <th>操作</th>
                 </tr>
             </thead>
             <tbody>
                 {% for order in orders %}
                 <tr>
-                    <td><input type="checkbox" class="order-select" value="{{ order.id }}"></td>
-                    <td>{{ order.order_no }}</td>
-                    <td>{{ order.customer_name }}</td>
-                    <td>{{ order.customer_phone }}</td>
-                    <td>{{ order.customer_wechat|default:'-' }}</td>
-                    <td>{{ order.xianyu_order_no|default:'-' }}</td>
-                    <td>{{ order.event_date }}</td>
-                    <td>{{ order.ship_date|default:'-' }}</td>
                     <td>
-                        {% if order.shipping_remaining_days is None %}
-                        -
-                        {% else %}
-                        {{ order.shipping_remaining_days }}
-                        {% endif %}
+                        <input type="checkbox"
+                               class="order-select"
+                               value="{{ order.id }}"
+                               data-order-id="{{ order.id }}"
+                               data-order-no="{{ order.order_no }}"
+                               data-detail-url="{% url 'order_detail' order.id %}"
+                               data-edit-url="{% if order.status == 'pending' or order.status == 'confirmed' %}{% url 'order_edit' order.id %}{% endif %}"
+                               data-delete-allowed="{% if order.status == 'pending' and request.user|has_module_perm:'orders:delete' %}1{% else %}0{% endif %}"
+                               data-primary-action="{% if order.status == 'pending' and request.user|has_action_perm:'order.confirm_delivery' %}confirm_deliver{% elif order.status == 'confirmed' and request.user|has_action_perm:'order.confirm_delivery' %}mark_delivered{% elif order.status == 'delivered' and request.user|has_action_perm:'order.mark_returned' and order.can_mark_returned_in_orders_center %}mark_returned{% elif order.status == 'delivered' and request.user|has_action_perm:'order.mark_returned' %}transfer_tip{% elif order.status == 'returned' and request.user|has_action_perm:'order.mark_returned' %}mark_completed{% else %}{% endif %}"
+                               data-expected-deposit="{{ order.expected_deposit|default:'0.00' }}"
+                               data-balance="{{ order.balance }}"
+                               onchange="updateSelectionToolbar()">
                     </td>
-                    <td><span class="badge {{ order.shipping_timeliness_badge_class }}">{{ order.shipping_timeliness_label }}</span></td>
-                    <td class="text-truncate" title="{{ order.delivery_address }}">{{ order.delivery_address }}</td>
+                    <td>
+                        <div class="single-value bold">{{ order.order_no }}</div>
+                    </td>
                     <td>
                         {% if order.status == 'pending' %}
-                        <span class="badge text-bg-warning">待处理</span>
+                        <span class="emphasis-badge warning-soft">待处理</span>
                         {% elif order.status == 'confirmed' %}
-                        <span class="badge text-bg-info">待发货</span>
+                        <span class="emphasis-badge info-soft">待发货</span>
                         {% elif order.status == 'delivered' %}
-                        <span class="badge text-bg-primary">已发货</span>
+                        <span class="emphasis-badge primary-soft">已发货</span>
                         {% elif order.status == 'returned' %}
-                        <span class="badge text-bg-info">已归还</span>
+                        <span class="emphasis-badge info-soft">已归还</span>
                         {% elif order.status == 'completed' %}
-                        <span class="badge text-bg-success">已完成</span>
+                        <span class="emphasis-badge success-soft">已完成</span>
                         {% elif order.status == 'cancelled' %}
-                        <span class="badge text-bg-secondary">已取消</span>
+                        <span class="emphasis-badge secondary-soft">已取消</span>
                         {% else %}
-                        <span class="badge text-bg-light">{{ order.get_status_display }}</span>
+                        <span class="emphasis-badge secondary-soft">{{ order.get_status_display }}</span>
                         {% endif %}
                     </td>
                     <td>
-                        {% with allocs=order.transfer_allocations_display %}
-                            {% if allocs %}
-                                {% for alloc in allocs %}
-                                <div>{{ alloc.order_no }}（{{ alloc.quantity }}套）</div>
-                                {% endfor %}
-                            {% else %}
-                                <span class="text-muted">仓库发货</span>
-                            {% endif %}
-                        {% endwith %}
-                        {% if order.active_as_source_count > 0 %}
-                        <div class="mt-1">
-                            <span class="badge text-bg-info">作为来源单占用中（{{ order.active_as_source_count }}）</span>
-                        </div>
-                        {% endif %}
+                        <div class="single-value nowrap">{{ order.event_date }}</div>
                     </td>
-                    <td>￥{{ order.total_amount }}</td>
-                    <td>￥{{ order.deposit_paid }}</td>
-                    <td>￥{{ order.balance }}</td>
-                    <td>{{ order.created_at|date:"Y-m-d H:i" }}</td>
                     <td>
-                        <div class="action-buttons">
-                            <a href="{% url 'order_detail' order.id %}" class="btn btn-sm">查看</a>
-                            {% if order.status == 'pending' or order.status == 'confirmed' %}
-                            <a href="{% url 'order_edit' order.id %}" class="btn btn-sm btn-primary">编辑</a>
-                            {% endif %}
-                            {% if order.status == 'pending' and request.user|has_action_perm:'order.confirm_delivery' %}
-                            <button class="btn btn-sm btn-warning" onclick="confirmOrDeliver({{ order.id }}, '{{ order.order_no|escapejs }}', '{{ order.expected_deposit|default:'0.00' }}')">确认/发货</button>
-                            {% elif order.status == 'confirmed' and request.user|has_action_perm:'order.confirm_delivery' %}
-                            <button class="btn btn-sm btn-success" onclick="markDelivered({{ order.id }}, '{{ order.order_no|escapejs }}')">录入运单发货</button>
-                            {% elif order.status == 'delivered' %}
-                            {% if request.user|has_action_perm:'order.mark_returned' and order.can_mark_returned_in_orders_center %}
-                            <button class="btn btn-sm btn-info" onclick="markReturned({{ order.id }}, '{{ order.order_no|escapejs }}', '{{ order.balance }}')">标记归还</button>
-                            {% elif request.user|has_action_perm:'order.mark_returned' %}
-                            <button class="btn btn-sm btn-secondary" type="button" onclick="showTransferCenterTip('{{ order.order_no|escapejs }}')">转寄中心操作</button>
-                            {% endif %}
-                            {% elif order.status == 'returned' and request.user|has_action_perm:'order.mark_returned' %}
-                            <button class="btn btn-sm btn-success" onclick="markCompleted({{ order.id }}, '{{ order.order_no|escapejs }}')">标记完成</button>
-                            {% endif %}
-                            {% if order.status == 'pending' and request.user|has_module_perm:'orders:delete' %}
-                            <button class="btn btn-sm btn-danger" onclick="deleteOrder({{ order.id }}, '{{ order.order_no }}')">删除</button>
+                        <div class="single-value nowrap">{{ order.ship_date|default:'-' }}</div>
+                    </td>
+                    <td>
+                        <div class="single-value nowrap">{% if order.shipping_remaining_days is None %}-{% else %}{{ order.shipping_remaining_days }}{% endif %}</div>
+                    </td>
+                    <td>
+                        <span class="emphasis-badge
+                            {% if order.shipping_timeliness_status == 'overdue' %}warning-soft
+                            {% elif order.shipping_timeliness_status == 'warning' %}warning-soft
+                            {% elif order.shipping_timeliness_status == 'shipped' %}primary-soft
+                            {% elif order.shipping_timeliness_status == 'normal' %}success-soft
+                            {% else %}secondary-soft{% endif %}">
+                            {{ order.shipping_timeliness_label }}
+                        </span>
+                    </td>
+                    <td>
+                        <div class="single-value bold">{{ order.customer_name }}</div>
+                    </td>
+                    <td>
+                        <div class="single-value muted nowrap">{{ order.customer_phone }}</div>
+                    </td>
+                    <td>
+                        <div class="single-value address-value">{{ order.delivery_address }}</div>
+                    </td>
+                    <td>
+                        <div class="transfer-list">
+                            {% with allocs=order.transfer_allocations_display %}
+                                {% if allocs %}
+                                    {% for alloc in allocs %}
+                                    <div class="transfer-item">{{ alloc.order_no }}（{{ alloc.quantity }}套）</div>
+                                    {% endfor %}
+                                {% else %}
+                                    <div class="transfer-item warehouse">仓库发货</div>
+                                {% endif %}
+                            {% endwith %}
+                            {% if order.active_as_source_count > 0 %}
+                                <div>
+                                    <span class="transfer-item active-source">作为来源单占用中（{{ order.active_as_source_count }}）</span>
+                                </div>
                             {% endif %}
                         </div>
+                    </td>
+                    <td>
+                        <div class="single-value money">￥{{ order.total_amount }}</div>
                     </td>
                 </tr>
                 {% empty %}
                 <tr>
-                    <td colspan="18" class="text-center">暂无订单数据</td>
+                    <td colspan="11" class="text-center">暂无订单数据</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -413,21 +748,133 @@ function toggleAllOrders(checkbox) {
     document.querySelectorAll('.order-select').forEach((item) => {
         item.checked = checkbox.checked;
     });
+    updateSelectionToolbar();
+}
+
+function getSelectedOrders() {
+    return Array.from(document.querySelectorAll('.order-select:checked'));
+}
+
+function updateSelectionToolbar() {
+    const selected = getSelectedOrders();
+    const count = selected.length;
+    const summaryEl = document.getElementById('selectionSummary');
+    const viewBtn = document.getElementById('selectionViewBtn');
+    const editBtn = document.getElementById('selectionEditBtn');
+    const primaryBtn = document.getElementById('selectionPrimaryActionBtn');
+    const deleteBtn = document.getElementById('selectionDeleteBtn');
+    const selectAll = document.getElementById('selectAllOrders');
+    const allCheckboxes = Array.from(document.querySelectorAll('.order-select'));
+
+    if (selectAll) {
+        selectAll.checked = !!allCheckboxes.length && allCheckboxes.every((item) => item.checked);
+        selectAll.indeterminate = count > 0 && !selectAll.checked;
+    }
+
+    if (!count) {
+        if (summaryEl) summaryEl.innerHTML = '未选择订单';
+        if (viewBtn) viewBtn.disabled = true;
+        if (editBtn) editBtn.disabled = true;
+        if (primaryBtn) {
+            primaryBtn.disabled = true;
+            primaryBtn.textContent = '主操作';
+        }
+        if (deleteBtn) deleteBtn.disabled = true;
+        return;
+    }
+
+    if (summaryEl) {
+        const pendingDeleteCount = selected.filter((item) => item.dataset.deleteAllowed === '1').length;
+        summaryEl.innerHTML = `已选择 <strong>${count}</strong> 条订单${count > 1 ? `，其中可删除 <strong>${pendingDeleteCount}</strong> 条待处理订单` : ''}`;
+    }
+
+    if (viewBtn) viewBtn.disabled = count !== 1;
+    if (editBtn) editBtn.disabled = count !== 1 || !selected[0].dataset.editUrl;
+
+    if (primaryBtn) {
+        const actionCode = count === 1 ? (selected[0].dataset.primaryAction || '') : '';
+        const actionLabels = {
+            confirm_deliver: '确认/发货',
+            mark_delivered: '录入运单发货',
+            mark_returned: '标记归还',
+            transfer_tip: '转寄中心操作',
+            mark_completed: '标记完成',
+        };
+        primaryBtn.disabled = !actionCode;
+        primaryBtn.textContent = actionLabels[actionCode] || '主操作';
+    }
+
+    if (deleteBtn) {
+        deleteBtn.disabled = !selected.some((item) => item.dataset.deleteAllowed === '1');
+    }
+}
+
+function openSelectedOrderDetail() {
+    const selected = getSelectedOrders();
+    if (selected.length !== 1) return;
+    const url = selected[0].dataset.detailUrl;
+    if (url) window.location.href = url;
+}
+
+function openSelectedOrderEdit() {
+    const selected = getSelectedOrders();
+    if (selected.length !== 1) return;
+    const url = selected[0].dataset.editUrl;
+    if (url) window.location.href = url;
+}
+
+async function runSelectedPrimaryAction() {
+    const selected = getSelectedOrders();
+    if (selected.length !== 1) return;
+    const item = selected[0];
+    const orderId = item.dataset.orderId;
+    const orderNo = item.dataset.orderNo || '';
+    const actionCode = item.dataset.primaryAction || '';
+    if (actionCode === 'confirm_deliver') {
+        await confirmOrDeliver(orderId, orderNo, item.dataset.expectedDeposit || '0.00');
+        return;
+    }
+    if (actionCode === 'mark_delivered') {
+        await markDelivered(orderId, orderNo);
+        return;
+    }
+    if (actionCode === 'mark_returned') {
+        await markReturned(orderId, orderNo, item.dataset.balance || '0');
+        return;
+    }
+    if (actionCode === 'transfer_tip') {
+        await showTransferCenterTip(orderNo);
+        return;
+    }
+    if (actionCode === 'mark_completed') {
+        await markCompleted(orderId, orderNo);
+    }
 }
 
 async function bulkDeleteOrders() {
-    const selected = Array.from(document.querySelectorAll('.order-select:checked')).map((el) => el.value);
+    const selectedRows = getSelectedOrders();
+    const selected = selectedRows.map((el) => el.value);
     if (!selected.length) {
         if (window.AppUI) await window.AppUI.alert('请先勾选要删除的订单');
         else alert('请先勾选要删除的订单');
         return;
     }
+    const deletableRows = selectedRows.filter((item) => item.dataset.deleteAllowed === '1');
+    if (!deletableRows.length) {
+        if (window.AppUI) await window.AppUI.alert('所选订单中没有可删除的待处理订单');
+        else alert('所选订单中没有可删除的待处理订单');
+        return;
+    }
     const ok = window.AppUI
-        ? await window.AppUI.confirm(`确认批量删除所选 ${selected.length} 条订单？`, '批量删除确认')
-        : confirm(`确认批量删除所选 ${selected.length} 条订单？`);
+        ? await window.AppUI.confirm(`确认删除所选订单中的 ${deletableRows.length} 条待处理订单？`, '批量删除确认')
+        : confirm(`确认删除所选订单中的 ${deletableRows.length} 条待处理订单？`);
     if (!ok) return;
-    submitPost('{% url "orders_bulk_delete" %}', { 'ids[]': selected });
+    submitPost('{% url "orders_bulk_delete" %}', { 'ids[]': deletableRows.map((item) => item.value) });
 }
+
+document.addEventListener('DOMContentLoaded', function () {
+    updateSelectionToolbar();
+});
 </script>
 {% endblock %}
 

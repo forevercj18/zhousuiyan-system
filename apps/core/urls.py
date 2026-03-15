@@ -108,6 +108,12 @@ urlpatterns = [
 
     # 用户管理
     path('users/', views.users_list, name='users_list'),
+    path('users/create/', views.user_create, name='user_create'),
+    path('users/<int:user_id>/edit/', views.user_edit, name='user_edit'),
+    path('users/<int:user_id>/toggle-status/', views.user_toggle_status, name='user_toggle_status'),
+    path('users/permission-templates/create/', views.permission_template_create, name='permission_template_create'),
+    path('users/permission-templates/<int:template_id>/edit/', views.permission_template_edit, name='permission_template_edit'),
+    path('users/permission-templates/<int:template_id>/delete/', views.permission_template_delete, name='permission_template_delete'),
 
     # API接口
     path('api/sku/<int:sku_id>/', views.api_get_sku_details, name='api_get_sku_details'),

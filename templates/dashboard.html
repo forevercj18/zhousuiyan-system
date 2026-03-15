@@ -15,6 +15,8 @@
         {% endif %}
             {% if card.key == 'pending_orders' %}
             <div class="stat-icon" style="background: #ff9800;">&#128203;</div>
+            {% elif card.key == 'overdue_orders_count' %}
+            <div class="stat-icon" style="background: #ef4444;">&#9888;</div>
             {% elif card.key == 'delivered_orders' %}
             <div class="stat-icon" style="background: #2196f3;">&#128666;</div>
             {% elif card.key == 'completed_orders' %}
@@ -64,7 +66,7 @@
     </div>
 
     <div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
-        <span class="badge text-bg-light border">当前角色：{{ request.user.get_role_display }}</span>
+        <span class="badge text-bg-light border">当前角色：{{ request.user.permission_profile_display }}</span>
         <span class="badge text-bg-info">看板类型：{{ role_dashboard.view_type }}</span>
         {% if role_view_options %}
         <form method="get" class="d-flex align-items-center gap-2">

@@ -15,10 +15,10 @@ if (-not $env:DEBUG) {
     $env:DEBUG = "True"
 }
 if (-not $env:ALLOWED_HOSTS) {
-    $env:ALLOWED_HOSTS = "127.0.0.1,localhost,.trycloudflare.com"
+    $env:ALLOWED_HOSTS = "127.0.0.1,localhost,.trycloudflare.com,.yanli.net.cn,erp.yanli.net.cn"
 }
 if (-not $env:CSRF_TRUSTED_ORIGINS) {
-    $env:CSRF_TRUSTED_ORIGINS = "https://*.trycloudflare.com,http://*.trycloudflare.com"
+    $env:CSRF_TRUSTED_ORIGINS = "https://*.trycloudflare.com,http://*.trycloudflare.com,https://erp.yanli.net.cn,http://erp.yanli.net.cn"
 }
 
 function Write-Step($msg) {

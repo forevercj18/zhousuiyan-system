@@ -79,8 +79,19 @@
                     </td>
                     <td>
                         <div class="action-buttons">
-                            <button class="btn btn-sm btn-primary" onclick="showEditModal({{ part.id }}, '{{ part.name }}', '{{ part.spec }}', '{{ part.category }}', '{{ part.unit }}', {{ part.safety_stock }}, '{{ part.location }}')">编辑</button>
-                            <button class="btn btn-sm btn-danger" onclick="deletePart({{ part.id }}, '{{ part.name }}')">删除</button>
+                            <button class="btn btn-sm btn-primary"
+                                    data-id="{{ part.id }}"
+                                    data-name="{{ part.name }}"
+                                    data-spec="{{ part.spec|default:'' }}"
+                                    data-category="{{ part.category }}"
+                                    data-unit="{{ part.unit }}"
+                                    data-safety-stock="{{ part.safety_stock }}"
+                                    data-location="{{ part.location|default:'' }}"
+                                    onclick="showEditModal(this)">编辑</button>
+                            <button class="btn btn-sm btn-danger"
+                                    data-id="{{ part.id }}"
+                                    data-name="{{ part.name }}"
+                                    onclick="deletePart(this)">删除</button>
                         </div>
                     </td>
                 </tr>
@@ -118,10 +129,14 @@
 </div>
 
 <!-- 新建部件模态框 -->
-<div id="createModal" class="modal">
-    <div class="modal-content">
-        <span class="close" onclick="closeModal('createModal')">&times;</span>
-        <h3>新建部件</h3>
+<div id="createModal" class="modal fade" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title fs-5 mb-0">新建部件</h3>
+            <button type="button" class="btn-close" aria-label="Close" onclick="closeModal('createModal')"></button>
+        </div>
+        <div class="modal-body">
         <form method="POST" action="{% url 'part_create' %}">
             {% csrf_token %}
             <div class="form-group">
@@ -167,14 +182,20 @@
                 <button type="submit" class="btn btn-primary">创建</button>
             </div>
         </form>
+        </div>
+        </div>
     </div>
 </div>
 
 <!-- 编辑部件模态框 -->
-<div id="editModal" class="modal">
-    <div class="modal-content">
-        <span class="close" onclick="closeModal('editModal')">&times;</span>
-        <h3>编辑部件</h3>
+<div id="editModal" class="modal fade" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title fs-5 mb-0">编辑部件</h3>
+            <button type="button" class="btn-close" aria-label="Close" onclick="closeModal('editModal')"></button>
+        </div>
+        <div class="modal-body">
         <form method="POST" id="editForm">
             {% csrf_token %}
             <div class="form-group">
@@ -216,14 +237,20 @@
                 <button type="submit" class="btn btn-primary">保存</button>
             </div>
         </form>
+        </div>
+        </div>
     </div>
 </div>
 
 <!-- 入库模态框 -->
-<div id="inboundModal" class="modal">
-    <div class="modal-content">
-        <span class="close" onclick="closeModal('inboundModal')">&times;</span>
-        <h3>部件入库</h3>
+<div id="inboundModal" class="modal fade" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title fs-5 mb-0">部件入库</h3>
+            <button type="button" class="btn-close" aria-label="Close" onclick="closeModal('inboundModal')"></button>
+        </div>
+        <div class="modal-body">
         <form method="POST" action="{% url 'part_inbound' %}">
             {% csrf_token %}
             <div class="form-group">
@@ -252,14 +279,20 @@
                 <button type="submit" class="btn btn-success">确认入库</button>
             </div>
         </form>
+        </div>
+        </div>
     </div>
 </div>
 
 <!-- 出库模态框 -->
-<div id="outboundModal" class="modal">
-    <div class="modal-content">
-        <span class="close" onclick="closeModal('outboundModal')">&times;</span>
-        <h3>部件出库</h3>
+<div id="outboundModal" class="modal fade" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title fs-5 mb-0">部件出库</h3>
+            <button type="button" class="btn-close" aria-label="Close" onclick="closeModal('outboundModal')"></button>
+        </div>
+        <div class="modal-body">
         <form method="POST" action="{% url 'part_outbound' %}">
             {% csrf_token %}
             <div class="form-group">
@@ -288,6 +321,8 @@
                 <button type="submit" class="btn btn-warning">确认出库</button>
             </div>
         </form>
+        </div>
+        </div>
     </div>
 </div>
 
@@ -305,33 +340,53 @@ function filterParts() {
 }
 
 function showCreateModal() {
-    document.getElementById('createModal').style.display = 'block';
+    const modalEl = document.getElementById('createModal');
+    const instance = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+    instance.show();
 }
 
-function showEditModal(id, name, spec, category, unit, safetyStock, location) {
+function showEditModal(button) {
+    const id = button.getAttribute('data-id');
+    const name = button.getAttribute('data-name') || '';
+    const spec = button.getAttribute('data-spec') || '';
+    const category = button.getAttribute('data-category') || '';
+    const unit = button.getAttribute('data-unit') || '';
+    const safetyStock = button.getAttribute('data-safety-stock') || '0';
+    const location = button.getAttribute('data-location') || '';
     document.getElementById('editForm').action = `/procurement/parts/${id}/edit/`;
     document.getElementById('edit_name').value = name;
-    document.getElementById('edit_spec').value = spec || '';
+    document.getElementById('edit_spec').value = spec;
     document.getElementById('edit_category').value = category;
     document.getElementById('edit_unit').value = unit;
     document.getElementById('edit_safety_stock').value = safetyStock;
-    document.getElementById('edit_location').value = location || '';
-    document.getElementById('editModal').style.display = 'block';
+    document.getElementById('edit_location').value = location;
+    const modalEl = document.getElementById('editModal');
+    const instance = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+    instance.show();
 }
 
 function showInboundModal() {
-    document.getElementById('inboundModal').style.display = 'block';
+    const modalEl = document.getElementById('inboundModal');
+    const instance = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+    instance.show();
 }
 
 function showOutboundModal() {
-    document.getElementById('outboundModal').style.display = 'block';
+    const modalEl = document.getElementById('outboundModal');
+    const instance = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+    instance.show();
 }
 
 function closeModal(modalId) {
-    document.getElementById(modalId).style.display = 'none';
+    const modalEl = document.getElementById(modalId);
+    if (!modalEl) return;
+    const instance = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+    instance.hide();
 }
 
-async function deletePart(partId, partName) {
+async function deletePart(button) {
+    const partId = button.getAttribute('data-id');
+    const partName = button.getAttribute('data-name') || '';
     const ok = window.AppUI
         ? await window.AppUI.confirm(`确定要删除部件 ${partName} 吗？`, '删除部件确认')
         : confirm(`确定要删除部件 ${partName} 吗？`);
@@ -405,11 +460,5 @@ function bulkDeleteParts() {
     run();
 }
 
-// 点击模态框外部关闭
-window.onclick = function(event) {
-    if (event.target.classList.contains('modal')) {
-        event.target.style.display = 'none';
-    }
-}
 </script>
 {% endblock %}

@@ -8,13 +8,14 @@ from django.contrib import messages
 from django.http import JsonResponse, HttpResponse
 from django.urls import reverse
 from django.core.paginator import Paginator
-from django.db.models import Q, Count, Sum, F
+from django.db.models import Q, Count, Sum, F, ExpressionWrapper, DecimalField, Case, When, Value, IntegerField
 from django.db import models, transaction
 from django.utils import timezone
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
 from urllib.parse import urlencode
+import base64
 import csv
 import json
 
@@ -22,14 +23,23 @@ from .models import (
     Order, OrderItem, SKU, Part, PurchaseOrder, PurchaseOrderItem, PartsMovement,
     AuditLog, User, SystemSettings, Transfer, TransferAllocation, InventoryUnit, UnitMovement,
     SKUComponent, InventoryUnitPart, RiskEvent, ApprovalTask, FinanceTransaction, DataConsistencyCheckRun,
-    AssemblyOrder, MaintenanceWorkOrder, UnitDisposalOrder, PartRecoveryInspection,
+    AssemblyOrder, MaintenanceWorkOrder, UnitDisposalOrder, PartRecoveryInspection, PermissionTemplate,
     TransferRecommendationLog,
 )
 from .services import (
     OrderService, ProcurementService, PartsService, InventoryUnitService, AuditService,
     RiskEventService, ApprovalService, NotificationService, AssemblyService, MaintenanceService, UnitDisposalService
 )
-from .permissions import require_permission, filter_queryset_by_permission, has_action_permission, can_request_approval
+from .permissions import (
+    require_permission,
+    filter_queryset_by_permission,
+    has_action_permission,
+    can_request_approval,
+    PERMISSION_MODULE_LABELS,
+    PERMISSION_ACTION_LABELS,
+    ACTION_PERMISSION_LABELS,
+    get_user_permission_preview,
+)
 from .utils import (
     get_calendar_data,
     find_transfer_candidates,
@@ -49,6 +59,109 @@ from .utils import (
 
 def _normalize_text(value):
     return ''.join((value or '').strip().split()).lower()
+
+
+def _snapshot_user_audit(user_obj):
+    return {
+        'id': user_obj.id,
+        'username': user_obj.username,
+        'full_name': user_obj.full_name,
+        'role': user_obj.role,
+        'role_display': user_obj.get_role_display(),
+        'permission_mode': getattr(user_obj, 'permission_mode', 'role'),
+        'custom_modules': list(getattr(user_obj, 'custom_modules', []) or []),
+        'custom_actions': list(getattr(user_obj, 'custom_actions', []) or []),
+        'custom_action_permissions': list(getattr(user_obj, 'custom_action_permissions', []) or []),
+        'email': user_obj.email,
+        'phone': user_obj.phone,
+        'is_active': user_obj.is_active,
+    }
+
+
+def _snapshot_permission_template_audit(template):
+    return {
+        'id': template.id,
+        'name': template.name,
+        'base_role': template.base_role,
+        'base_role_display': template.get_base_role_display(),
+        'description': template.description,
+        'modules': list(template.modules or []),
+        'actions': list(template.actions or []),
+        'action_permissions': list(template.action_permissions or []),
+        'is_active': template.is_active,
+    }
+
+
+def _validate_permission_lists(custom_modules, custom_actions, custom_action_permissions):
+    allowed_modules = set(PERMISSION_MODULE_LABELS.keys())
+    allowed_actions = set(PERMISSION_ACTION_LABELS.keys())
+    allowed_action_permissions = set(ACTION_PERMISSION_LABELS.keys())
+
+    if any(item not in allowed_modules for item in custom_modules):
+        raise ValueError('包含无效的模块权限')
+    if any(item not in allowed_actions for item in custom_actions):
+        raise ValueError('包含无效的操作权限')
+    if any(item not in allowed_action_permissions for item in custom_action_permissions):
+        raise ValueError('包含无效的业务动作权限')
+
+
+def _get_user_permission_form_payload(request):
+    permission_mode = (request.POST.get('permission_mode') or 'role').strip()
+    custom_modules = request.POST.getlist('custom_modules')
+    custom_actions = request.POST.getlist('custom_actions')
+    custom_action_permissions = request.POST.getlist('custom_action_permissions')
+
+    if permission_mode not in {'role', 'custom'}:
+        raise ValueError('权限模式无效')
+
+    _validate_permission_lists(custom_modules, custom_actions, custom_action_permissions)
+
+    if permission_mode == 'custom':
+        if not custom_modules:
+            raise ValueError('自定义搭配至少要勾选一个模块')
+        if not custom_actions:
+            raise ValueError('自定义搭配至少要勾选一个操作权限')
+    else:
+        custom_modules = []
+        custom_actions = []
+        custom_action_permissions = []
+
+    return {
+        'permission_mode': permission_mode,
+        'custom_modules': custom_modules,
+        'custom_actions': custom_actions,
+        'custom_action_permissions': custom_action_permissions,
+    }
+
+
+def _get_permission_template_payload(request):
+    name = (request.POST.get('name') or '').strip()
+    base_role = (request.POST.get('base_role') or '').strip()
+    description = (request.POST.get('description') or '').strip()
+    modules = request.POST.getlist('modules')
+    actions = request.POST.getlist('actions')
+    action_permissions = request.POST.getlist('action_permissions')
+
+    if not name:
+        raise ValueError('模板名称不能为空')
+    if base_role not in dict(User.ROLE_CHOICES):
+        raise ValueError('基础角色无效')
+
+    _validate_permission_lists(modules, actions, action_permissions)
+
+    if not modules:
+        raise ValueError('权限模板至少要勾选一个模块')
+    if not actions:
+        raise ValueError('权限模板至少要勾选一个操作权限')
+
+    return {
+        'name': name,
+        'base_role': base_role,
+        'description': description,
+        'modules': modules,
+        'actions': actions,
+        'action_permissions': action_permissions,
+    }
 
 
 def _find_duplicate_orders(customer_phone, delivery_address, event_date, sku_ids=None, exclude_order_id=None, limit=10):
@@ -740,11 +853,14 @@ def dashboard(request):
     view_role = ''
     if request.user.role in ['admin', 'manager']:
         view_role = (request.GET.get('view_role') or '').strip()
-    role_dashboard = get_role_dashboard_payload(request.user, view_role=view_role or None)
+    role_dashboard = get_role_dashboard_payload(
+        request.user,
+        view_role=view_role or None,
+        base_stats=stats,
+    )
 
     # 最近订单
     recent_orders = Order.objects.select_related('created_by').prefetch_related(
-        'items__sku',
         'transfer_allocations_target__source_order',
     ).order_by('-created_at')[:5]
     _attach_transfer_allocations_display(recent_orders)
@@ -783,11 +899,32 @@ def workbench(request):
 @require_permission('orders', 'view')
 def orders_list(request):
     """订单列表"""
+    today = timezone.localdate()
+    warning_end = today + timedelta(days=7)
+    shipped_condition = (
+        Q(status__in=['delivered', 'in_use', 'returned', 'completed']) |
+        Q(ship_tracking__isnull=False, ship_tracking__gt='')
+    )
+
     # 根据权限过滤订单
     orders = filter_queryset_by_permission(
         Order.objects.select_related('created_by').prefetch_related(
-            'items__sku',
             'transfer_allocations_target__source_order',
+        ).annotate(
+            expected_deposit=Sum(
+                ExpressionWrapper(
+                    F('items__deposit') * F('items__quantity'),
+                    output_field=DecimalField(max_digits=12, decimal_places=2),
+                )
+            ),
+            shipping_timeliness_priority=Case(
+                When(shipped_condition, then=Value(3)),
+                When(ship_date__isnull=True, then=Value(4)),
+                When(ship_date__lte=today, then=Value(0)),
+                When(ship_date__lte=warning_end, then=Value(1)),
+                default=Value(2),
+                output_field=IntegerField(),
+            ),
         ),
         request.user,
         'Order'
@@ -810,9 +947,6 @@ def orders_list(request):
             Q(xianyu_order_no__icontains=keyword)
         )
 
-    today = timezone.localdate()
-    orders_list = list(orders)
-
     def _timeliness_for_order(order):
         shipped = bool(order.ship_tracking) or order.status in ['delivered', 'in_use', 'returned', 'completed']
         if order.ship_date:
@@ -823,7 +957,7 @@ def orders_list(request):
             return {
                 'remaining_days': remaining_days if remaining_days is not None else 0,
                 'code': 'shipped',
-                'label': '🟢 已发货',
+                'label': '🔵 已发货',
                 'badge_class': 'text-bg-primary',
                 'priority': 3,
             }
@@ -859,8 +993,22 @@ def orders_list(request):
             'priority': 2,
         }
 
+    if sla_filter == 'overdue':
+        orders = orders.filter(ship_date__isnull=False, ship_date__lte=today).exclude(shipped_condition)
+    elif sla_filter == 'warning':
+        orders = orders.filter(ship_date__gt=today, ship_date__lte=warning_end).exclude(shipped_condition)
+    elif sla_filter == 'normal':
+        orders = orders.filter(ship_date__gt=warning_end).exclude(shipped_condition)
+    elif sla_filter == 'shipped':
+        orders = orders.filter(shipped_condition)
+    elif sla_filter == 'unknown':
+        orders = orders.filter(ship_date__isnull=True).exclude(shipped_condition)
+
+    orders = orders.order_by('shipping_timeliness_priority', 'ship_date', '-created_at')
+    orders_page = Paginator(orders, _get_page_size('page_size_orders')).get_page(request.GET.get('page'))
+
     enriched_orders = []
-    for order in orders_list:
+    for order in orders_page.object_list:
         t = _timeliness_for_order(order)
         order.shipping_remaining_days = t['remaining_days']
         order.shipping_timeliness_code = t['code']
@@ -868,19 +1016,6 @@ def orders_list(request):
         order.shipping_timeliness_badge_class = t['badge_class']
         order.shipping_timeliness_priority = t['priority']
         enriched_orders.append(order)
-
-    if sla_filter in ['overdue', 'warning', 'normal', 'shipped', 'unknown']:
-        enriched_orders = [o for o in enriched_orders if o.shipping_timeliness_code == sla_filter]
-
-    enriched_orders.sort(
-        key=lambda o: (
-            int(getattr(o, 'shipping_timeliness_priority', 9)),
-            int(getattr(o, 'shipping_remaining_days', 99999) if getattr(o, 'shipping_remaining_days', None) is not None else 99999),
-            -(o.created_at.timestamp() if o.created_at else 0),
-        )
-    )
-
-    orders_page = Paginator(enriched_orders, _get_page_size('page_size_orders')).get_page(request.GET.get('page'))
     _attach_transfer_allocations_display(orders_page.object_list)
     current_ids = [o.id for o in orders_page.object_list]
     source_blocked_ids = set(
@@ -901,10 +1036,7 @@ def orders_list(request):
     for order in orders_page.object_list:
         order.can_mark_returned_in_orders_center = order.id not in source_blocked_ids
         order.active_as_source_count = source_usage_count_map.get(order.id, 0)
-        order.expected_deposit = sum(
-            (item.deposit or Decimal('0.00')) * (item.quantity or 0)
-            for item in order.items.all()
-        )
+        order.expected_deposit = order.expected_deposit or Decimal('0.00')
 
     context = {
         'orders': orders_page,
@@ -1247,6 +1379,7 @@ def calendar_view(request):
 @require_permission('transfers', 'view')
 def transfers_list(request):
     """转寄中心"""
+    transfer_complete_feedback = request.session.pop('transfer_complete_feedback', None)
     candidates = build_transfer_pool_rows()
     keyword = (request.GET.get('keyword', '') or '').strip()
     status_filter = (request.GET.get('status', 'pending') or 'pending').strip()
@@ -1388,6 +1521,7 @@ def transfers_list(request):
         'candidate_pagination_query': _build_querystring(request, ['candidate_page']),
         'task_pagination_query': _build_querystring(request, ['task_page']),
         'task_tab_query': _build_querystring(request, ['status', 'task_page']),
+        'transfer_complete_feedback_json': json.dumps(transfer_complete_feedback, ensure_ascii=False) if transfer_complete_feedback else '',
     }
     return render(request, 'transfers.html', context)
 
@@ -1742,7 +1876,11 @@ def transfer_complete(request, transfer_id):
     """完成转寄任务"""
     if request.method == 'POST':
         if not has_action_permission(request.user, 'transfer.complete_task'):
-            messages.error(request, '您没有执行此操作的权限（transfer.complete_task）')
+            request.session['transfer_complete_feedback'] = {
+                'status': 'error',
+                'title': '操作失败',
+                'message': '您没有执行此操作的权限（transfer.complete_task）',
+            }
             return redirect('transfers_list')
         try:
             with transaction.atomic():
@@ -1837,11 +1975,20 @@ def transfer_complete(request, transfer_id):
                         'allocation_shortfall_qty': shortfall_qty,
                     },
                 )
-            messages.success(request, '转寄任务已完成')
+            message = '转寄任务已完成'
             if shortfall_qty > 0:
-                messages.warning(request, f'已完成任务，但挂靠锁不足 {shortfall_qty} 套（请检查历史数据）')
+                message += f'\n挂靠锁不足 {shortfall_qty} 套，请检查历史数据。'
+            request.session['transfer_complete_feedback'] = {
+                'status': 'success',
+                'title': '完成成功',
+                'message': message,
+            }
         except Exception as e:
-            messages.error(request, f'操作失败：{str(e)}')
+            request.session['transfer_complete_feedback'] = {
+                'status': 'error',
+                'title': '操作失败',
+                'message': str(e),
+            }
     return redirect('transfers_list')
 
 
@@ -3479,9 +3626,14 @@ def skus_list(request):
         sku.component_preview = '，'.join([
             f"{item['part_name']}x{item['quantity_per_set']}" for item in components[:3]
         ]) if components else '-'
+        sku.components_json = json.dumps(components, ensure_ascii=False)
+        sku.components_b64 = base64.b64encode(
+            sku.components_json.encode('utf-8')
+        ).decode('ascii')
         sku_components_map[str(sku.id)] = components
 
     parts = Part.objects.filter(is_active=True).order_by('name')
+    assembly_feedback = request.session.pop('sku_assembly_feedback', None)
     context = {
         'skus': skus_page,
         'skus_page': skus_page,
@@ -3489,6 +3641,7 @@ def skus_list(request):
         'category': category,
         'parts': parts,
         'sku_components_map_json': json.dumps(sku_components_map, ensure_ascii=False),
+        'assembly_feedback_json': json.dumps(assembly_feedback, ensure_ascii=False) if assembly_feedback else '',
         'pagination_query': _build_querystring(request, ['page']),
     }
     return render(request, 'skus.html', context)
@@ -3701,8 +3854,23 @@ def sku_assemble(request, sku_id):
         )
         messages.success(request, f'装配完成：{sku.code} 新增 {assembly.quantity} 套库存')
         messages.info(request, f'装配单号：{assembly.assembly_no}')
+        request.session['sku_assembly_feedback'] = {
+            'status': 'success',
+            'sku_code': sku.code,
+            'sku_name': sku.name,
+            'quantity': int(assembly.quantity or 0),
+            'assembly_no': assembly.assembly_no,
+        }
     except Exception as e:
         messages.error(request, f'装配失败：{str(e)}')
+        request.session['sku_assembly_feedback'] = {
+            'status': 'error',
+            'sku_code': sku.code,
+            'sku_name': sku.name,
+            'quantity': quantity if 'quantity' in locals() else 0,
+            'assembly_no': '',
+            'error': str(e),
+        }
     return redirect('skus_list')
 
 
@@ -5168,6 +5336,7 @@ def audit_logs(request):
 def users_list(request):
     """用户管理"""
     users = User.objects.all().order_by('-created_at')
+    permission_templates = PermissionTemplate.objects.filter(is_active=True).order_by('name')
     role = (request.GET.get('role', '') or '').strip()
     status = (request.GET.get('status', '') or '').strip()
     keyword = (request.GET.get('keyword', '') or '').strip()
@@ -5186,6 +5355,15 @@ def users_list(request):
         )
 
     users_page = Paginator(users, _get_page_size('page_size_users')).get_page(request.GET.get('page'))
+    user_permission_previews = {
+        str(user.id): get_user_permission_preview(user)
+        for user in users_page.object_list
+    }
+    recent_permission_audits = AuditLog.objects.filter(
+        module__in=['用户管理', '权限模板']
+    ).select_related('user').order_by('-created_at')[:20]
+    for log in recent_permission_audits:
+        log.details_parsed = _parse_audit_details(log)
     context = {
         'users': users_page,
         'users_page': users_page,
@@ -5193,8 +5371,258 @@ def users_list(request):
         'status_filter': status,
         'keyword': keyword,
         'pagination_query': _build_querystring(request, ['page']),
+        'permission_mode_choices': User.PERMISSION_MODE_CHOICES,
+        'permission_modules': list(PERMISSION_MODULE_LABELS.items()),
+        'permission_actions': list(PERMISSION_ACTION_LABELS.items()),
+        'action_permission_choices': list(ACTION_PERMISSION_LABELS.items()),
+        'role_choices': User.ROLE_CHOICES,
+        'permission_templates': permission_templates,
+        'user_permission_previews': user_permission_previews,
+        'recent_permission_audits': recent_permission_audits,
     }
     return render(request, 'users.html', context)
+
+
+@login_required
+@require_permission('users', 'create')
+def user_create(request):
+    """创建用户"""
+    if request.method != 'POST':
+        return redirect('users_list')
+    try:
+        username = (request.POST.get('username') or '').strip()
+        full_name = (request.POST.get('full_name') or '').strip()
+        role = (request.POST.get('role') or '').strip()
+        email = (request.POST.get('email') or '').strip()
+        phone = (request.POST.get('phone') or '').strip()
+        password = request.POST.get('password') or ''
+        permission_payload = _get_user_permission_form_payload(request)
+
+        if not username:
+            raise ValueError('用户名不能为空')
+        if not full_name:
+            raise ValueError('姓名不能为空')
+        if role not in dict(User.ROLE_CHOICES):
+            raise ValueError('角色无效')
+        if len(password) < 6:
+            raise ValueError('密码至少 6 位')
+        if User.objects.filter(username=username).exists():
+            raise ValueError('用户名已存在')
+
+        user = User.objects.create_user(
+            username=username,
+            password=password,
+            full_name=full_name,
+            role=role,
+            permission_mode=permission_payload['permission_mode'],
+            custom_modules=permission_payload['custom_modules'],
+            custom_actions=permission_payload['custom_actions'],
+            custom_action_permissions=permission_payload['custom_action_permissions'],
+            email=email,
+            phone=phone,
+            is_active=True,
+        )
+        AuditService.log_with_diff(
+            user=request.user,
+            action='create',
+            module='用户管理',
+            target=f'用户:{user.username}',
+            summary='创建用户',
+            before={},
+            after=_snapshot_user_audit(user),
+            extra={'source': 'app', 'entity': 'user', 'target_user_id': user.id},
+        )
+        messages.success(request, f'用户 {user.username} 创建成功')
+    except Exception as e:
+        messages.error(request, f'用户创建失败：{str(e)}')
+    return redirect('users_list')
+
+
+@login_required
+@require_permission('users', 'update')
+def user_edit(request, user_id):
+    """编辑用户"""
+    if request.method != 'POST':
+        return redirect('users_list')
+    user_obj = get_object_or_404(User, id=user_id)
+    before_snapshot = _snapshot_user_audit(user_obj)
+    try:
+        username = (request.POST.get('username') or '').strip()
+        full_name = (request.POST.get('full_name') or '').strip()
+        role = (request.POST.get('role') or '').strip()
+        email = (request.POST.get('email') or '').strip()
+        phone = (request.POST.get('phone') or '').strip()
+        password = request.POST.get('password') or ''
+        permission_payload = _get_user_permission_form_payload(request)
+
+        if not username:
+            raise ValueError('用户名不能为空')
+        if not full_name:
+            raise ValueError('姓名不能为空')
+        if role not in dict(User.ROLE_CHOICES):
+            raise ValueError('角色无效')
+        if User.objects.exclude(id=user_obj.id).filter(username=username).exists():
+            raise ValueError('用户名已存在')
+        if password and len(password) < 6:
+            raise ValueError('密码至少 6 位')
+
+        user_obj.username = username
+        user_obj.full_name = full_name
+        user_obj.role = role
+        user_obj.permission_mode = permission_payload['permission_mode']
+        user_obj.custom_modules = permission_payload['custom_modules']
+        user_obj.custom_actions = permission_payload['custom_actions']
+        user_obj.custom_action_permissions = permission_payload['custom_action_permissions']
+        user_obj.email = email
+        user_obj.phone = phone
+        user_obj.save(update_fields=[
+            'username',
+            'full_name',
+            'role',
+            'permission_mode',
+            'custom_modules',
+            'custom_actions',
+            'custom_action_permissions',
+            'email',
+            'phone',
+            'updated_at',
+        ])
+        if password:
+            user_obj.set_password(password)
+            user_obj.save(update_fields=['password'])
+        AuditService.log_with_diff(
+            user=request.user,
+            action='update',
+            module='用户管理',
+            target=f'用户:{user_obj.username}',
+            summary='编辑用户',
+            before=before_snapshot,
+            after=_snapshot_user_audit(user_obj),
+            extra={'source': 'app', 'entity': 'user', 'target_user_id': user_obj.id},
+        )
+        messages.success(request, f'用户 {user_obj.username} 更新成功')
+    except Exception as e:
+        messages.error(request, f'用户更新失败：{str(e)}')
+    return redirect('users_list')
+
+
+@login_required
+@require_permission('users', 'update')
+def user_toggle_status(request, user_id):
+    """启用/禁用用户"""
+    if request.method != 'POST':
+        return redirect('users_list')
+    user_obj = get_object_or_404(User, id=user_id)
+    before_snapshot = _snapshot_user_audit(user_obj)
+    try:
+        enable = (request.POST.get('enable') or '').strip() in {'1', 'true', 'True'}
+        if user_obj.id == request.user.id and not enable:
+            raise ValueError('不能禁用当前登录用户')
+        user_obj.is_active = enable
+        user_obj.save(update_fields=['is_active'])
+        AuditService.log_with_diff(
+            user=request.user,
+            action='status_change',
+            module='用户管理',
+            target=f'用户:{user_obj.username}',
+            summary=f'用户状态变更为{"启用" if enable else "禁用"}',
+            before=before_snapshot,
+            after=_snapshot_user_audit(user_obj),
+            extra={'source': 'app', 'entity': 'user', 'target_user_id': user_obj.id},
+        )
+        messages.success(request, f'用户 {user_obj.username} 已{"启用" if enable else "禁用"}')
+    except Exception as e:
+        messages.error(request, f'用户状态更新失败：{str(e)}')
+    return redirect('users_list')
+
+
+@login_required
+@require_permission('users', 'create')
+def permission_template_create(request):
+    """创建权限模板"""
+    if request.method != 'POST':
+        return redirect('users_list')
+    try:
+        payload = _get_permission_template_payload(request)
+        if PermissionTemplate.objects.filter(name=payload['name']).exists():
+            raise ValueError('模板名称已存在')
+        template = PermissionTemplate.objects.create(**payload)
+        AuditService.log_with_diff(
+            user=request.user,
+            action='create',
+            module='权限模板',
+            target=f'模板:{template.name}',
+            summary='创建权限模板',
+            before={},
+            after=_snapshot_permission_template_audit(template),
+            extra={'source': 'app', 'entity': 'permission_template', 'template_id': template.id},
+        )
+        messages.success(request, f'权限模板 {payload["name"]} 创建成功')
+    except Exception as e:
+        messages.error(request, f'权限模板创建失败：{str(e)}')
+    return redirect('users_list')
+
+
+@login_required
+@require_permission('users', 'update')
+def permission_template_edit(request, template_id):
+    """编辑权限模板"""
+    if request.method != 'POST':
+        return redirect('users_list')
+    template = get_object_or_404(PermissionTemplate, id=template_id)
+    before_snapshot = _snapshot_permission_template_audit(template)
+    try:
+        payload = _get_permission_template_payload(request)
+        if PermissionTemplate.objects.exclude(id=template.id).filter(name=payload['name']).exists():
+            raise ValueError('模板名称已存在')
+        template.name = payload['name']
+        template.base_role = payload['base_role']
+        template.description = payload['description']
+        template.modules = payload['modules']
+        template.actions = payload['actions']
+        template.action_permissions = payload['action_permissions']
+        template.save(update_fields=['name', 'base_role', 'description', 'modules', 'actions', 'action_permissions', 'updated_at'])
+        AuditService.log_with_diff(
+            user=request.user,
+            action='update',
+            module='权限模板',
+            target=f'模板:{template.name}',
+            summary='编辑权限模板',
+            before=before_snapshot,
+            after=_snapshot_permission_template_audit(template),
+            extra={'source': 'app', 'entity': 'permission_template', 'template_id': template.id},
+        )
+        messages.success(request, f'权限模板 {template.name} 更新成功')
+    except Exception as e:
+        messages.error(request, f'权限模板更新失败：{str(e)}')
+    return redirect('users_list')
+
+
+@login_required
+@require_permission('users', 'delete')
+def permission_template_delete(request, template_id):
+    """删除权限模板"""
+    if request.method != 'POST':
+        return redirect('users_list')
+    template = get_object_or_404(PermissionTemplate, id=template_id)
+    name = template.name
+    before_snapshot = _snapshot_permission_template_audit(template)
+    try:
+        template.delete()
+        AuditService.log_with_diff(
+            user=request.user,
+            action='delete',
+            module='权限模板',
+            target=f'模板:{name}',
+            summary='删除权限模板',
+            before=before_snapshot,
+            after={},
+            extra={'source': 'app', 'entity': 'permission_template'},
+        )
+        messages.success(request, f'权限模板 {name} 已删除')
+    except Exception as e:
+        messages.error(request, f'权限模板删除失败：{str(e)}')
+    return redirect('users_list')
 
 
 @login_required

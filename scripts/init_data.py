@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 django.setup()
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from apps.core.models import SystemSettings, SKU, Part
 from decimal import Decimal
@@ -198,6 +199,9 @@ def create_parts():
 
 
 def main():
+    if not settings.DEBUG and os.getenv("ALLOW_DEMO_DATA_INIT", "").lower() not in {"1", "true", "yes"}:
+        raise RuntimeError("init_data.py 仅允许在开发环境执行；如确需执行，请显式设置 ALLOW_DEMO_DATA_INIT=true。")
+
     print("=" * 60)
     print("初始化数据")
     print("=" * 60)
