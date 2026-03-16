@@ -7,25 +7,30 @@
 <div class="card mb-3">
   <div class="card-body">
     <form class="row g-2" method="get">
-      <div class="col-md-2">
-        <select class="form-select" name="tx_type">
-          <option value="">全部类型</option>
-          <option value="deposit_received" {% if tx_type == 'deposit_received' %}selected{% endif %}>收押金</option>
-          <option value="balance_received" {% if tx_type == 'balance_received' %}selected{% endif %}>收尾款</option>
-          <option value="deposit_refund" {% if tx_type == 'deposit_refund' %}selected{% endif %}>退押金</option>
-          <option value="penalty_charge" {% if tx_type == 'penalty_charge' %}selected{% endif %}>扣罚</option>
-          <option value="manual_adjust" {% if tx_type == 'manual_adjust' %}selected{% endif %}>人工调整</option>
-        </select>
-      </div>
+	      <div class="col-md-2">
+	        <select class="form-select" name="tx_type">
+	          <option value="">全部类型</option>
+          <option value="reservation_deposit_received" {% if tx_type == 'reservation_deposit_received' %}selected{% endif %}>收预定订金</option>
+          <option value="reservation_deposit_refund" {% if tx_type == 'reservation_deposit_refund' %}selected{% endif %}>退预定订金</option>
+          <option value="reservation_deposit_applied" {% if tx_type == 'reservation_deposit_applied' %}selected{% endif %}>预定订金转押金</option>
+	          <option value="deposit_received" {% if tx_type == 'deposit_received' %}selected{% endif %}>收押金</option>
+	          <option value="balance_received" {% if tx_type == 'balance_received' %}selected{% endif %}>收尾款</option>
+	          <option value="deposit_refund" {% if tx_type == 'deposit_refund' %}selected{% endif %}>退押金</option>
+	          <option value="return_service_received" {% if tx_type == 'return_service_received' %}selected{% endif %}>收包回邮服务费</option>
+	          <option value="return_service_refund" {% if tx_type == 'return_service_refund' %}selected{% endif %}>退包回邮服务费</option>
+	          <option value="penalty_charge" {% if tx_type == 'penalty_charge' %}selected{% endif %}>扣罚</option>
+	          <option value="manual_adjust" {% if tx_type == 'manual_adjust' %}selected{% endif %}>人工调整</option>
+	        </select>
+	      </div>
       <div class="col-md-2">
         <input class="form-control" type="date" name="start_date" value="{{ start_date }}">
       </div>
       <div class="col-md-2">
         <input class="form-control" type="date" name="end_date" value="{{ end_date }}">
       </div>
-      <div class="col-md-3">
-        <input class="form-control" type="text" name="keyword" value="{{ keyword }}" placeholder="订单号/客户/备注">
-      </div>
+	      <div class="col-md-3">
+	        <input class="form-control" type="text" name="keyword" value="{{ keyword }}" placeholder="订单号/平台单号/客户/包回邮参考号/备注">
+	      </div>
       <div class="col-md-3 d-flex gap-2">
         <button class="btn btn-primary" type="submit">查询</button>
         <a class="btn btn-secondary" href="{% url 'finance_transactions_list' %}">重置</a>
@@ -33,12 +38,17 @@
         <a class="btn btn-success" href="?{% if pagination_query %}{{ pagination_query }}&{% endif %}export=1">导出CSV</a>
       </div>
     </form>
-    <div class="mt-3 small">
-      <span class="me-3">收押金：￥{{ summary_map.deposit_received|default:'0.00' }}</span>
-      <span class="me-3">收尾款：￥{{ summary_map.balance_received|default:'0.00' }}</span>
-      <span class="me-3">退押金：￥{{ summary_map.deposit_refund|default:'0.00' }}</span>
-      <span class="me-3">扣罚：￥{{ summary_map.penalty_charge|default:'0.00' }}</span>
-      <span>人工调整：￥{{ summary_map.manual_adjust|default:'0.00' }}</span>
+	    <div class="mt-3 small">
+	      <span class="me-3">收预定订金：￥{{ summary_map.reservation_deposit_received|default:'0.00' }}</span>
+	      <span class="me-3">退预定订金：￥{{ summary_map.reservation_deposit_refund|default:'0.00' }}</span>
+		      <span class="me-3">订金转押金：￥{{ summary_map.reservation_deposit_applied|default:'0.00' }}</span>
+		      <span class="me-3">收押金：￥{{ summary_map.deposit_received|default:'0.00' }}</span>
+		      <span class="me-3">收尾款：￥{{ summary_map.balance_received|default:'0.00' }}</span>
+		      <span class="me-3">退押金：￥{{ summary_map.deposit_refund|default:'0.00' }}</span>
+	      <span class="me-3">收包回邮：￥{{ summary_map.return_service_received|default:'0.00' }}</span>
+	      <span class="me-3">退包回邮：￥{{ summary_map.return_service_refund|default:'0.00' }}</span>
+	      <span class="me-3">扣罚：￥{{ summary_map.penalty_charge|default:'0.00' }}</span>
+	      <span>人工调整：￥{{ summary_map.manual_adjust|default:'0.00' }}</span>
     </div>
   </div>
 </div>
@@ -47,32 +57,34 @@
   <div class="table-responsive">
     <table class="table table-hover align-middle mb-0">
       <thead>
-        <tr>
-          <th>时间</th>
-          <th>订单号</th>
-          <th>客户</th>
-          <th>类型</th>
-          <th>金额</th>
+	        <tr>
+	          <th>时间</th>
+	          <th>单据类型</th>
+	          <th>单号</th>
+	          <th>客户</th>
+	          <th>类型</th>
+	          <th>金额</th>
           <th>关联单号</th>
           <th>备注</th>
           <th>操作人</th>
         </tr>
       </thead>
       <tbody>
-        {% for r in records %}
-        <tr>
-          <td>{{ r.created_at|date:"Y-m-d H:i" }}</td>
-          <td>{{ r.order.order_no }}</td>
-          <td>{{ r.order.customer_name }}</td>
-          <td>{{ r.get_transaction_type_display }}</td>
-          <td>￥{{ r.amount }}</td>
-          <td>{{ r.reference_no|default:'-' }}</td>
-          <td>{{ r.notes|default:'-' }}</td>
-          <td>{% if r.created_by %}{{ r.created_by.full_name|default:r.created_by.username }}{% else %}-{% endif %}</td>
-        </tr>
-        {% empty %}
-        <tr><td colspan="8" class="text-center">暂无财务流水</td></tr>
-        {% endfor %}
+	        {% for r in records %}
+	        <tr>
+	          <td>{{ r.created_at|date:"Y-m-d H:i" }}</td>
+	          <td>{{ r.subject_type_label }}</td>
+	          <td>{{ r.subject_no|default:'-' }}</td>
+	          <td>{{ r.subject_customer_name|default:'-' }}</td>
+	          <td>{{ r.get_transaction_type_display }}</td>
+	          <td>￥{{ r.amount }}</td>
+	          <td>{{ r.reference_no|default:'-' }}</td>
+	          <td>{{ r.notes|default:'-' }}</td>
+	          <td>{% if r.created_by %}{{ r.created_by.full_name|default:r.created_by.username }}{% else %}-{% endif %}</td>
+	        </tr>
+	        {% empty %}
+	        <tr><td colspan="9" class="text-center">暂无财务流水</td></tr>
+	        {% endfor %}
       </tbody>
     </table>
   </div>

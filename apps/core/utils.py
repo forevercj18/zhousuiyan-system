@@ -13,6 +13,8 @@ from .models import (
     SystemSettings,
     Order,
     OrderItem,
+    Reservation,
+    User,
     SKU,
     Transfer,
     TransferAllocation,
@@ -44,7 +46,10 @@ def build_finance_reconciliation_rows(
     if min_diff_amount < Decimal('0.00'):
         min_diff_amount = Decimal('0.00')
     orders = Order.objects.prefetch_related('items').annotate(
-        tx_deposit_received=Sum('finance_transactions__amount', filter=Q(finance_transactions__transaction_type='deposit_received')),
+        tx_deposit_received=Sum(
+            'finance_transactions__amount',
+            filter=Q(finance_transactions__transaction_type__in=['deposit_received', 'reservation_deposit_applied'])
+        ),
         tx_balance_received=Sum('finance_transactions__amount', filter=Q(finance_transactions__transaction_type='balance_received')),
         tx_deposit_refund=Sum('finance_transactions__amount', filter=Q(finance_transactions__transaction_type='deposit_refund')),
         tx_penalty=Sum('finance_transactions__amount', filter=Q(finance_transactions__transaction_type='penalty_charge')),
@@ -145,6 +150,7 @@ def get_system_settings():
     # 设置默认值
     settings.setdefault('ship_lead_days', 2)
     settings.setdefault('return_offset_days', 1)
+    settings.setdefault('reservation_followup_lead_days', 7)
     settings.setdefault('buffer_days', 1)
     settings.setdefault('max_transfer_gap_days', 3)
     settings.setdefault('warehouse_sender_name', '仓库发货员')
@@ -234,6 +240,7 @@ def get_dashboard_stats_payload(include_transfer_available=False):
         )
         .count()
     )
+    ready_reservations_count = Reservation.objects.filter(status='ready_to_convert').count()
 
     stats = {
         'pending_orders': pending_orders_count,
@@ -252,6 +259,7 @@ def get_dashboard_stats_payload(include_transfer_available=False):
         'avg_transit_days': avg_transit_days,
         'due_within_7_days_count': due_within_7_days_count,
         'overdue_orders_count': overdue_orders_count,
+        'ready_reservations_count': ready_reservations_count,
         'pending_recovery_inspections': PartRecoveryInspection.objects.filter(status='pending').count(),
         'repair_recovery_inspections': PartRecoveryInspection.objects.filter(status='repair').count(),
         'draft_maintenance_work_orders': MaintenanceWorkOrder.objects.filter(status='draft').count(),
@@ -259,6 +267,206 @@ def get_dashboard_stats_payload(include_transfer_available=False):
     if include_transfer_available:
         stats['transfer_available_count'] = len(find_transfer_candidates())
     return stats
+
+
+def get_reservation_followup_counts(owner=None):
+    settings = get_system_settings()
+    lead_days = int(settings.get('reservation_followup_lead_days', 7) or 7)
+    target_event_date = timezone.localdate() + timedelta(days=lead_days)
+    qs = Reservation.objects.filter(status__in=['pending_info', 'ready_to_convert'])
+    if owner is not None:
+        qs = qs.filter(owner=owner)
+    return {
+        'lead_days': lead_days,
+        'today_count': qs.filter(event_date=target_event_date).count(),
+        'overdue_count': qs.filter(event_date__lt=target_event_date).count(),
+    }
+
+
+def get_reservation_post_convert_counts(owner=None):
+    qs = Reservation.objects.filter(
+        status='converted',
+        converted_order__status__in=['pending', 'confirmed'],
+    )
+    if owner is not None:
+        qs = qs.filter(owner=owner)
+    return {
+        'awaiting_shipment_count': qs.count(),
+    }
+
+
+def get_reservation_converted_followup_counts(owner=None):
+    today = timezone.localdate()
+    qs = Reservation.objects.filter(status='converted', converted_order__isnull=False).exclude(
+        converted_order__status='cancelled',
+    )
+    if owner is not None:
+        qs = qs.filter(owner=owner)
+    overdue_shipment_qs = qs.filter(
+        converted_order__status__in=['pending', 'confirmed'],
+        converted_order__ship_date__isnull=False,
+        converted_order__ship_date__lte=today,
+        converted_order__ship_tracking='',
+    )
+    balance_due_qs = qs.filter(converted_order__balance__gt=Decimal('0.00'))
+    return {
+        'overdue_shipment_count': overdue_shipment_qs.count(),
+        'balance_due_count': balance_due_qs.count(),
+    }
+
+
+def get_reservation_owner_followup_panels():
+    settings = get_system_settings()
+    lead_days = int(settings.get('reservation_followup_lead_days', 7) or 7)
+    today = timezone.localdate()
+    target_event_date = today + timedelta(days=lead_days)
+
+    today_rows = Reservation.objects.filter(
+        status__in=['pending_info', 'ready_to_convert'],
+        event_date=target_event_date,
+        owner__isnull=False,
+    ).values('owner_id').annotate(total=Count('id'))
+    overdue_rows = Reservation.objects.filter(
+        status__in=['pending_info', 'ready_to_convert'],
+        event_date__lt=target_event_date,
+        owner__isnull=False,
+    ).values('owner_id').annotate(total=Count('id'))
+    overdue_shipment_rows = Reservation.objects.filter(
+        status='converted',
+        owner__isnull=False,
+        converted_order__status__in=['pending', 'confirmed'],
+        converted_order__ship_date__isnull=False,
+        converted_order__ship_date__lte=today,
+        converted_order__ship_tracking='',
+    ).values('owner_id').annotate(total=Count('id'))
+    balance_due_rows = Reservation.objects.filter(
+        status='converted',
+        owner__isnull=False,
+        converted_order__isnull=False,
+        converted_order__balance__gt=Decimal('0.00'),
+    ).exclude(
+        converted_order__status='cancelled',
+    ).values('owner_id').annotate(total=Count('id'))
+
+    owner_map = {}
+    for rows, key in [
+        (today_rows, 'today_count'),
+        (overdue_rows, 'overdue_count'),
+        (overdue_shipment_rows, 'overdue_shipment_count'),
+        (balance_due_rows, 'balance_due_count'),
+    ]:
+        for row in rows:
+            owner_map.setdefault(row['owner_id'], {
+                'today_count': 0,
+                'overdue_count': 0,
+                'overdue_shipment_count': 0,
+                'balance_due_count': 0,
+            })[key] = int(row['total'] or 0)
+
+    if not owner_map:
+        return []
+
+    owners = User.objects.filter(id__in=owner_map.keys(), is_active=True).order_by('full_name', 'username')
+    panels = []
+    for owner in owners:
+        counts = owner_map.get(owner.id, {})
+        total = sum(int(counts.get(key) or 0) for key in ['today_count', 'overdue_count', 'overdue_shipment_count', 'balance_due_count'])
+        if total <= 0:
+            continue
+        panels.append({
+            'owner_id': owner.id,
+            'owner_name': owner.full_name or owner.get_full_name() or owner.username,
+            'today_count': int(counts.get('today_count') or 0),
+            'overdue_count': int(counts.get('overdue_count') or 0),
+            'overdue_shipment_count': int(counts.get('overdue_shipment_count') or 0),
+            'balance_due_count': int(counts.get('balance_due_count') or 0),
+            'total': total,
+        })
+    panels.sort(key=lambda item: (-item['total'], item['owner_name']))
+    return panels
+
+
+def get_reservation_owner_transfer_suggestions():
+    owner_panels = get_reservation_owner_followup_panels()
+    owner_map = {panel['owner_id']: panel for panel in owner_panels}
+    candidate_owners = list(
+        User.objects.filter(
+            is_active=True,
+            role='customer_service',
+        ).order_by('full_name', 'username')
+    )
+    for owner in candidate_owners:
+        owner_map.setdefault(owner.id, {
+            'owner_id': owner.id,
+            'owner_name': owner.full_name or owner.get_full_name() or owner.username,
+            'today_count': 0,
+            'overdue_count': 0,
+            'overdue_shipment_count': 0,
+            'balance_due_count': 0,
+            'total': 0,
+        })
+    owner_panels = list(owner_map.values())
+    if len(owner_panels) < 2:
+        return []
+
+    owners = {
+        owner.id: owner for owner in candidate_owners
+    }
+    avg_load = sum(panel['total'] for panel in owner_panels) / len(owner_panels)
+    low_load_panels = sorted(owner_panels, key=lambda item: (item['total'], item['owner_name']))
+    suggestions = []
+
+    for source in owner_panels:
+        if source['total'] < 3 or source['total'] <= avg_load:
+            continue
+        target = next(
+            (
+                panel for panel in low_load_panels
+                if panel['owner_id'] != source['owner_id'] and panel['total'] + 1 < source['total']
+            ),
+            None,
+        )
+        if not target:
+            continue
+
+        suggest_count = max(1, min(3, (source['total'] - target['total']) // 2 or 1))
+        candidate_qs = Reservation.objects.filter(owner_id=source['owner_id']).select_related('converted_order').order_by('created_at')
+        today = timezone.localdate()
+        settings = get_system_settings()
+        target_event_date = today + timedelta(days=int(settings.get('reservation_followup_lead_days', 7) or 7))
+        priority_map = []
+        for reservation in candidate_qs:
+            priority = 99
+            if reservation.status in ['pending_info', 'ready_to_convert'] and reservation.event_date < target_event_date:
+                priority = 0
+            elif reservation.status == 'converted' and reservation.converted_order_id and reservation.converted_order.status in ['pending', 'confirmed']:
+                if reservation.converted_order.ship_date and reservation.converted_order.ship_date <= today and not reservation.converted_order.ship_tracking:
+                    priority = 1
+                elif (reservation.converted_order.balance or Decimal('0.00')) > Decimal('0.00'):
+                    priority = 2
+                else:
+                    priority = 3
+            elif reservation.status in ['pending_info', 'ready_to_convert'] and reservation.event_date == target_event_date:
+                priority = 4
+            if priority < 99:
+                priority_map.append((priority, reservation))
+        priority_map.sort(key=lambda item: (item[0], item[1].created_at))
+        samples = [item[1] for item in priority_map[:suggest_count]]
+        if not samples:
+            continue
+        suggestions.append({
+            'source_owner_id': source['owner_id'],
+            'source_owner_name': source['owner_name'],
+            'target_owner_id': target['owner_id'],
+            'target_owner_name': target['owner_name'],
+            'suggest_count': len(samples),
+            'source_total': source['total'],
+            'target_total': target['total'],
+            'reservation_samples': [reservation.reservation_no for reservation in samples],
+            'source_query': f"owner={source['owner_id']}",
+        })
+
+    return suggestions
 
 
 def get_role_dashboard_payload(user, view_role=None, base_stats=None):
@@ -272,6 +480,17 @@ def get_role_dashboard_payload(user, view_role=None, base_stats=None):
     valid_roles = {'admin', 'manager', 'warehouse_manager', 'warehouse_staff', 'customer_service'}
     if role not in valid_roles:
         role = getattr(user, 'role', 'warehouse_staff')
+    reservation_followup = get_reservation_followup_counts(
+        None if role in ['admin', 'manager'] else user
+    )
+    reservation_post_convert = get_reservation_post_convert_counts(
+        None if role in ['admin', 'manager'] else user
+    )
+    reservation_converted_followup = get_reservation_converted_followup_counts(
+        None if role in ['admin', 'manager'] else user
+    )
+    reservation_owner_panels = get_reservation_owner_followup_panels() if role in ['admin', 'manager'] else []
+    reservation_owner_transfer_suggestions = get_reservation_owner_transfer_suggestions() if role in ['admin', 'manager'] else []
 
     pending_transfer_tasks = Transfer.objects.filter(status='pending').count()
     settings = get_system_settings()
@@ -335,6 +554,12 @@ def get_role_dashboard_payload(user, view_role=None, base_stats=None):
             {'key': 'total_revenue', 'label': '总营收', 'value': base['total_revenue'], 'url_name': 'finance_transactions_list', 'query': ''},
             {'key': 'pending_revenue', 'label': '待收款', 'value': base['pending_revenue'], 'url_name': 'orders_list', 'query': ''},
             {'key': 'pending_orders', 'label': '待处理订单', 'value': base['pending_orders'], 'url_name': 'orders_list', 'query': 'status=pending'},
+            {'key': 'ready_reservations_count', 'label': '待转正式订单', 'value': base['ready_reservations_count'], 'url_name': 'reservations_list', 'query': 'status=ready_to_convert'},
+            {'key': 'converted_pending_shipment_reservations_count', 'label': '转单待发货', 'value': reservation_post_convert['awaiting_shipment_count'], 'url_name': 'reservations_list', 'query': 'journey=awaiting_shipment'},
+            {'key': 'converted_overdue_shipment_reservations_count', 'label': '待发货超时', 'value': reservation_converted_followup['overdue_shipment_count'], 'url_name': 'reservations_list', 'query': 'journey=awaiting_shipment_overdue'},
+            {'key': 'converted_balance_due_reservations_count', 'label': '待收尾款', 'value': reservation_converted_followup['balance_due_count'], 'url_name': 'reservations_list', 'query': 'journey=balance_due'},
+            {'key': 'today_followup_reservations_count', 'label': '今日需联系预定单', 'value': reservation_followup['today_count'], 'url_name': 'reservations_list', 'query': 'contact=today'},
+            {'key': 'overdue_followup_reservations_count', 'label': '逾期未联系预定单', 'value': reservation_followup['overdue_count'], 'url_name': 'reservations_list', 'query': 'contact=overdue'},
             {'key': 'overdue_orders_count', 'label': '已超时订单', 'value': base['overdue_orders_count'], 'url_name': 'orders_list', 'query': 'sla=overdue'},
             {'key': 'due_within_7_days_count', 'label': '7天内到期', 'value': base['due_within_7_days_count'], 'url_name': 'orders_list', 'query': 'sla=warning'},
             {'key': 'completed_orders', 'label': '已完成订单', 'value': base['completed_orders'], 'url_name': 'orders_list', 'query': 'status=completed'},
@@ -342,6 +567,7 @@ def get_role_dashboard_payload(user, view_role=None, base_stats=None):
         ]
         quick_actions = [
             {'label': '新建订单', 'url_name': 'order_create', 'style': 'primary'},
+            {'label': '新建预定单', 'url_name': 'reservation_create', 'style': 'outline-secondary'},
             {'label': '订单中心', 'url_name': 'orders_list', 'style': 'outline-secondary'},
             {'label': '转寄中心', 'url_name': 'transfers_list', 'style': 'outline-secondary'},
             {'label': '查看排期', 'url_name': 'calendar', 'style': 'outline-secondary'},
@@ -439,6 +665,12 @@ def get_role_dashboard_payload(user, view_role=None, base_stats=None):
         warehouse_insights = []
         focus_cards = [
             {'key': 'pending_orders', 'label': '待处理订单', 'value': base['pending_orders'], 'url_name': 'orders_list', 'query': 'status=pending'},
+            {'key': 'ready_reservations_count', 'label': '待转正式订单', 'value': base['ready_reservations_count'], 'url_name': 'reservations_list', 'query': 'status=ready_to_convert'},
+            {'key': 'converted_pending_shipment_reservations_count', 'label': '转单待发货', 'value': reservation_post_convert['awaiting_shipment_count'], 'url_name': 'reservations_list', 'query': 'journey=awaiting_shipment'},
+            {'key': 'converted_overdue_shipment_reservations_count', 'label': '待发货超时', 'value': reservation_converted_followup['overdue_shipment_count'], 'url_name': 'reservations_list', 'query': 'journey=awaiting_shipment_overdue'},
+            {'key': 'converted_balance_due_reservations_count', 'label': '待收尾款', 'value': reservation_converted_followup['balance_due_count'], 'url_name': 'reservations_list', 'query': 'journey=balance_due'},
+            {'key': 'today_followup_reservations_count', 'label': '今日需联系预定单', 'value': reservation_followup['today_count'], 'url_name': 'reservations_list', 'query': 'contact=today'},
+            {'key': 'overdue_followup_reservations_count', 'label': '逾期未联系预定单', 'value': reservation_followup['overdue_count'], 'url_name': 'reservations_list', 'query': 'contact=overdue'},
             {'key': 'overdue_orders_count', 'label': '已超时订单', 'value': base['overdue_orders_count'], 'url_name': 'orders_list', 'query': 'sla=overdue'},
             {'key': 'due_within_7_days_count', 'label': '7天内到期', 'value': base['due_within_7_days_count'], 'url_name': 'orders_list', 'query': 'sla=warning'},
             {'key': 'delivered_orders', 'label': '已发货订单', 'value': base['delivered_orders'], 'url_name': 'orders_list', 'query': 'status=delivered'},
@@ -447,7 +679,9 @@ def get_role_dashboard_payload(user, view_role=None, base_stats=None):
         ]
         quick_actions = [
             {'label': '新建订单', 'url_name': 'order_create', 'style': 'primary'},
+            {'label': '新建预定单', 'url_name': 'reservation_create', 'style': 'outline-secondary'},
             {'label': '订单中心', 'url_name': 'orders_list', 'style': 'outline-secondary'},
+            {'label': '预定管理', 'url_name': 'reservations_list', 'style': 'outline-secondary'},
             {'label': '转寄中心', 'url_name': 'transfers_list', 'style': 'outline-secondary'},
             {'label': '查看排期', 'url_name': 'calendar', 'style': 'outline-secondary'},
         ]
@@ -479,6 +713,11 @@ def get_role_dashboard_payload(user, view_role=None, base_stats=None):
             'overdue_pending_approvals': overdue_pending_approvals,
             'low_stock_parts': base['low_stock_parts'],
         },
+        'reservation_followup': reservation_followup,
+        'reservation_post_convert': reservation_post_convert,
+        'reservation_converted_followup': reservation_converted_followup,
+        'reservation_owner_panels': reservation_owner_panels,
+        'reservation_owner_transfer_suggestions': reservation_owner_transfer_suggestions,
         'warehouse_insights': warehouse_insights,
     }
 
@@ -724,6 +963,80 @@ def check_sku_availability(sku_id, event_date, quantity=1, exclude_order_id=None
                 else f'仓库库存不足，当前超占{overbooked_count}套（占用：{occupied}）'
             )
         )
+    }
+
+
+def get_reservation_conflict_summary(sku_id, event_date, quantity=1, exclude_reservation_id=None):
+    """预定单档期提醒：给出同款同日预定、正式订单占用与仓库实时可用量。"""
+    if not sku_id or not event_date:
+        return None
+
+    try:
+        sku = SKU.objects.get(id=sku_id, is_active=True)
+    except SKU.DoesNotExist:
+        return None
+
+    reservation_query = Reservation.objects.filter(
+        sku_id=sku_id,
+        event_date=event_date,
+        status__in=['pending_info', 'ready_to_convert'],
+    )
+    if exclude_reservation_id:
+        reservation_query = reservation_query.exclude(id=exclude_reservation_id)
+    reservation_count = reservation_query.count()
+    reservation_quantity = reservation_query.aggregate(total=Sum('quantity'))['total'] or 0
+    reservation_samples = list(
+        reservation_query.order_by('-created_at').values_list('reservation_no', flat=True)[:3]
+    )
+
+    order_quantity = (
+        OrderItem.objects.filter(
+            sku_id=sku_id,
+            order__event_date=event_date,
+        )
+        .exclude(order__status='cancelled')
+        .aggregate(total=Sum('quantity'))['total'] or 0
+    )
+    order_count = (
+        Order.objects.filter(
+            items__sku_id=sku_id,
+            event_date=event_date,
+        )
+        .exclude(status='cancelled')
+        .distinct()
+        .count()
+    )
+
+    availability = check_sku_availability(sku_id, event_date, quantity=quantity)
+    demand_total = int(reservation_quantity or 0) + int(order_quantity or 0) + int(quantity or 0)
+    current_stock = int(availability.get('current_stock') or 0)
+    available_count = int(availability.get('available_count') or 0)
+    risk_level = 'safe'
+    if demand_total > current_stock:
+        risk_level = 'danger'
+    elif demand_total > available_count:
+        risk_level = 'warning'
+
+    return {
+        'sku_id': sku_id,
+        'sku_code': sku.code,
+        'sku_name': sku.name,
+        'event_date': event_date,
+        'requested_quantity': int(quantity or 0),
+        'same_day_reservation_count': reservation_count,
+        'same_day_reservation_quantity': int(reservation_quantity or 0),
+        'same_day_order_count': order_count,
+        'same_day_order_quantity': int(order_quantity or 0),
+        'reservation_samples': reservation_samples,
+        'current_stock': current_stock,
+        'available_count': available_count,
+        'occupied': int(availability.get('occupied') or 0),
+        'risk_level': risk_level,
+        'message': (
+            f'同款同日已有 {reservation_count} 张预定单（{int(reservation_quantity or 0)} 套），'
+            f'{order_count} 张正式订单（{int(order_quantity or 0)} 套）；'
+            f'当前仓库实时可用 {available_count}/{current_stock} 套。'
+        ),
     }
 
 

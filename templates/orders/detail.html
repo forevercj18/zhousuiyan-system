@@ -201,7 +201,8 @@
                 <div class="info-item"><div class="k">客户姓名</div><div>{{ order.customer_name }}</div></div>
                 <div class="info-item"><div class="k">联系电话</div><div>{{ order.customer_phone }}</div></div>
                 <div class="info-item"><div class="k">微信号</div><div>{{ order.customer_wechat|default:"-" }}</div></div>
-                <div class="info-item"><div class="k">闲鱼订单号</div><div>{{ order.xianyu_order_no|default:"-" }}</div></div>
+                <div class="info-item"><div class="k">订单来源</div><div>{{ order_source_label }}</div></div>
+                <div class="info-item"><div class="k">平台单号</div><div>{{ order.source_order_no|default:order.xianyu_order_no|default:"-" }}</div></div>
                 <div class="info-item"><div class="k">邮箱</div><div>{{ order.customer_email|default:"-" }}</div></div>
                 <div class="info-item"><div class="k">送货地址</div><div>{{ order.delivery_address }}</div></div>
                 <div class="info-item"><div class="k">回收地址</div><div>{{ order.return_address|default:"-" }}</div></div>
@@ -220,6 +221,70 @@
                 <div class="info-item"><div class="k">来源单占用</div><div>{% if order.active_as_source_count > 0 %}是（{{ order.active_as_source_count }}）{% else %}否{% endif %}</div></div>
             </div>
         </div>
+    </div>
+
+    <div class="panel" style="margin-top: 16px;">
+        <h3>包回邮服务</h3>
+        <div class="info-list">
+            <div class="info-item"><div class="k">回寄服务</div><div>{{ return_service_type_label }}</div></div>
+            <div class="info-item"><div class="k">服务费</div><div>￥{{ order.return_service_fee }}</div></div>
+            <div class="info-item"><div class="k">收款状态</div><div>{{ return_service_payment_status_label }}</div></div>
+            <div class="info-item"><div class="k">收款渠道</div><div>{{ return_service_payment_channel_label }}</div></div>
+            <div class="info-item"><div class="k">支付参考号</div><div>{{ order.return_service_payment_reference|default:"-" }}</div></div>
+            <div class="info-item"><div class="k">上门取件状态</div><div>{{ return_pickup_status_label }}</div></div>
+        </div>
+        {% if order.status == 'pending' or order.status == 'confirmed' or order.status == 'delivered' or order.status == 'returned' %}
+        <form method="post" action="{% url 'order_return_service_update' order.id %}" class="mt-3">
+            {% csrf_token %}
+            <div class="row g-2 align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label">回寄服务</label>
+                    <select class="form-select" name="return_service_type">
+                        {% for value, label in order.RETURN_SERVICE_TYPE_CHOICES %}
+                        <option value="{{ value }}" {% if order.return_service_type == value %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">服务费</label>
+                    <input class="form-control" type="number" step="0.01" min="0" name="return_service_fee" value="{{ order.return_service_fee }}">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">收款状态</label>
+                    <select class="form-select" name="return_service_payment_status">
+                        {% for value, label in order.RETURN_SERVICE_PAYMENT_STATUS_CHOICES %}
+                        <option value="{{ value }}" {% if order.return_service_payment_status == value %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">收款渠道</label>
+                    <select class="form-select" name="return_service_payment_channel">
+                        <option value="">请选择</option>
+                        {% for value, label in order.RETURN_SERVICE_PAYMENT_CHANNEL_CHOICES %}
+                        <option value="{{ value }}" {% if order.return_service_payment_channel == value %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">支付参考号</label>
+                    <input class="form-control" type="text" name="return_service_payment_reference" value="{{ order.return_service_payment_reference }}" placeholder="平台单号/微信备注">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">上门取件状态</label>
+                    <select class="form-select" name="return_pickup_status">
+                        {% for value, label in order.RETURN_PICKUP_STATUS_CHOICES %}
+                        <option value="{{ value }}" {% if order.return_pickup_status == value %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <button type="submit" class="btn btn-primary w-100">保存包回邮服务</button>
+                </div>
+            </div>
+            <div class="form-text mt-2">支持订单已发货后补录包回邮服务，系统会按收款状态自动生成包回邮服务费收入/退款流水。</div>
+        </form>
+        {% endif %}
     </div>
 
     <div class="panel order-table-wrap">
@@ -272,13 +337,15 @@
             <div class="row g-2 align-items-end">
                 <div class="col-md-3">
                     <label class="form-label">交易类型</label>
-                    <select class="form-select" name="transaction_type" required>
-                        <option value="penalty_charge">扣罚</option>
-                        <option value="manual_adjust">人工调整</option>
-                        <option value="deposit_refund">退押金</option>
-                        <option value="balance_received">收尾款</option>
-                        <option value="deposit_received">收押金</option>
-                    </select>
+	                    <select class="form-select" name="transaction_type" required>
+	                        <option value="penalty_charge">扣罚</option>
+	                        <option value="manual_adjust">人工调整</option>
+	                        <option value="deposit_refund">退押金</option>
+	                        <option value="return_service_refund">退包回邮服务费</option>
+	                        <option value="return_service_received">收包回邮服务费</option>
+	                        <option value="balance_received">收尾款</option>
+	                        <option value="deposit_received">收押金</option>
+	                    </select>
                 </div>
                 <div class="col-md-2">
                     <label class="form-label">金额</label>

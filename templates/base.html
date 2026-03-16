@@ -35,6 +35,10 @@
                         <span class="icon"><i class="bi bi-receipt-cutoff"></i></span>
                         <span>订单中心</span>
                     </a>
+                    <a href="{% url 'reservations_list' %}" class="nav-item {% if request.resolver_match.url_name == 'reservations_list' or request.resolver_match.url_name == 'reservation_create' or request.resolver_match.url_name == 'reservation_edit' or request.resolver_match.url_name == 'reservation_detail' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-bookmark-star"></i></span>
+                        <span>预定管理</span>
+                    </a>
                     <a href="{% url 'calendar' %}" class="nav-item {% if request.resolver_match.url_name == 'calendar' %}active{% endif %}">
                         <span class="icon"><i class="bi bi-calendar3"></i></span>
                         <span>日历排期</span>

@@ -16,6 +16,14 @@ urlpatterns = [
 
     # 订单管理
     path('orders/', views.orders_list, name='orders_list'),
+    path('reservations/', views.reservations_list, name='reservations_list'),
+    path('reservations/create/', views.reservation_create, name='reservation_create'),
+    path('reservations/bulk-status/', views.reservations_bulk_update_status, name='reservations_bulk_update_status'),
+    path('reservations/bulk-transfer-owner/', views.reservations_bulk_transfer_owner, name='reservations_bulk_transfer_owner'),
+    path('reservations/<int:reservation_id>/', views.reservation_detail, name='reservation_detail'),
+    path('reservations/<int:reservation_id>/edit/', views.reservation_edit, name='reservation_edit'),
+    path('reservations/<int:reservation_id>/cancel/', views.reservation_cancel, name='reservation_cancel'),
+    path('reservations/<int:reservation_id>/refund/', views.reservation_refund, name='reservation_refund'),
     path('orders/create/', views.order_create, name='order_create'),
     path('orders/<int:order_id>/edit/', views.order_edit, name='order_edit'),
     path('orders/<int:order_id>/delete/', views.order_delete, name='order_delete'),
@@ -26,6 +34,7 @@ urlpatterns = [
     path('orders/<int:order_id>/mark-completed/', views.order_mark_completed, name='order_mark_completed'),
     path('orders/<int:order_id>/cancel/', views.order_cancel, name='order_cancel'),
     path('orders/<int:order_id>/finance/add/', views.order_finance_add, name='order_finance_add'),
+    path('orders/<int:order_id>/return-service/update/', views.order_return_service_update, name='order_return_service_update'),
     path('orders/<int:order_id>/', views.order_detail, name='order_detail'),
 
     # 日历排期

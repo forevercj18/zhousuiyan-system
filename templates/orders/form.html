@@ -26,9 +26,17 @@
     <form method="post" id="orderForm">
         {% csrf_token %}
         <input type="hidden" id="confirm_duplicate" name="confirm_duplicate" value="0">
+        {% if source_reservation %}
+        <input type="hidden" name="reservation_id" value="{{ source_reservation.id }}">
+        {% endif %}
 
         <div class="form-section">
             <h3>基本信息</h3>
+            {% if source_reservation %}
+            <div class="alert alert-info">
+                当前正在将预定单 <strong>{{ source_reservation.reservation_no }}</strong> 转为正式订单，订金将在保存后自动结转为订单押金。
+            </div>
+            {% endif %}
             {% if mode != 'view' %}
             <div class="form-group">
                 <label for="receiver_text">收货信息快捷录入</label>
@@ -62,11 +70,30 @@
                            {% if mode == 'view' %}readonly{% endif %}>
                 </div>
                 <div class="form-group">
-                    <label for="xianyu_order_no">闲鱼订单号</label>
-                    <input type="text" id="xianyu_order_no" name="xianyu_order_no" class="form-control"
-                           value="{% if form_values.xianyu_order_no %}{{ form_values.xianyu_order_no }}{% elif order %}{{ order.xianyu_order_no }}{% endif %}"
-                           placeholder="请输入闲鱼订单号"
+                    <label for="order_source">订单来源</label>
+                    <select id="order_source" name="order_source" class="form-control" {% if mode == 'view' %}disabled{% endif %}>
+                        {% for value, label in order_source_choices %}
+                        <option value="{{ value }}"
+                            {% if form_values.order_source == value %}
+                                selected
+                            {% elif order and order.order_source == value and not form_values.order_source %}
+                                selected
+                            {% elif not order and not form_values.order_source and value == 'wechat' %}
+                                selected
+                            {% endif %}>
+                            {{ label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="source_order_no">平台单号</label>
+                    <input type="text" id="source_order_no" name="source_order_no" class="form-control"
+                           value="{% if form_values.source_order_no %}{{ form_values.source_order_no }}{% elif form_values.xianyu_order_no %}{{ form_values.xianyu_order_no }}{% elif order %}{{ order.source_order_no|default:order.xianyu_order_no }}{% endif %}"
+                           placeholder="闲鱼/小红书/补拍单号"
                            {% if mode == 'view' %}readonly{% endif %}>
+                    <input type="hidden" id="xianyu_order_no" name="xianyu_order_no"
+                           value="{% if form_values.xianyu_order_no %}{{ form_values.xianyu_order_no }}{% elif order %}{{ order.xianyu_order_no }}{% endif %}">
                 </div>
             </div>
             <div class="form-row">
@@ -102,6 +129,94 @@
         </div>
 
         <div class="form-section">
+            <h3>包回邮服务</h3>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="return_service_type">回寄服务</label>
+                    <select id="return_service_type" name="return_service_type" class="form-control" {% if mode == 'view' %}disabled{% endif %}>
+                        {% for value, label in return_service_type_choices %}
+                        <option value="{{ value }}"
+                            {% if form_values.return_service_type == value %}
+                                selected
+                            {% elif order and order.return_service_type == value and not form_values.return_service_type %}
+                                selected
+                            {% elif not order and not form_values.return_service_type and value == 'none' %}
+                                selected
+                            {% endif %}>
+                            {{ label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="return_service_fee">服务费</label>
+                    <input type="number" id="return_service_fee" name="return_service_fee" class="form-control" min="0" step="0.01"
+                           value="{% if form_values.return_service_fee %}{{ form_values.return_service_fee }}{% elif order %}{{ order.return_service_fee }}{% else %}0.00{% endif %}"
+                           {% if mode == 'view' %}readonly{% endif %}>
+                </div>
+                <div class="form-group">
+                    <label for="return_service_payment_status">收款状态</label>
+                    <select id="return_service_payment_status" name="return_service_payment_status" class="form-control" {% if mode == 'view' %}disabled{% endif %}>
+                        {% for value, label in return_service_payment_status_choices %}
+                        <option value="{{ value }}"
+                            {% if form_values.return_service_payment_status == value %}
+                                selected
+                            {% elif order and order.return_service_payment_status == value and not form_values.return_service_payment_status %}
+                                selected
+                            {% elif not order and not form_values.return_service_payment_status and value == 'unpaid' %}
+                                selected
+                            {% endif %}>
+                            {{ label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="return_service_payment_channel">收款渠道</label>
+                    <select id="return_service_payment_channel" name="return_service_payment_channel" class="form-control" {% if mode == 'view' %}disabled{% endif %}>
+                        <option value="">请选择</option>
+                        {% for value, label in return_service_payment_channel_choices %}
+                        <option value="{{ value }}"
+                            {% if form_values.return_service_payment_channel == value %}
+                                selected
+                            {% elif order and order.return_service_payment_channel == value and not form_values.return_service_payment_channel %}
+                                selected
+                            {% endif %}>
+                            {{ label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="return_service_payment_reference">支付参考号</label>
+                    <input type="text" id="return_service_payment_reference" name="return_service_payment_reference" class="form-control"
+                           value="{% if form_values.return_service_payment_reference %}{{ form_values.return_service_payment_reference }}{% elif order %}{{ order.return_service_payment_reference }}{% endif %}"
+                           placeholder="平台单号/微信转账备注"
+                           {% if mode == 'view' %}readonly{% endif %}>
+                </div>
+                <div class="form-group">
+                    <label for="return_pickup_status">上门取件状态</label>
+                    <select id="return_pickup_status" name="return_pickup_status" class="form-control" {% if mode == 'view' %}disabled{% endif %}>
+                        {% for value, label in return_pickup_status_choices %}
+                        <option value="{{ value }}"
+                            {% if form_values.return_pickup_status == value %}
+                                selected
+                            {% elif order and order.return_pickup_status == value and not form_values.return_pickup_status %}
+                                selected
+                            {% elif not order and not form_values.return_pickup_status and value == 'not_required' %}
+                                selected
+                            {% endif %}>
+                            {{ label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="form-section">
             <h3>订单明细</h3>
             <div id="orderItems">
                 {% if order %}
@@ -110,8 +225,8 @@
                         <div class="form-row">
                             <div class="form-group flex-2">
                                 <label>SKU套餐</label>
-                                <select class="form-control sku-select" name="sku_id[]"
-                                        {% if mode == 'view' %}disabled{% endif %}>
+                            <select class="form-control sku-select" name="sku_id[]"
+                                        {% if mode == 'view' or source_reservation %}disabled{% endif %}>
                                     <option value="">请选择套餐</option>
                                     {% for sku in skus %}
                                     <option value="{{ sku.id }}"
@@ -145,7 +260,7 @@
                                 <input type="text" class="form-control price-display"
                                        value="¥{{ row.item.rental_price }}" readonly>
                             </div>
-                            {% if mode != 'view' %}
+                            {% if mode != 'view' and not source_reservation %}
                             <div class="form-group">
                                 <label>&nbsp;</label>
                                 <button type="button" class="btn btn-danger btn-remove-item">删除</button>
@@ -159,18 +274,22 @@
                     <div class="form-row">
                         <div class="form-group flex-2">
                             <label>SKU套餐</label>
-                            <select class="form-control sku-select" name="sku_id[]" required>
+                            <select class="form-control sku-select" name="sku_id[]" {% if not source_reservation %}required{% endif %} {% if source_reservation %}disabled{% endif %}>
                                 <option value="">请选择套餐</option>
                                 {% for sku in skus %}
                                 <option value="{{ sku.id }}"
                                         data-name="{{ sku.name }}"
                                         data-stock="{{ sku.effective_stock }}"
                                         data-price="{{ sku.rental_price }}"
-                                        data-deposit="{{ sku.deposit }}">
+                                        data-deposit="{{ sku.deposit }}"
+                                        {% if source_reservation and sku.id == source_reservation.sku_id %}selected{% endif %}>
                                     {{ sku.name }} - ¥{{ sku.rental_price }} (库存: {{ sku.effective_stock }})
                                 </option>
                                 {% endfor %}
                             </select>
+                            {% if source_reservation %}
+                            <input type="hidden" name="sku_id[]" value="{{ source_reservation.sku_id }}">
+                            {% endif %}
                         </div>
                         <div class="form-group flex-2">
                             <label>转寄来源单（可选）</label>
@@ -181,22 +300,24 @@
                         </div>
                         <div class="form-group">
                             <label>数量</label>
-                            <input type="number" class="form-control quantity-input" name="quantity[]" value="1" min="1" required>
+                            <input type="number" class="form-control quantity-input" name="quantity[]" value="{% if source_reservation %}{{ source_reservation.quantity }}{% else %}1{% endif %}" min="1" required {% if source_reservation %}readonly{% endif %}>
                         </div>
                         <div class="form-group">
                             <label>租金</label>
                             <input type="text" class="form-control price-display" value="¥0.00" readonly>
                         </div>
+                        {% if not source_reservation %}
                         <div class="form-group">
                             <label>&nbsp;</label>
                             <button type="button" class="btn btn-danger btn-remove-item">删除</button>
                         </div>
+                        {% endif %}
                     </div>
                 </div>
                 {% endif %}
             </div>
 
-            {% if mode != 'view' %}
+            {% if mode != 'view' and not source_reservation %}
             <button type="button" class="btn btn-secondary" id="addItemBtn">添加明细</button>
             {% endif %}
         </div>
@@ -212,7 +333,7 @@
                 <div class="form-group">
                     <label>押金金额</label>
                     <input type="text" id="deposit_amount" class="form-control" readonly
-                           value="{% if order %}¥{{ order.deposit_paid }}{% else %}¥0.00{% endif %}">
+                           value="{% if order %}¥{{ order.deposit_paid }}{% elif source_reservation %}¥{{ source_reservation.deposit_amount }}{% else %}¥0.00{% endif %}">
                 </div>
             </div>
 
@@ -336,7 +457,47 @@ window.parseReceiverInline = function(e) {
 <script>
 // SKU选择和价格计算
 document.addEventListener('DOMContentLoaded', function() {
+    const orderSourceInput = document.getElementById('order_source');
+    const sourceOrderNoInput = document.getElementById('source_order_no');
+    const xianyuOrderNoInput = document.getElementById('xianyu_order_no');
+    const returnServiceTypeInput = document.getElementById('return_service_type');
+    const returnServiceFeeInput = document.getElementById('return_service_fee');
+    const returnServicePaymentStatusInput = document.getElementById('return_service_payment_status');
+    const returnPickupStatusInput = document.getElementById('return_pickup_status');
     const orderItems = document.getElementById('orderItems');
+
+    function syncLegacyPlatformFields() {
+        if (!xianyuOrderNoInput || !sourceOrderNoInput || !orderSourceInput) return;
+        xianyuOrderNoInput.value = orderSourceInput.value === 'xianyu' ? (sourceOrderNoInput.value || '').trim() : '';
+    }
+
+    function syncReturnServiceDefaults() {
+        if (!returnServiceTypeInput || !returnServiceFeeInput || !returnPickupStatusInput) return;
+        if (returnServiceTypeInput.value === 'platform_return_included') {
+            if (!String(returnServiceFeeInput.value || '').trim() || Number(returnServiceFeeInput.value) === 0) {
+                returnServiceFeeInput.value = '45.00';
+            }
+            if (returnPickupStatusInput.value === 'not_required') {
+                returnPickupStatusInput.value = 'pending_schedule';
+            }
+            return;
+        }
+        if (returnServiceTypeInput.value === 'customer_self_return') {
+            returnPickupStatusInput.value = 'not_required';
+            return;
+        }
+        returnServiceFeeInput.value = '0.00';
+        if (returnServicePaymentStatusInput) {
+            returnServicePaymentStatusInput.value = 'unpaid';
+        }
+        returnPickupStatusInput.value = 'not_required';
+    }
+
+    orderSourceInput?.addEventListener('change', syncLegacyPlatformFields);
+    sourceOrderNoInput?.addEventListener('input', syncLegacyPlatformFields);
+    returnServiceTypeInput?.addEventListener('change', syncReturnServiceDefaults);
+    syncLegacyPlatformFields();
+    syncReturnServiceDefaults();
 
     // 添加明细行
     document.getElementById('addItemBtn')?.addEventListener('click', function() {

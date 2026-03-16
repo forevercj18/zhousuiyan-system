@@ -1,0 +1,358 @@
+{% extends "base.html" %}
+{% load permission_tags %}
+
+{% block title %}预定管理 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}预定管理{% endblock %}
+
+{% block content %}
+<div class="row g-2 mb-3">
+  <div class="col-md-3">
+    <a class="card text-decoration-none h-100 {% if status_filter == 'pending_info' %}border-warning{% endif %}" href="{% url 'reservations_list' %}?status=pending_info">
+      <div class="card-body">
+        <div class="text-muted small">待补信息</div>
+        <div class="h4 mb-0">{{ status_summary.pending_info }}</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-md-3">
+    <a class="card text-decoration-none h-100 {% if status_filter == 'ready_to_convert' %}border-primary{% endif %}" href="{% url 'reservations_list' %}?status=ready_to_convert">
+      <div class="card-body">
+        <div class="text-muted small">待转正式订单</div>
+        <div class="h4 mb-0">{{ status_summary.ready_to_convert }}</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-md-3">
+    <a class="card text-decoration-none h-100 {% if status_filter == 'converted' %}border-success{% endif %}" href="{% url 'reservations_list' %}?status=converted">
+      <div class="card-body">
+        <div class="text-muted small">已转订单</div>
+        <div class="h4 mb-0">{{ status_summary.converted }}</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-md-3">
+    <a class="card text-decoration-none h-100 {% if status_filter == 'cancelled' %}border-secondary{% endif %}" href="{% url 'reservations_list' %}?status=cancelled">
+      <div class="card-body">
+        <div class="text-muted small">已取消</div>
+        <div class="h4 mb-0">{{ status_summary.cancelled }}</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-md-3">
+    <a class="card text-decoration-none h-100 {% if journey_filter == 'awaiting_shipment' %}border-primary{% endif %}" href="{% url 'reservations_list' %}?journey=awaiting_shipment">
+      <div class="card-body">
+        <div class="text-muted small">转单待发货</div>
+        <div class="h4 mb-0">{{ status_summary.awaiting_shipment }}</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-md-3">
+    <a class="card text-decoration-none h-100 {% if journey_filter == 'awaiting_shipment_overdue' %}border-danger{% endif %}" href="{% url 'reservations_list' %}?journey=awaiting_shipment_overdue">
+      <div class="card-body">
+        <div class="text-muted small">待发货超时</div>
+        <div class="h4 mb-0">{{ status_summary.awaiting_shipment_overdue }}</div>
+      </div>
+    </a>
+  </div>
+  <div class="col-md-3">
+    <a class="card text-decoration-none h-100 {% if journey_filter == 'balance_due' %}border-info{% endif %}" href="{% url 'reservations_list' %}?journey=balance_due">
+      <div class="card-body">
+        <div class="text-muted small">待收尾款</div>
+        <div class="h4 mb-0">{{ status_summary.balance_due }}</div>
+      </div>
+    </a>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body">
+    <form class="row g-2 align-items-end" method="get">
+      <div class="col-md-2">
+        <label class="form-label">状态</label>
+        <select class="form-select" name="status">
+          <option value="">全部状态</option>
+          {% for value, label in status_choices %}
+          <option value="{{ value }}" {% if status_filter == value %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">联系状态</label>
+        <select class="form-select" name="contact">
+          <option value="">全部</option>
+          <option value="today" {% if contact_filter == 'today' %}selected{% endif %}>今日需联系</option>
+          <option value="overdue" {% if contact_filter == 'overdue' %}selected{% endif %}>已逾期未联系</option>
+          <option value="pending" {% if contact_filter == 'pending' %}selected{% endif %}>未到联系日</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">履约跟进</label>
+        <select class="form-select" name="journey">
+          <option value="">全部</option>
+          <option value="awaiting_shipment" {% if journey_filter == 'awaiting_shipment' %}selected{% endif %}>转单待发货</option>
+          <option value="awaiting_shipment_overdue" {% if journey_filter == 'awaiting_shipment_overdue' %}selected{% endif %}>待发货超时</option>
+          <option value="balance_due" {% if journey_filter == 'balance_due' %}selected{% endif %}>待收尾款</option>
+          <option value="in_fulfillment" {% if journey_filter == 'in_fulfillment' %}selected{% endif %}>已发货履约中</option>
+          <option value="completed" {% if journey_filter == 'completed' %}selected{% endif %}>已履约完成</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">关键词</label>
+        <input class="form-control" type="text" name="keyword" value="{{ keyword }}" placeholder="预定单号/微信/姓名/电话/款式">
+      </div>
+      {% if owner_choices %}
+      <div class="col-md-2">
+        <label class="form-label">负责人</label>
+        <select class="form-select" name="owner">
+          <option value="">全部负责人</option>
+          {% for owner in owner_choices %}
+          <option value="{{ owner.id }}" {% if owner_filter == owner.id|stringformat:'s' %}selected{% endif %}>{{ owner.get_full_name|default:owner.username }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% endif %}
+      <div class="col-md-12 d-flex gap-2 flex-wrap">
+        <button class="btn btn-primary" type="submit">查询</button>
+        <a class="btn btn-secondary" href="{% url 'reservations_list' %}">重置</a>
+        {% if request.user|has_module_perm:'reservations:create' %}
+        <a class="btn btn-success" href="{% url 'reservation_create' %}">新建预定单</a>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+</div>
+
+{% if request.user|has_module_perm:'reservations:update' %}
+<div class="card mb-3">
+  <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-3">
+    <div class="text-muted">已选择 <strong id="selectedReservationsCount">0</strong> 条预定单</div>
+    <div class="d-flex gap-2 flex-wrap">
+      <button class="btn btn-outline-secondary" type="button" onclick="bulkUpdateReservationsStatus('pending_info')">批量标记待补信息</button>
+      <button class="btn btn-primary" type="button" onclick="bulkUpdateReservationsStatus('ready_to_convert')">批量标记可转正式订单</button>
+      {% if request.user.role == 'admin' or request.user.role == 'manager' %}
+      <select class="form-select" id="bulkOwnerSelect" style="min-width: 180px;">
+        <option value="">选择新负责人</option>
+        {% for owner in owner_choices %}
+        <option value="{{ owner.id }}">{{ owner.get_full_name|default:owner.username }}</option>
+        {% endfor %}
+      </select>
+      <button class="btn btn-outline-dark" type="button" onclick="bulkTransferReservationOwner()">批量转交负责人</button>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th style="width: 44px;"><input class="form-check-input" type="checkbox" id="selectAllReservations"></th>
+          <th>预定单号</th>
+          <th>微信号</th>
+          <th>客户</th>
+          <th>负责人</th>
+          <th>款式</th>
+          <th>预定日期</th>
+          <th>应联系日期</th>
+          <th>联系状态</th>
+          <th>数量</th>
+          <th>订金</th>
+          <th>状态</th>
+          <th>正式订单</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for reservation in reservations %}
+        <tr>
+          <td><input class="form-check-input reservation-checkbox" type="checkbox" value="{{ reservation.id }}"></td>
+          <td>
+            <div>{{ reservation.reservation_no }}</div>
+            <small class="text-muted">{{ reservation.created_at|date:"Y-m-d H:i" }}</small>
+          </td>
+          <td>{{ reservation.customer_wechat }}</td>
+          <td>
+            <div>{{ reservation.customer_name|default:"-" }}</div>
+            <small class="text-muted">{{ reservation.customer_phone|default:reservation.city|default:"-" }}</small>
+          </td>
+          <td>{{ reservation.owner.get_full_name|default:reservation.owner.username|default:"-" }}</td>
+          <td>{{ reservation.sku.name }}</td>
+          <td>{{ reservation.event_date|date:"Y-m-d" }}</td>
+          <td>{{ reservation.followup_date|date:"Y-m-d" }}</td>
+          <td>
+            <span class="badge {% if reservation.contact_status_code == 'today' %}text-bg-warning{% elif reservation.contact_status_code == 'overdue' %}text-bg-danger{% elif reservation.contact_status_code == 'converted' %}text-bg-success{% elif reservation.contact_status_code == 'closed' %}text-bg-secondary{% else %}text-bg-light border text-dark{% endif %}">
+              {{ reservation.contact_status_label }}
+            </span>
+          </td>
+          <td>{{ reservation.quantity }}</td>
+          <td>￥{{ reservation.deposit_amount }}</td>
+          <td><span class="badge text-bg-secondary">{{ reservation.get_status_display }}</span></td>
+          <td>
+            {% if reservation.converted_order %}
+            <a href="{% url 'order_detail' reservation.converted_order.id %}">{{ reservation.converted_order.order_no }}</a>
+            <div class="small mt-1 d-flex flex-column gap-1">
+              <span class="badge {% if reservation.fulfillment_stage_code == 'awaiting_shipment' %}text-bg-primary{% elif reservation.fulfillment_stage_code == 'in_fulfillment' %}text-bg-info{% elif reservation.fulfillment_stage_code == 'completed' %}text-bg-success{% elif reservation.fulfillment_stage_code == 'cancelled' %}text-bg-secondary{% else %}text-bg-light border text-dark{% endif %}">
+                {{ reservation.fulfillment_stage_label }}
+              </span>
+              {% if reservation.fulfillment_stage_code == 'awaiting_shipment' %}
+              <span class="badge {% if reservation.converted_order_shipping_followup_code == 'overdue' %}text-bg-danger{% elif reservation.converted_order_shipping_followup_code == 'missing_ship_date' %}text-bg-secondary{% else %}text-bg-light border text-dark{% endif %}">
+                {{ reservation.converted_order_shipping_followup_label }}
+              </span>
+              {% endif %}
+              {% if reservation.converted_order.balance > 0 and reservation.converted_order.status != 'cancelled' %}
+              <span class="badge text-bg-info">{{ reservation.converted_order_balance_followup_label }}</span>
+              {% endif %}
+            </div>
+            {% else %}
+            <span class="text-muted">-</span>
+            {% endif %}
+          </td>
+          <td class="d-flex gap-2 flex-wrap">
+            <a class="btn btn-sm btn-outline-secondary" href="{% url 'reservation_detail' reservation.id %}">查看</a>
+            {% if request.user|has_module_perm:'reservations:update' %}
+            <a class="btn btn-sm btn-outline-primary" href="{% url 'reservation_edit' reservation.id %}">编辑</a>
+            {% endif %}
+            {% if reservation.can_convert and request.user|has_module_perm:'orders:create' %}
+            <a class="btn btn-sm btn-primary" href="{% url 'order_create' %}?reservation_id={{ reservation.id }}">转正式订单</a>
+            {% endif %}
+            {% if reservation.status != 'converted' and reservation.status != 'refunded' and request.user|has_module_perm:'reservations:update' %}
+            <form method="post" action="{% url 'reservation_cancel' reservation.id %}" class="d-inline">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-sm btn-outline-secondary">取消</button>
+            </form>
+            {% endif %}
+            {% if reservation.deposit_amount > 0 and reservation.status != 'converted' and reservation.status != 'refunded' and request.user|has_module_perm:'reservations:update' %}
+            <form method="post" action="{% url 'reservation_refund' reservation.id %}" class="d-inline">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-sm btn-outline-danger">退款</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="14" class="text-center">暂无预定单</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if reservations_page.paginator.num_pages > 1 %}
+  <div class="card-body d-flex justify-content-end gap-2">
+    {% if reservations_page.has_previous %}
+    <a class="btn btn-sm btn-outline-secondary" href="?{{ pagination_query }}&page={{ reservations_page.previous_page_number }}">上一页</a>
+    {% endif %}
+    <span class="btn btn-sm btn-light disabled">{{ reservations_page.number }}/{{ reservations_page.paginator.num_pages }}</span>
+    {% if reservations_page.has_next %}
+    <a class="btn btn-sm btn-outline-secondary" href="?{{ pagination_query }}&page={{ reservations_page.next_page_number }}">下一页</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+<script>
+function getSelectedReservations() {
+  return Array.from(document.querySelectorAll('.reservation-checkbox:checked'));
+}
+
+function updateReservationSelectionCount() {
+  const countNode = document.getElementById('selectedReservationsCount');
+  if (countNode) countNode.textContent = String(getSelectedReservations().length);
+}
+
+function submitPost(url, fields) {
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = url;
+  const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
+  if (csrfToken) {
+    const tokenInput = document.createElement('input');
+    tokenInput.type = 'hidden';
+    tokenInput.name = 'csrfmiddlewaretoken';
+    tokenInput.value = csrfToken.value;
+    form.appendChild(tokenInput);
+  }
+  Object.entries(fields).forEach(([name, value]) => {
+    if (Array.isArray(value)) {
+      value.forEach((item) => {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = name;
+        input.value = item;
+        form.appendChild(input);
+      });
+      return;
+    }
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = name;
+    input.value = value;
+    form.appendChild(input);
+  });
+  document.body.appendChild(form);
+  form.submit();
+}
+
+async function bulkUpdateReservationsStatus(status) {
+  const selected = getSelectedReservations().map((el) => el.value);
+  if (!selected.length) {
+    if (window.AppUI) await window.AppUI.alert('请先勾选要跟进的预定单');
+    else alert('请先勾选要跟进的预定单');
+    return;
+  }
+  const label = status === 'ready_to_convert' ? '可转正式订单' : '待补信息';
+  const ok = window.AppUI
+    ? await window.AppUI.confirm(`确认将所选 ${selected.length} 条预定单批量标记为“${label}”？`, '批量跟进确认')
+    : confirm(`确认将所选 ${selected.length} 条预定单批量标记为“${label}”？`);
+  if (!ok) return;
+  submitPost('{% url "reservations_bulk_update_status" %}', { 'ids[]': selected, status });
+}
+
+async function bulkTransferReservationOwner() {
+  const selected = getSelectedReservations().map((el) => el.value);
+  if (!selected.length) {
+    if (window.AppUI) await window.AppUI.alert('请先勾选要转交的预定单');
+    else alert('请先勾选要转交的预定单');
+    return;
+  }
+  const ownerSelect = document.getElementById('bulkOwnerSelect');
+  const ownerId = ownerSelect ? ownerSelect.value : '';
+  if (!ownerId) {
+    if (window.AppUI) await window.AppUI.alert('请先选择新的负责人');
+    else alert('请先选择新的负责人');
+    return;
+  }
+  const ownerLabel = ownerSelect.options[ownerSelect.selectedIndex].text;
+  const ok = window.AppUI
+    ? await window.AppUI.confirm(`确认将所选 ${selected.length} 条预定单转交给“${ownerLabel}”？`, '批量转交确认')
+    : confirm(`确认将所选 ${selected.length} 条预定单转交给“${ownerLabel}”？`);
+  if (!ok) return;
+  submitPost('{% url "reservations_bulk_transfer_owner" %}', {
+    'ids[]': selected,
+    'owner_id': ownerId,
+    transfer_reason: '管理端批量转交',
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  const selectAll = document.getElementById('selectAllReservations');
+  const checkboxes = Array.from(document.querySelectorAll('.reservation-checkbox'));
+  if (selectAll) {
+    selectAll.addEventListener('change', function () {
+      checkboxes.forEach((item) => { item.checked = selectAll.checked; });
+      updateReservationSelectionCount();
+    });
+  }
+  checkboxes.forEach((item) => {
+    item.addEventListener('change', function () {
+      if (!item.checked && selectAll) selectAll.checked = false;
+      if (selectAll && checkboxes.length && checkboxes.every((node) => node.checked)) {
+        selectAll.checked = true;
+      }
+      updateReservationSelectionCount();
+    });
+  });
+  updateReservationSelectionCount();
+});
+</script>
+{% endblock %}

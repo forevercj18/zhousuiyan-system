@@ -349,8 +349,17 @@
             </div>
             <div class="filter-group">
                 <label>关键词：</label>
-                <input id="keywordInput" type="text" class="form-control" placeholder="订单号/客户/电话/微信号/闲鱼单号"
+                <input id="keywordInput" type="text" class="form-control" placeholder="订单号/客户/电话/微信号/平台单号/包回邮参考号"
                        value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterOrders();}">
+            </div>
+            <div class="filter-group">
+                <label>来源平台：</label>
+                <select id="sourceFilter" class="form-select" onchange="filterOrders()">
+                    <option value="">全部</option>
+                    {% for value, label in order_source_choices %}
+                    <option value="{{ value }}" {% if source_filter == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
             </div>
             <div class="filter-group">
                 <label>发货时效：</label>
@@ -361,6 +370,33 @@
                     <option value="normal" {% if sla_filter == 'normal' %}selected{% endif %}>正常时效</option>
                     <option value="shipped" {% if sla_filter == 'shipped' %}selected{% endif %}>已发货</option>
                     <option value="unknown" {% if sla_filter == 'unknown' %}selected{% endif %}>待补发货日期</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>包回邮：</label>
+                <select id="returnServiceFilter" class="form-select" onchange="filterOrders()">
+                    <option value="">全部</option>
+                    {% for value, label in return_service_type_choices %}
+                    <option value="{{ value }}" {% if return_service_filter == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>回邮收款：</label>
+                <select id="returnPaymentFilter" class="form-select" onchange="filterOrders()">
+                    <option value="">全部</option>
+                    {% for value, label in return_service_payment_status_choices %}
+                    <option value="{{ value }}" {% if return_payment_filter == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>取件状态：</label>
+                <select id="pickupFilter" class="form-select" onchange="filterOrders()">
+                    <option value="">全部</option>
+                    {% for value, label in return_pickup_status_choices %}
+                    <option value="{{ value }}" {% if pickup_filter == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
                 </select>
             </div>
             <button class="btn btn-secondary" type="button" onclick="filterOrders()">查询</button>
@@ -421,6 +457,7 @@
                     </td>
                     <td>
                         <div class="single-value bold">{{ order.order_no }}</div>
+                        <div class="cell-sub">{{ order.order_source_label }}{% if order.source_order_no %} · {{ order.source_order_no }}{% endif %}</div>
                     </td>
                     <td>
                         {% if order.status == 'pending' %}
@@ -460,6 +497,7 @@
                     </td>
                     <td>
                         <div class="single-value bold">{{ order.customer_name }}</div>
+                        <div class="cell-sub">{% if order.customer_wechat %}微信：{{ order.customer_wechat }}{% else %}微信：-{% endif %}</div>
                     </td>
                     <td>
                         <div class="single-value muted nowrap">{{ order.customer_phone }}</div>
@@ -487,6 +525,18 @@
                     </td>
                     <td>
                         <div class="single-value money">￥{{ order.total_amount }}</div>
+                        <div class="cell-sub">
+                            {% if order.return_service_type == 'platform_return_included' %}
+                            包回邮￥{{ order.return_service_fee }} · {{ order.return_service_payment_status_label }}
+                            {% elif order.return_service_type == 'customer_self_return' %}
+                            客户自寄回
+                            {% else %}
+                            无包回邮
+                            {% endif %}
+                        </div>
+                        {% if order.return_service_payment_reference %}
+                        <div class="cell-sub">参考号：{{ order.return_service_payment_reference }}</div>
+                        {% endif %}
                     </td>
                 </tr>
                 {% empty %}
@@ -553,10 +603,18 @@ function filterOrders() {
     const status = document.getElementById('statusFilter').value;
     const keyword = (document.getElementById('keywordInput')?.value || '').trim();
     const sla = document.getElementById('slaFilter')?.value || '';
+    const source = document.getElementById('sourceFilter')?.value || '';
+    const returnService = document.getElementById('returnServiceFilter')?.value || '';
+    const returnPayment = document.getElementById('returnPaymentFilter')?.value || '';
+    const pickup = document.getElementById('pickupFilter')?.value || '';
     const params = new URLSearchParams();
     if (status) params.set('status', status);
     if (keyword) params.set('keyword', keyword);
     if (sla) params.set('sla', sla);
+    if (source) params.set('source', source);
+    if (returnService) params.set('return_service', returnService);
+    if (returnPayment) params.set('return_payment', returnPayment);
+    if (pickup) params.set('pickup', pickup);
     const q = params.toString();
     window.location.href = '{% url "orders_list" %}' + (q ? ('?' + q) : '');
 }

@@ -15,11 +15,11 @@ ROLE_PERMISSIONS = {
         'actions': ['*'],  # 所有操作
     },
     'manager': {
-        'modules': ['dashboard', 'orders', 'calendar', 'transfers', 'outbound_inventory', 'audit_logs', 'risk_events', 'approvals', 'finance', 'ops_center'],
+        'modules': ['dashboard', 'orders', 'reservations', 'calendar', 'transfers', 'outbound_inventory', 'audit_logs', 'risk_events', 'approvals', 'finance', 'ops_center'],
         'actions': ['view', 'create', 'update'],
     },
     'warehouse_manager': {
-        'modules': ['workbench', 'orders', 'skus', 'procurement', 'parts', 'transfers', 'outbound_inventory', 'audit_logs', 'risk_events', 'approvals', 'finance', 'ops_center'],
+        'modules': ['workbench', 'orders', 'reservations', 'skus', 'procurement', 'parts', 'transfers', 'outbound_inventory', 'audit_logs', 'risk_events', 'approvals', 'finance', 'ops_center'],
         'actions': ['view', 'create', 'update', 'delete'],
     },
     'warehouse_staff': {
@@ -27,7 +27,7 @@ ROLE_PERMISSIONS = {
         'actions': ['view', 'update'],
     },
     'customer_service': {
-        'modules': ['orders', 'calendar'],
+        'modules': ['orders', 'reservations', 'calendar'],
         'actions': ['view', 'create', 'update'],
     },
 }
@@ -79,6 +79,7 @@ PERMISSION_MODULE_LABELS = {
     'dashboard': '工作台',
     'workbench': '业务工作台',
     'orders': '订单中心',
+    'reservations': '预定管理',
     'calendar': '日历排期',
     'transfers': '转寄中心',
     'outbound_inventory': '在外库存看板',
@@ -374,6 +375,7 @@ def get_user_menu(user):
             'children': [
                 {'name': 'orders', 'title': '订单列表', 'url': 'orders_list'},
                 {'name': 'orders', 'title': '新建订单', 'url': 'order_create'},
+                {'name': 'reservations', 'title': '预定管理', 'url': 'reservations_list'},
             ]
         },
         {'name': 'calendar', 'title': '排期看板', 'url': 'calendar', 'icon': '📅'},

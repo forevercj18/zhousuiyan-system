@@ -48,6 +48,12 @@
                                value="{{ settings.return_offset_days|default:'1' }}" min="0" required>
                         <small class="form-text">预定日期后追加的回收偏移天数，用于库存释放</small>
                     </div>
+                    <div class="form-group">
+                        <label for="reservation_followup_lead_days">预定单提前联系天数</label>
+                        <input type="number" id="reservation_followup_lead_days" name="reservation_followup_lead_days" class="form-control"
+                               value="{{ settings.reservation_followup_lead_days|default:'7' }}" min="0" required>
+                        <small class="form-text">距离预定日期还有多少天时，提醒客服联系客户确认细节并转正式订单</small>
+                    </div>
                 </div>
             </div>
 

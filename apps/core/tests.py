@@ -43,7 +43,9 @@ from .models import (
     UnitDisposalOrderItem,
     PartRecoveryInspection,
     PermissionTemplate,
+    Reservation,
 )
+from .services import AuditService
 from .services import OrderService, PartsService, ProcurementService
 from .utils import (
     get_transfer_match_candidates,
@@ -118,6 +120,46 @@ class CoreServicesTestCase(TestCase):
         self.assertEqual(order.items.count(), 1)
         self.assertEqual(order.total_amount, Decimal('100.00'))
         self.assertTrue(AuditLog.objects.filter(target=order.order_no, action='create').exists())
+
+    def test_create_order_should_record_return_service_fields_and_finance(self):
+        event_date = date.today() + timedelta(days=7)
+        order = OrderService.create_order(
+            data={
+                'customer_name': '包回邮客户',
+                'customer_phone': '13800009999',
+                'customer_wechat': 'wx_return_service',
+                'order_source': 'xiaohongshu',
+                'source_order_no': 'xh-order-1001',
+                'delivery_address': '测试地址-包回邮',
+                'event_date': event_date,
+                'rental_days': 1,
+                'return_service_type': 'platform_return_included',
+                'return_service_fee': '45.00',
+                'return_service_payment_status': 'paid',
+                'return_service_payment_channel': 'xiaohongshu',
+                'return_service_payment_reference': 'xh-pay-001',
+                'return_pickup_status': 'pending_schedule',
+                'items': [{'sku_id': self.sku.id, 'quantity': 1}],
+            },
+            user=self.user,
+        )
+
+        self.assertEqual(order.order_source, 'xiaohongshu')
+        self.assertEqual(order.source_order_no, 'xh-order-1001')
+        self.assertEqual(order.return_service_type, 'platform_return_included')
+        self.assertEqual(order.return_service_fee, Decimal('45.00'))
+        self.assertEqual(order.return_service_payment_status, 'paid')
+        self.assertEqual(order.return_service_payment_channel, 'xiaohongshu')
+        self.assertEqual(order.return_service_payment_reference, 'xh-pay-001')
+        self.assertEqual(order.return_pickup_status, 'pending_schedule')
+        self.assertTrue(
+            FinanceTransaction.objects.filter(
+                order=order,
+                transaction_type='return_service_received',
+                amount=Decimal('45.00'),
+                reference_no='xh-pay-001',
+            ).exists()
+        )
 
     def test_confirm_order_should_create_deposit_finance_transaction(self):
         order = Order.objects.create(
@@ -1222,10 +1264,65 @@ class CoreServicesTestCase(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.customer_wechat, 'after_wechat')
         self.assertEqual(order.xianyu_order_no, 'xy-after')
+        self.assertEqual(order.return_service_payment_status, 'unpaid')
         self.assertTrue(
             TransferAllocation.objects.filter(
                 id=first_alloc.id,
                 status='released'
+            ).exists()
+        )
+
+    def test_update_order_should_create_return_service_refund_transaction(self):
+        order = OrderService.create_order(
+            data={
+                'customer_name': '服务费编辑前',
+                'customer_phone': '13600008888',
+                'customer_wechat': 'edit-return-service',
+                'delivery_address': '杭州市西湖区测试路1号',
+                'event_date': date.today() + timedelta(days=8),
+                'rental_days': 1,
+                'order_source': 'wechat',
+                'return_service_type': 'platform_return_included',
+                'return_service_fee': '45.00',
+                'return_service_payment_status': 'paid',
+                'return_service_payment_channel': 'wechat',
+                'return_service_payment_reference': 'wx-in-001',
+                'return_pickup_status': 'pending_schedule',
+                'items': [{'sku_id': self.sku.id, 'quantity': 1}],
+            },
+            user=self.user,
+        )
+
+        OrderService.update_order(
+            order.id,
+            {
+                'customer_name': '服务费编辑后',
+                'customer_phone': '13600008888',
+                'customer_wechat': 'edit-return-service',
+                'delivery_address': '杭州市西湖区测试路1号',
+                'event_date': date.today() + timedelta(days=8),
+                'rental_days': 1,
+                'order_source': 'wechat',
+                'return_service_type': 'platform_return_included',
+                'return_service_fee': '45.00',
+                'return_service_payment_status': 'refunded',
+                'return_service_payment_channel': 'wechat',
+                'return_service_payment_reference': 'wx-out-001',
+                'return_pickup_status': 'cancelled',
+                'items': [{'sku_id': self.sku.id, 'quantity': 1}],
+            },
+            self.user,
+        )
+
+        order.refresh_from_db()
+        self.assertEqual(order.return_service_payment_status, 'refunded')
+        self.assertEqual(order.return_pickup_status, 'cancelled')
+        self.assertTrue(
+            FinanceTransaction.objects.filter(
+                order=order,
+                transaction_type='return_service_refund',
+                amount=Decimal('45.00'),
+                reference_no='wx-out-001',
             ).exists()
         )
 
@@ -1421,6 +1518,64 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(txs[0].transaction_type, 'deposit_received')
         self.assertEqual(resp.context['expected_deposit_total'], Decimal('80.00'))
 
+    def test_order_detail_should_render_return_service_update_form_for_delivered_order(self):
+        order = Order.objects.create(
+            customer_name='回邮详情客户',
+            customer_phone='13500008888',
+            delivery_address='回邮详情地址',
+            event_date=date.today() + timedelta(days=5),
+            ship_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+
+        resp = self.client.get(reverse('order_detail', kwargs={'order_id': order.id}))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '保存包回邮服务')
+        self.assertContains(resp, '支持订单已发货后补录包回邮服务，系统会按收款状态自动生成包回邮服务费收入/退款流水。')
+
+    def test_order_return_service_update_should_support_post_delivery_purchase(self):
+        order = Order.objects.create(
+            customer_name='补买包回邮客户',
+            customer_phone='13500007777',
+            delivery_address='补买包回邮地址',
+            event_date=date.today() + timedelta(days=4),
+            ship_date=date.today(),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+
+        resp = self.client.post(
+            reverse('order_return_service_update', kwargs={'order_id': order.id}),
+            {
+                'return_service_type': 'platform_return_included',
+                'return_service_fee': '45.00',
+                'return_service_payment_status': 'paid',
+                'return_service_payment_channel': 'wechat',
+                'return_service_payment_reference': 'wx-after-delivery-001',
+                'return_pickup_status': 'pending_schedule',
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.return_service_type, 'platform_return_included')
+        self.assertEqual(order.return_service_fee, Decimal('45.00'))
+        self.assertEqual(order.return_service_payment_status, 'paid')
+        self.assertEqual(order.return_service_payment_channel, 'wechat')
+        self.assertEqual(order.return_service_payment_reference, 'wx-after-delivery-001')
+        self.assertEqual(order.return_pickup_status, 'pending_schedule')
+        self.assertTrue(
+            FinanceTransaction.objects.filter(
+                order=order,
+                transaction_type='return_service_received',
+                amount=Decimal('45.00'),
+                reference_no='wx-after-delivery-001',
+            ).exists()
+        )
+
     def test_orders_list_should_use_configured_default_page_size(self):
         SystemSettings.objects.update_or_create(key='page_size_default', defaults={'value': '2'})
         for idx in range(3):
@@ -1551,6 +1706,211 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertTrue(rows)
         self.assertTrue(all(r.shipping_timeliness_code == 'overdue' for r in rows))
 
+    def test_reservation_create_should_record_finance_and_audit(self):
+        resp = self.client.post(reverse('reservation_create'), {
+            'customer_wechat': 'wx_rsv_001',
+            'customer_name': '预定客户',
+            'customer_phone': '',
+            'city': '上海',
+            'sku_id': str(self.sku.id),
+            'quantity': '1',
+            'event_date': (timezone.localdate() + timedelta(days=10)).strftime('%Y-%m-%d'),
+            'deposit_amount': '50.00',
+            'status': 'pending_info',
+            'notes': '先收50订金',
+        })
+        self.assertEqual(resp.status_code, 302)
+        reservation = Reservation.objects.get(customer_wechat='wx_rsv_001')
+        self.assertEqual(reservation.deposit_amount, Decimal('50.00'))
+        self.assertEqual(reservation.owner_id, self.user.id)
+        self.assertTrue(
+            FinanceTransaction.objects.filter(
+                reservation=reservation,
+                transaction_type='reservation_deposit_received',
+                amount=Decimal('50.00'),
+            ).exists()
+        )
+        self.assertTrue(AuditLog.objects.filter(module='预定单', target=reservation.reservation_no, action='create').exists())
+
+    def test_reservation_refund_should_zero_out_deposit_and_create_finance_record(self):
+        reservation = Reservation.objects.create(
+            customer_wechat='wx_refund_001',
+            customer_name='退款客户',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=8),
+            deposit_amount=Decimal('50.00'),
+            status='pending_info',
+            created_by=self.user,
+        )
+        resp = self.client.post(reverse('reservation_refund', kwargs={'reservation_id': reservation.id}), {'reason': '客户取消'})
+        self.assertEqual(resp.status_code, 302)
+        reservation.refresh_from_db()
+        self.assertEqual(reservation.status, 'refunded')
+        self.assertEqual(reservation.deposit_amount, Decimal('0.00'))
+        self.assertTrue(
+            FinanceTransaction.objects.filter(
+                reservation=reservation,
+                transaction_type='reservation_deposit_refund',
+                amount=Decimal('50.00'),
+            ).exists()
+        )
+
+    def test_convert_reservation_to_order_should_apply_deposit_and_mark_converted(self):
+        reservation = Reservation.objects.create(
+            customer_wechat='wx_convert_001',
+            customer_name='转单客户',
+            customer_phone='13800138000',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=9),
+            deposit_amount=Decimal('50.00'),
+            status='ready_to_convert',
+            created_by=self.user,
+        )
+        resp = self.client.post(reverse('order_create'), {
+            'reservation_id': str(reservation.id),
+            'customer_name': reservation.customer_name,
+            'customer_phone': reservation.customer_phone,
+            'customer_wechat': reservation.customer_wechat,
+            'xianyu_order_no': '',
+            'customer_email': '',
+            'delivery_address': '上海市浦东新区测试路1号',
+            'return_address': '',
+            'event_date': reservation.event_date.strftime('%Y-%m-%d'),
+            'rental_days': '1',
+            'notes': '由预定单转入',
+            'sku_id[]': str(self.sku.id),
+            'quantity[]': '1',
+            'transfer_source_order_id[]': '',
+        })
+        self.assertEqual(resp.status_code, 302)
+        reservation.refresh_from_db()
+        self.assertEqual(reservation.status, 'converted')
+        self.assertIsNotNone(reservation.converted_order_id)
+        order = reservation.converted_order
+        self.assertEqual(order.deposit_paid, Decimal('50.00'))
+        self.assertTrue(
+            FinanceTransaction.objects.filter(
+                order=order,
+                transaction_type='reservation_deposit_applied',
+                amount=Decimal('50.00'),
+                reference_no=reservation.reservation_no,
+            ).exists()
+        )
+
+    def test_finance_transactions_list_should_render_reservation_records(self):
+        reservation = Reservation.objects.create(
+            customer_wechat='wx_fin_001',
+            customer_name='财务预定客户',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=5),
+            deposit_amount=Decimal('50.00'),
+            status='pending_info',
+            created_by=self.user,
+        )
+        FinanceTransaction.objects.create(
+            reservation=reservation,
+            transaction_type='reservation_deposit_received',
+            amount=Decimal('50.00'),
+            created_by=self.user,
+        )
+        resp = self.client.get(reverse('finance_transactions_list'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, reservation.reservation_no)
+        self.assertContains(resp, '收预定订金')
+
+    def test_finance_transactions_list_should_support_return_service_keyword_search(self):
+        order = Order.objects.create(
+            customer_name='包回邮财务客户',
+            customer_phone='18800009999',
+            delivery_address='深圳市南山区科技园',
+            event_date=date.today() + timedelta(days=5),
+            rental_days=1,
+            order_source='xiaohongshu',
+            source_order_no='xh-order-search-001',
+            return_service_type='platform_return_included',
+            return_service_fee=Decimal('45.00'),
+            return_service_payment_status='paid',
+            return_service_payment_channel='xiaohongshu',
+            return_service_payment_reference='xh-ref-001',
+            return_pickup_status='pending_schedule',
+            created_by=self.user,
+        )
+        FinanceTransaction.objects.create(
+            order=order,
+            transaction_type='return_service_received',
+            amount=Decimal('45.00'),
+            reference_no='xh-ref-001',
+            created_by=self.user,
+        )
+        resp = self.client.get(reverse('finance_transactions_list'), {'keyword': 'xh-ref-001'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, order.order_no)
+        self.assertContains(resp, '收包回邮服务费')
+
+    def test_reservation_detail_should_render_finance_and_audit_records(self):
+        reservation = Reservation.objects.create(
+            customer_wechat='wx_detail_001',
+            customer_name='详情客户',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=6),
+            deposit_amount=Decimal('50.00'),
+            status='ready_to_convert',
+            notes='详情页验证',
+            created_by=self.user,
+        )
+        FinanceTransaction.objects.create(
+            reservation=reservation,
+            transaction_type='reservation_deposit_received',
+            amount=Decimal('50.00'),
+            notes='详情流水',
+            created_by=self.user,
+        )
+        AuditService.log_with_diff(
+            user=self.user,
+            action='update',
+            module='预定单',
+            target=reservation.reservation_no,
+            summary='编辑预定单',
+            before={'status': 'pending_info'},
+            after={'status': 'ready_to_convert'},
+        )
+        resp = self.client.get(reverse('reservation_detail', kwargs={'reservation_id': reservation.id}))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, reservation.reservation_no)
+        self.assertContains(resp, '详情流水')
+        self.assertContains(resp, '编辑预定单')
+
+    def test_reservation_detail_should_render_conflict_summary(self):
+        target_date = timezone.localdate() + timedelta(days=10)
+        Reservation.objects.create(
+            customer_wechat='wx_conflict_001',
+            customer_name='同日预定客户',
+            sku=self.sku,
+            quantity=2,
+            event_date=target_date,
+            deposit_amount=Decimal('50.00'),
+            status='ready_to_convert',
+            created_by=self.user,
+        )
+        reservation = Reservation.objects.create(
+            customer_wechat='wx_conflict_002',
+            customer_name='当前预定客户',
+            sku=self.sku,
+            quantity=1,
+            event_date=target_date,
+            deposit_amount=Decimal('50.00'),
+            status='pending_info',
+            created_by=self.user,
+        )
+        resp = self.client.get(reverse('reservation_detail', kwargs={'reservation_id': reservation.id}))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '档期提醒')
+        self.assertContains(resp, '同款同日已有 1 张预定单')
+
     def test_dashboard_due_within_7_days_should_exclude_orders_with_tracking_no(self):
         today = timezone.localdate()
         warning_order = Order.objects.create(
@@ -1590,12 +1950,662 @@ class CoreViewsFlowTestCase(TestCase):
         due_card = next((card for card in role_dashboard['focus_cards'] if card['key'] == 'due_within_7_days_count'), None)
         self.assertIsNotNone(due_card)
         self.assertEqual(due_card['value'], 1)
-
         list_resp = self.client.get(reverse('orders_list') + '?sla=warning')
         self.assertEqual(list_resp.status_code, 200)
         rows = list(list_resp.context['orders_page'].object_list)
         self.assertTrue(any(row.id == warning_order.id for row in rows))
         self.assertFalse(any(row.id == tracked_order.id for row in rows))
+
+    def test_dashboard_should_render_ready_reservations_card(self):
+        Reservation.objects.create(
+            customer_wechat='wx_ready_001',
+            customer_name='待转客户',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=12),
+            deposit_amount=Decimal('50.00'),
+            status='ready_to_convert',
+            created_by=self.user,
+        )
+        dashboard_resp = self.client.get(reverse('dashboard'))
+        self.assertEqual(dashboard_resp.status_code, 200)
+        role_dashboard = dashboard_resp.context['role_dashboard']
+        ready_card = next((card for card in role_dashboard['focus_cards'] if card['key'] == 'ready_reservations_count'), None)
+        self.assertIsNotNone(ready_card)
+        self.assertEqual(ready_card['value'], 1)
+
+    def test_reservations_bulk_update_status_should_only_update_safe_rows(self):
+        editable = Reservation.objects.create(
+            customer_wechat='wx_bulk_001',
+            customer_name='批量客户1',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=15),
+            deposit_amount=Decimal('50.00'),
+            status='pending_info',
+            created_by=self.user,
+        )
+        converted = Reservation.objects.create(
+            customer_wechat='wx_bulk_002',
+            customer_name='批量客户2',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=16),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            created_by=self.user,
+        )
+        resp = self.client.post(reverse('reservations_bulk_update_status'), {
+            'ids[]': [str(editable.id), str(converted.id)],
+            'status': 'ready_to_convert',
+        })
+        self.assertEqual(resp.status_code, 302)
+        editable.refresh_from_db()
+        converted.refresh_from_db()
+        self.assertEqual(editable.status, 'ready_to_convert')
+        self.assertEqual(converted.status, 'converted')
+        self.assertTrue(
+            AuditLog.objects.filter(
+                module='预定单',
+                target=editable.reservation_no,
+                action='status_change',
+            ).exists()
+        )
+
+    def test_reservations_bulk_transfer_owner_should_update_owner(self):
+        new_owner = User.objects.create_user(
+            username='cs_receiver',
+            password='test123',
+            role='customer_service',
+            full_name='接手客服',
+        )
+        reservation = Reservation.objects.create(
+            customer_wechat='wx_transfer_001',
+            customer_name='转交客户',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=11),
+            deposit_amount=Decimal('50.00'),
+            status='pending_info',
+            created_by=self.user,
+            owner=self.user,
+        )
+        resp = self.client.post(reverse('reservations_bulk_transfer_owner'), {
+            'ids[]': [str(reservation.id)],
+            'owner_id': str(new_owner.id),
+            'transfer_reason': '客服请假转交',
+        })
+        self.assertEqual(resp.status_code, 302)
+        reservation.refresh_from_db()
+        self.assertEqual(reservation.owner_id, new_owner.id)
+        self.assertTrue(
+            AuditLog.objects.filter(
+                module='预定单',
+                target=reservation.reservation_no,
+                action='update',
+            ).exists()
+        )
+
+    def test_reservations_list_should_render_status_summary_cards(self):
+        Reservation.objects.create(
+            customer_wechat='wx_sum_001',
+            customer_name='汇总客户1',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=7),
+            deposit_amount=Decimal('50.00'),
+            status='pending_info',
+            created_by=self.user,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_sum_002',
+            customer_name='汇总客户2',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=8),
+            deposit_amount=Decimal('50.00'),
+            status='ready_to_convert',
+            created_by=self.user,
+        )
+        resp = self.client.get(reverse('reservations_list'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '待转正式订单')
+        self.assertEqual(resp.context['status_summary']['pending_info'], 1)
+        self.assertEqual(resp.context['status_summary']['ready_to_convert'], 1)
+
+    def test_dashboard_followup_cards_should_only_count_current_owner_for_customer_service(self):
+        service_user = User.objects.create_user(
+            username='service_followup',
+            password='test123',
+            role='customer_service',
+            permission_mode='custom',
+            custom_modules=['dashboard', 'orders', 'reservations', 'calendar'],
+            custom_actions=['view', 'create', 'update'],
+        )
+        other_service = User.objects.create_user(
+            username='service_other',
+            password='test123',
+            role='customer_service',
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_today_owner',
+            customer_name='今日联系客户',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=7),
+            deposit_amount=Decimal('50.00'),
+            status='ready_to_convert',
+            created_by=service_user,
+            owner=service_user,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_overdue_other',
+            customer_name='别人的逾期客户',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=5),
+            deposit_amount=Decimal('50.00'),
+            status='ready_to_convert',
+            created_by=other_service,
+            owner=other_service,
+        )
+        self.client.logout()
+        self.client.login(username='service_followup', password='test123')
+        resp = self.client.get(reverse('dashboard'))
+        self.assertEqual(resp.status_code, 200)
+        cards = resp.context['role_dashboard']['focus_cards']
+        today_card = next(card for card in cards if card['key'] == 'today_followup_reservations_count')
+        overdue_card = next(card for card in cards if card['key'] == 'overdue_followup_reservations_count')
+        self.assertEqual(today_card['value'], 1)
+        self.assertEqual(overdue_card['value'], 0)
+
+    def test_reservations_list_journey_filter_should_only_show_converted_pending_shipment(self):
+        pending_order = Order.objects.create(
+            customer_name='待发货来源客户',
+            customer_phone='13800000031',
+            delivery_address='上海市测试路31号',
+            event_date=timezone.localdate() + timedelta(days=8),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+        )
+        delivered_order = Order.objects.create(
+            customer_name='已发货来源客户',
+            customer_phone='13800000032',
+            delivery_address='上海市测试路32号',
+            event_date=timezone.localdate() + timedelta(days=9),
+            rental_days=1,
+            status='delivered',
+            created_by=self.user,
+        )
+        awaiting_shipment = Reservation.objects.create(
+            customer_wechat='wx_journey_001',
+            customer_name='转单待发货客户',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=8),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=pending_order,
+            created_by=self.user,
+            owner=self.user,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_journey_002',
+            customer_name='已发货履约客户',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=9),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=delivered_order,
+            created_by=self.user,
+            owner=self.user,
+        )
+        resp = self.client.get(reverse('reservations_list') + '?journey=awaiting_shipment')
+        self.assertEqual(resp.status_code, 200)
+        rows = list(resp.context['reservations_page'].object_list)
+        self.assertEqual([row.id for row in rows], [awaiting_shipment.id])
+        self.assertEqual(resp.context['status_summary']['awaiting_shipment'], 1)
+        self.assertContains(resp, '已转单待发货')
+
+    def test_dashboard_converted_pending_shipment_card_should_only_count_current_owner_for_customer_service(self):
+        service_user = User.objects.create_user(
+            username='service_convert_followup',
+            password='test123',
+            role='customer_service',
+            permission_mode='custom',
+            custom_modules=['dashboard', 'orders', 'reservations', 'calendar'],
+            custom_actions=['view', 'create', 'update'],
+        )
+        other_service = User.objects.create_user(
+            username='service_convert_other',
+            password='test123',
+            role='customer_service',
+        )
+        waiting_order = Order.objects.create(
+            customer_name='待发货正式单',
+            customer_phone='13800000041',
+            delivery_address='上海市测试路41号',
+            event_date=timezone.localdate() + timedelta(days=10),
+            rental_days=1,
+            status='confirmed',
+            created_by=service_user,
+        )
+        other_waiting_order = Order.objects.create(
+            customer_name='别人的待发货正式单',
+            customer_phone='13800000042',
+            delivery_address='上海市测试路42号',
+            event_date=timezone.localdate() + timedelta(days=10),
+            rental_days=1,
+            status='pending',
+            created_by=other_service,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_convert_owner_1',
+            customer_name='我的待发货来源单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=10),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=waiting_order,
+            created_by=service_user,
+            owner=service_user,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_convert_owner_2',
+            customer_name='别人的待发货来源单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=10),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=other_waiting_order,
+            created_by=other_service,
+            owner=other_service,
+        )
+        self.client.logout()
+        self.client.login(username='service_convert_followup', password='test123')
+        resp = self.client.get(reverse('dashboard'))
+        self.assertEqual(resp.status_code, 200)
+        cards = resp.context['role_dashboard']['focus_cards']
+        followup_card = next(card for card in cards if card['key'] == 'converted_pending_shipment_reservations_count')
+        self.assertEqual(followup_card['value'], 1)
+
+    def test_reservations_list_journey_filter_should_support_overdue_shipment_and_balance_due(self):
+        overdue_order = Order.objects.create(
+            customer_name='超时待发货正式单',
+            customer_phone='13800000051',
+            delivery_address='上海市测试路51号',
+            event_date=timezone.localdate() + timedelta(days=5),
+            rental_days=1,
+            ship_date=timezone.localdate() - timedelta(days=1),
+            status='confirmed',
+            balance=Decimal('120.00'),
+            created_by=self.user,
+        )
+        balance_due_order = Order.objects.create(
+            customer_name='待收尾款正式单',
+            customer_phone='13800000052',
+            delivery_address='上海市测试路52号',
+            event_date=timezone.localdate() + timedelta(days=6),
+            rental_days=1,
+            ship_date=timezone.localdate() + timedelta(days=1),
+            status='confirmed',
+            balance=Decimal('88.00'),
+            created_by=self.user,
+        )
+        cleared_order = Order.objects.create(
+            customer_name='尾款已清正式单',
+            customer_phone='13800000053',
+            delivery_address='上海市测试路53号',
+            event_date=timezone.localdate() + timedelta(days=6),
+            rental_days=1,
+            ship_date=timezone.localdate() + timedelta(days=1),
+            status='confirmed',
+            balance=Decimal('0.00'),
+            created_by=self.user,
+        )
+        overdue_reservation = Reservation.objects.create(
+            customer_wechat='wx_journey_overdue',
+            customer_name='超时来源预定单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=5),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=overdue_order,
+            created_by=self.user,
+            owner=self.user,
+        )
+        balance_due_reservation = Reservation.objects.create(
+            customer_wechat='wx_journey_balance',
+            customer_name='尾款来源预定单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=6),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=balance_due_order,
+            created_by=self.user,
+            owner=self.user,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_journey_cleared',
+            customer_name='已结清来源预定单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=6),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=cleared_order,
+            created_by=self.user,
+            owner=self.user,
+        )
+
+        overdue_resp = self.client.get(reverse('reservations_list') + '?journey=awaiting_shipment_overdue')
+        self.assertEqual(overdue_resp.status_code, 200)
+        overdue_rows = list(overdue_resp.context['reservations_page'].object_list)
+        self.assertEqual([row.id for row in overdue_rows], [overdue_reservation.id])
+        self.assertEqual(overdue_resp.context['status_summary']['awaiting_shipment_overdue'], 1)
+        self.assertContains(overdue_resp, '待发货超时')
+
+        balance_resp = self.client.get(reverse('reservations_list') + '?journey=balance_due')
+        self.assertEqual(balance_resp.status_code, 200)
+        balance_rows = list(balance_resp.context['reservations_page'].object_list)
+        self.assertEqual({row.id for row in balance_rows}, {overdue_reservation.id, balance_due_reservation.id})
+        self.assertEqual(balance_resp.context['status_summary']['balance_due'], 2)
+        self.assertContains(balance_resp, '待收尾款')
+
+    def test_dashboard_converted_followup_cards_should_only_count_current_owner_for_customer_service(self):
+        service_user = User.objects.create_user(
+            username='service_convert_risk',
+            password='test123',
+            role='customer_service',
+            permission_mode='custom',
+            custom_modules=['dashboard', 'orders', 'reservations', 'calendar'],
+            custom_actions=['view', 'create', 'update'],
+        )
+        other_service = User.objects.create_user(
+            username='service_convert_risk_other',
+            password='test123',
+            role='customer_service',
+        )
+        overdue_order = Order.objects.create(
+            customer_name='我的超时正式单',
+            customer_phone='13800000061',
+            delivery_address='上海市测试路61号',
+            event_date=timezone.localdate() + timedelta(days=4),
+            rental_days=1,
+            ship_date=timezone.localdate() - timedelta(days=1),
+            status='confirmed',
+            balance=Decimal('66.00'),
+            created_by=service_user,
+        )
+        other_order = Order.objects.create(
+            customer_name='别人的超时正式单',
+            customer_phone='13800000062',
+            delivery_address='上海市测试路62号',
+            event_date=timezone.localdate() + timedelta(days=4),
+            rental_days=1,
+            ship_date=timezone.localdate() - timedelta(days=1),
+            status='confirmed',
+            balance=Decimal('77.00'),
+            created_by=other_service,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_owner_risk_1',
+            customer_name='我的超时来源单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=4),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=overdue_order,
+            created_by=service_user,
+            owner=service_user,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_owner_risk_2',
+            customer_name='别人的超时来源单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=4),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=other_order,
+            created_by=other_service,
+            owner=other_service,
+        )
+        self.client.logout()
+        self.client.login(username='service_convert_risk', password='test123')
+        resp = self.client.get(reverse('dashboard'))
+        self.assertEqual(resp.status_code, 200)
+        cards = resp.context['role_dashboard']['focus_cards']
+        overdue_card = next(card for card in cards if card['key'] == 'converted_overdue_shipment_reservations_count')
+        balance_card = next(card for card in cards if card['key'] == 'converted_balance_due_reservations_count')
+        self.assertEqual(overdue_card['value'], 1)
+        self.assertEqual(balance_card['value'], 1)
+
+    def test_dashboard_should_render_reservation_owner_followup_panels_for_manager_view(self):
+        owner_a = User.objects.create_user(
+            username='reservation_owner_a',
+            password='test123',
+            role='customer_service',
+            full_name='客服甲',
+        )
+        owner_b = User.objects.create_user(
+            username='reservation_owner_b',
+            password='test123',
+            role='customer_service',
+            full_name='客服乙',
+        )
+        overdue_order = Order.objects.create(
+            customer_name='客服甲超时正式单',
+            customer_phone='13800000071',
+            delivery_address='上海市测试路71号',
+            event_date=timezone.localdate() + timedelta(days=4),
+            rental_days=1,
+            ship_date=timezone.localdate() - timedelta(days=1),
+            status='confirmed',
+            balance=Decimal('20.00'),
+            created_by=owner_a,
+        )
+        balance_order = Order.objects.create(
+            customer_name='客服乙尾款正式单',
+            customer_phone='13800000072',
+            delivery_address='上海市测试路72号',
+            event_date=timezone.localdate() + timedelta(days=6),
+            rental_days=1,
+            ship_date=timezone.localdate() + timedelta(days=1),
+            status='confirmed',
+            balance=Decimal('66.00'),
+            created_by=owner_b,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_panel_today',
+            customer_name='客服甲今日联系单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=7),
+            deposit_amount=Decimal('50.00'),
+            status='ready_to_convert',
+            created_by=owner_a,
+            owner=owner_a,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_panel_overdue',
+            customer_name='客服甲逾期联系单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=5),
+            deposit_amount=Decimal('50.00'),
+            status='pending_info',
+            created_by=owner_a,
+            owner=owner_a,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_panel_ship',
+            customer_name='客服甲待发货超时单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=4),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=overdue_order,
+            created_by=owner_a,
+            owner=owner_a,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_panel_balance',
+            customer_name='客服乙待收尾款单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=6),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=balance_order,
+            created_by=owner_b,
+            owner=owner_b,
+        )
+        resp = self.client.get(reverse('dashboard'))
+        self.assertEqual(resp.status_code, 200)
+        panels = resp.context['role_dashboard']['reservation_owner_panels']
+        self.assertEqual(len(panels), 2)
+        first = next(panel for panel in panels if panel['owner_name'] == '客服甲')
+        second = next(panel for panel in panels if panel['owner_name'] == '客服乙')
+        self.assertEqual(first['today_count'], 1)
+        self.assertEqual(first['overdue_count'], 1)
+        self.assertEqual(first['overdue_shipment_count'], 1)
+        self.assertEqual(first['balance_due_count'], 1)
+        self.assertEqual(second['balance_due_count'], 1)
+        self.assertContains(resp, '预定跟进负责人分布')
+        self.assertContains(resp, '客服甲')
+        self.assertContains(resp, '客服乙')
+
+    def test_dashboard_should_render_reservation_owner_transfer_suggestions_for_manager_view(self):
+        heavy_owner = User.objects.create_user(
+            username='reservation_heavy_owner',
+            password='test123',
+            role='customer_service',
+            full_name='繁忙客服',
+        )
+        light_owner = User.objects.create_user(
+            username='reservation_light_owner',
+            password='test123',
+            role='customer_service',
+            full_name='空闲客服',
+        )
+        overdue_order = Order.objects.create(
+            customer_name='建议移交超时正式单',
+            customer_phone='13800000081',
+            delivery_address='上海市测试路81号',
+            event_date=timezone.localdate() + timedelta(days=3),
+            rental_days=1,
+            ship_date=timezone.localdate() - timedelta(days=1),
+            status='confirmed',
+            created_by=heavy_owner,
+        )
+        balance_order = Order.objects.create(
+            customer_name='建议移交尾款正式单',
+            customer_phone='13800000082',
+            delivery_address='上海市测试路82号',
+            event_date=timezone.localdate() + timedelta(days=5),
+            rental_days=1,
+            ship_date=timezone.localdate() + timedelta(days=1),
+            status='confirmed',
+            balance=Decimal('99.00'),
+            created_by=heavy_owner,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_transfer_suggest_1',
+            customer_name='逾期联系建议单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=5),
+            deposit_amount=Decimal('50.00'),
+            status='pending_info',
+            created_by=heavy_owner,
+            owner=heavy_owner,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_transfer_suggest_2',
+            customer_name='今日联系建议单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=7),
+            deposit_amount=Decimal('50.00'),
+            status='ready_to_convert',
+            created_by=heavy_owner,
+            owner=heavy_owner,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_transfer_suggest_3',
+            customer_name='待发货超时建议单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=3),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=overdue_order,
+            created_by=heavy_owner,
+            owner=heavy_owner,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_transfer_suggest_4',
+            customer_name='尾款建议单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=5),
+            deposit_amount=Decimal('50.00'),
+            status='converted',
+            converted_order=balance_order,
+            created_by=heavy_owner,
+            owner=heavy_owner,
+        )
+        Reservation.objects.create(
+            customer_wechat='wx_transfer_suggest_5',
+            customer_name='空闲客服单',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=20),
+            deposit_amount=Decimal('50.00'),
+            status='pending_info',
+            created_by=light_owner,
+            owner=light_owner,
+        )
+        resp = self.client.get(reverse('dashboard'))
+        self.assertEqual(resp.status_code, 200)
+        suggestions = resp.context['role_dashboard']['reservation_owner_transfer_suggestions']
+        self.assertTrue(suggestions)
+        first = suggestions[0]
+        self.assertEqual(first['source_owner_name'], '繁忙客服')
+        self.assertEqual(first['target_owner_name'], '空闲客服')
+        self.assertGreaterEqual(first['suggest_count'], 1)
+        self.assertContains(resp, '负责人移交建议')
+        self.assertContains(resp, '繁忙客服')
+        self.assertContains(resp, '空闲客服')
+
+    def test_dashboard_should_render_followup_banner_without_global_message_dialog(self):
+        Reservation.objects.create(
+            customer_wechat='wx_dashboard_followup_banner',
+            customer_name='工作台提醒客户',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=5),
+            deposit_amount=Decimal('50.00'),
+            status='pending_info',
+            created_by=self.user,
+            owner=self.user,
+        )
+
+        resp = self.client.get(reverse('dashboard'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '预定跟进提醒')
+        self.assertContains(resp, '今天不再提醒')
+        self.assertContains(resp, '查看待办')
+        self.assertNotContains(resp, 'pageMessagesData')
 
     def test_dashboard_should_expose_overdue_orders_card_and_match_orders_list_filter(self):
         today = timezone.localdate()
@@ -1843,6 +2853,8 @@ class CoreViewsFlowTestCase(TestCase):
             customer_phone='18800000001',
             customer_wechat='wx-search-001',
             xianyu_order_no='xy-order-001',
+            order_source='xianyu',
+            source_order_no='xy-order-001',
             delivery_address='地址10',
             event_date=date.today() + timedelta(days=4),
             rental_days=1,
@@ -1854,6 +2866,8 @@ class CoreViewsFlowTestCase(TestCase):
             customer_phone='18800000002',
             customer_wechat='wx-other-002',
             xianyu_order_no='xy-other-002',
+            order_source='wechat',
+            source_order_no='wx-order-002',
             delivery_address='地址11',
             event_date=date.today() + timedelta(days=5),
             rental_days=1,
@@ -1870,6 +2884,66 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(resp_xianyu.status_code, 200)
         self.assertContains(resp_xianyu, target_order.order_no)
         self.assertNotContains(resp_xianyu, other_order.order_no)
+
+        target_order.return_service_type = 'platform_return_included'
+        target_order.return_service_fee = Decimal('45.00')
+        target_order.return_service_payment_status = 'paid'
+        target_order.return_service_payment_channel = 'wechat'
+        target_order.return_service_payment_reference = 'wx-pay-search-001'
+        target_order.return_pickup_status = 'pending_schedule'
+        target_order.save(update_fields=[
+            'return_service_type',
+            'return_service_fee',
+            'return_service_payment_status',
+            'return_service_payment_channel',
+            'return_service_payment_reference',
+            'return_pickup_status',
+            'updated_at',
+        ])
+
+        resp_platform = self.client.get(reverse('orders_list'), {'keyword': 'xy-order-001'})
+        self.assertEqual(resp_platform.status_code, 200)
+        self.assertContains(resp_platform, target_order.order_no)
+
+        resp_reference = self.client.get(reverse('orders_list'), {'keyword': 'wx-pay-search-001'})
+        self.assertEqual(resp_reference.status_code, 200)
+        self.assertContains(resp_reference, target_order.order_no)
+        self.assertNotContains(resp_reference, other_order.order_no)
+
+    def test_orders_list_should_filter_return_service_paid(self):
+        target_order = Order.objects.create(
+            customer_name='包回邮已付款客户',
+            customer_phone='18800009991',
+            delivery_address='地址20',
+            event_date=date.today() + timedelta(days=4),
+            rental_days=1,
+            status='pending',
+            return_service_type='platform_return_included',
+            return_service_fee=Decimal('45.00'),
+            return_service_payment_status='paid',
+            return_service_payment_channel='wechat',
+            return_service_payment_reference='wx-paid-filter-001',
+            return_pickup_status='pending_schedule',
+            created_by=self.user,
+        )
+        Order.objects.create(
+            customer_name='包回邮未付款客户',
+            customer_phone='18800009992',
+            delivery_address='地址21',
+            event_date=date.today() + timedelta(days=5),
+            rental_days=1,
+            status='pending',
+            return_service_type='platform_return_included',
+            return_service_fee=Decimal('45.00'),
+            return_service_payment_status='unpaid',
+            return_pickup_status='pending_schedule',
+            created_by=self.user,
+        )
+
+        resp = self.client.get(reverse('orders_list'), {'return_payment': 'paid'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, target_order.order_no)
+        self.assertContains(resp, '包回邮￥45.00')
 
     def test_purchase_orders_nav_should_not_activate_orders_menu(self):
         resp = self.client.get(reverse('purchase_orders_list'))

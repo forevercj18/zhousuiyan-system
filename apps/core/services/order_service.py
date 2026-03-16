@@ -22,7 +22,7 @@ class OrderService:
     """订单服务"""
 
     @staticmethod
-    def _create_finance_transaction(order, transaction_type, amount, user, notes=''):
+    def _create_finance_transaction(order, transaction_type, amount, user, notes='', reference_no=''):
         amount_decimal = Decimal(str(amount or 0))
         if amount_decimal <= 0:
             return None
@@ -31,8 +31,111 @@ class OrderService:
             transaction_type=transaction_type,
             amount=amount_decimal,
             notes=notes,
+            reference_no=reference_no,
             created_by=user,
         )
+
+    @staticmethod
+    def _normalize_return_service_data(data):
+        order_source = (data.get('order_source') or 'wechat').strip()
+        if order_source not in dict(Order.ORDER_SOURCE_CHOICES):
+            order_source = 'wechat'
+
+        source_order_no = (data.get('source_order_no') or '').strip()
+        xianyu_order_no = (data.get('xianyu_order_no') or '').strip()
+        if order_source == 'xianyu':
+            if not source_order_no and xianyu_order_no:
+                source_order_no = xianyu_order_no
+            xianyu_order_no = source_order_no
+        elif xianyu_order_no and not source_order_no:
+            source_order_no = xianyu_order_no
+
+        return_service_type = (data.get('return_service_type') or 'none').strip()
+        if return_service_type not in dict(Order.RETURN_SERVICE_TYPE_CHOICES):
+            return_service_type = 'none'
+
+        payment_status = (data.get('return_service_payment_status') or 'unpaid').strip()
+        if payment_status not in dict(Order.RETURN_SERVICE_PAYMENT_STATUS_CHOICES):
+            payment_status = 'unpaid'
+
+        payment_channel = (data.get('return_service_payment_channel') or '').strip()
+        if payment_channel and payment_channel not in dict(Order.RETURN_SERVICE_PAYMENT_CHANNEL_CHOICES):
+            payment_channel = ''
+
+        payment_reference = (data.get('return_service_payment_reference') or '').strip()
+        return_pickup_status = (data.get('return_pickup_status') or '').strip()
+        if return_pickup_status not in dict(Order.RETURN_PICKUP_STATUS_CHOICES):
+            if return_service_type == 'platform_return_included':
+                return_pickup_status = 'pending_schedule'
+            else:
+                return_pickup_status = 'not_required'
+
+        fee = Decimal(str(data.get('return_service_fee') or '0'))
+        if fee < 0:
+            raise ValueError('包回邮服务费不能小于0')
+
+        if return_service_type == 'none':
+            fee = Decimal('0.00')
+            payment_status = 'unpaid'
+            payment_channel = ''
+            payment_reference = ''
+            return_pickup_status = 'not_required'
+        elif return_service_type == 'customer_self_return':
+            return_pickup_status = 'not_required'
+        elif return_service_type == 'platform_return_included' and return_pickup_status == 'not_required':
+            return_pickup_status = 'pending_schedule'
+
+        if payment_status in {'paid', 'refunded'} and fee <= 0:
+            raise ValueError('已收款或已退款时，包回邮服务费必须大于0')
+        if payment_status in {'paid', 'refunded'} and not payment_channel:
+            raise ValueError('请填写包回邮收款渠道')
+        if payment_channel == 'wechat' and payment_status in {'paid', 'refunded'} and not payment_reference:
+            raise ValueError('微信收款时请填写支付参考号或备注')
+
+        return {
+            'order_source': order_source,
+            'source_order_no': source_order_no,
+            'xianyu_order_no': xianyu_order_no,
+            'return_service_type': return_service_type,
+            'return_service_fee': fee,
+            'return_service_payment_status': payment_status,
+            'return_service_payment_channel': payment_channel,
+            'return_service_payment_reference': payment_reference,
+            'return_pickup_status': return_pickup_status,
+        }
+
+    @staticmethod
+    def _sync_return_service_finance(order, before_state, after_state, user):
+        before_paid = Decimal(str(before_state.get('return_service_fee') or '0')) if before_state.get('return_service_payment_status') == 'paid' else Decimal('0.00')
+        after_paid = Decimal(str(after_state.get('return_service_fee') or '0')) if after_state.get('return_service_payment_status') == 'paid' else Decimal('0.00')
+        delta_paid = after_paid - before_paid
+        reference_no = after_state.get('return_service_payment_reference') or before_state.get('return_service_payment_reference') or ''
+        channel_label = dict(Order.RETURN_SERVICE_PAYMENT_CHANNEL_CHOICES).get(
+            after_state.get('return_service_payment_channel') or before_state.get('return_service_payment_channel') or '',
+            '未标记渠道'
+        )
+        if delta_paid > 0:
+            OrderService._create_finance_transaction(
+                order=order,
+                transaction_type='return_service_received',
+                amount=delta_paid,
+                user=user,
+                notes=f'包回邮服务费收款（{channel_label}）',
+                reference_no=reference_no,
+            )
+
+        before_refunded = Decimal(str(before_state.get('return_service_fee') or '0')) if before_state.get('return_service_payment_status') == 'refunded' else Decimal('0.00')
+        after_refunded = Decimal(str(after_state.get('return_service_fee') or '0')) if after_state.get('return_service_payment_status') == 'refunded' else Decimal('0.00')
+        delta_refunded = after_refunded - before_refunded
+        if delta_refunded > 0:
+            OrderService._create_finance_transaction(
+                order=order,
+                transaction_type='return_service_refund',
+                amount=delta_refunded,
+                user=user,
+                notes=f'包回邮服务费退款（{channel_label}）',
+                reference_no=reference_no,
+            )
 
     @staticmethod
     def record_deposit_refund(order, user, notes=''):
@@ -48,7 +151,15 @@ class OrderService:
     @staticmethod
     def record_manual_finance(order, transaction_type, amount, user, notes=''):
         """手工记账（扣罚/调整/退款等）"""
-        supported = {'deposit_refund', 'penalty_charge', 'manual_adjust', 'balance_received', 'deposit_received'}
+        supported = {
+            'deposit_refund',
+            'penalty_charge',
+            'manual_adjust',
+            'balance_received',
+            'deposit_received',
+            'return_service_received',
+            'return_service_refund',
+        }
         if transaction_type not in supported:
             raise ValueError('不支持的交易类型')
         amount_decimal = Decimal(str(amount or 0))
@@ -98,12 +209,20 @@ class OrderService:
             'customer_phone': order.customer_phone,
             'customer_wechat': order.customer_wechat,
             'xianyu_order_no': order.xianyu_order_no,
+            'order_source': order.order_source,
+            'source_order_no': order.source_order_no,
             'delivery_address': order.delivery_address,
             'event_date': order.event_date,
             'rental_days': order.rental_days,
             'total_amount': order.total_amount,
             'deposit_paid': order.deposit_paid,
             'balance': order.balance,
+            'return_service_type': order.return_service_type,
+            'return_service_fee': order.return_service_fee,
+            'return_service_payment_status': order.return_service_payment_status,
+            'return_service_payment_channel': order.return_service_payment_channel,
+            'return_service_payment_reference': order.return_service_payment_reference,
+            'return_pickup_status': order.return_pickup_status,
             'notes': order.notes,
             'ship_tracking': order.ship_tracking,
             'return_tracking': order.return_tracking,
@@ -178,13 +297,16 @@ class OrderService:
 
         # 3. 计算金额
         amount_info = calculate_order_amount(data['items'])
+        return_service_data = OrderService._normalize_return_service_data(data)
 
         # 4. 创建订单
         order = Order.objects.create(
             customer_name=data['customer_name'],
             customer_phone=data['customer_phone'],
             customer_wechat=data.get('customer_wechat', ''),
-            xianyu_order_no=data.get('xianyu_order_no', ''),
+            xianyu_order_no=return_service_data['xianyu_order_no'],
+            order_source=return_service_data['order_source'],
+            source_order_no=return_service_data['source_order_no'],
             customer_email=data.get('customer_email', ''),
             delivery_address=data['delivery_address'],
             return_address=data.get('return_address', data['delivery_address']),
@@ -195,6 +317,12 @@ class OrderService:
             total_amount=amount_info['total_amount'],
             deposit_paid=Decimal('0.00'),
             balance=amount_info['total_amount'],
+            return_service_type=return_service_data['return_service_type'],
+            return_service_fee=return_service_data['return_service_fee'],
+            return_service_payment_status=return_service_data['return_service_payment_status'],
+            return_service_payment_channel=return_service_data['return_service_payment_channel'],
+            return_service_payment_reference=return_service_data['return_service_payment_reference'],
+            return_pickup_status=return_service_data['return_pickup_status'],
             status='pending',
             notes=data.get('notes', ''),
             created_by=user
@@ -230,6 +358,12 @@ class OrderService:
                     created_by=user,
                 )
         sync_transfer_tasks_for_target_order(order, user)
+        OrderService._sync_return_service_finance(
+            order,
+            before_state={},
+            after_state=return_service_data,
+            user=user,
+        )
 
         # 6. 记录日志
         AuditService.log_with_diff(
@@ -311,12 +445,15 @@ class OrderService:
         # 2) 计算日期/金额
         dates = calculate_order_dates(event_date, rental_days)
         amount_info = calculate_order_amount(items)
+        return_service_data = OrderService._normalize_return_service_data(data)
 
         # 更新基本信息
         order.customer_name = data.get('customer_name', order.customer_name)
         order.customer_phone = data.get('customer_phone', order.customer_phone)
         order.customer_wechat = data.get('customer_wechat', order.customer_wechat)
-        order.xianyu_order_no = data.get('xianyu_order_no', order.xianyu_order_no)
+        order.xianyu_order_no = return_service_data['xianyu_order_no']
+        order.order_source = return_service_data['order_source']
+        order.source_order_no = return_service_data['source_order_no']
         order.customer_email = data.get('customer_email', order.customer_email)
         order.delivery_address = delivery_address
         order.return_address = data.get('return_address', order.return_address)
@@ -328,6 +465,12 @@ class OrderService:
         order.total_amount = amount_info['total_amount']
         # 押金不冲抵租金尾款，编辑后按新租金重置尾款
         order.balance = amount_info['total_amount']
+        order.return_service_type = return_service_data['return_service_type']
+        order.return_service_fee = return_service_data['return_service_fee']
+        order.return_service_payment_status = return_service_data['return_service_payment_status']
+        order.return_service_payment_channel = return_service_data['return_service_payment_channel']
+        order.return_service_payment_reference = return_service_data['return_service_payment_reference']
+        order.return_pickup_status = return_service_data['return_pickup_status']
 
         order.save()
 
@@ -364,6 +507,12 @@ class OrderService:
                     created_by=user,
                 )
         sync_transfer_tasks_for_target_order(order, user)
+        OrderService._sync_return_service_finance(
+            order,
+            before_state=before_snapshot,
+            after_state=return_service_data,
+            user=user,
+        )
 
         # 记录日志
         AuditService.log_with_diff(
@@ -376,6 +525,60 @@ class OrderService:
             after=OrderService._snapshot_order(order),
         )
 
+        return order
+
+    @staticmethod
+    @transaction.atomic
+    def update_return_service(order_id, data, user):
+        order = Order.objects.get(id=order_id)
+        if order.status not in ['pending', 'confirmed', 'delivered', 'returned']:
+            raise ValueError(f"订单状态为 {order.get_status_display()}，当前不支持登记包回邮服务")
+
+        before_snapshot = OrderService._snapshot_order(order)
+        payload = {
+            'order_source': order.order_source,
+            'source_order_no': order.source_order_no,
+            'xianyu_order_no': order.xianyu_order_no,
+            'return_service_type': data.get('return_service_type', order.return_service_type),
+            'return_service_fee': data.get('return_service_fee', order.return_service_fee),
+            'return_service_payment_status': data.get('return_service_payment_status', order.return_service_payment_status),
+            'return_service_payment_channel': data.get('return_service_payment_channel', order.return_service_payment_channel),
+            'return_service_payment_reference': data.get('return_service_payment_reference', order.return_service_payment_reference),
+            'return_pickup_status': data.get('return_pickup_status', order.return_pickup_status),
+        }
+        return_service_data = OrderService._normalize_return_service_data(payload)
+
+        order.return_service_type = return_service_data['return_service_type']
+        order.return_service_fee = return_service_data['return_service_fee']
+        order.return_service_payment_status = return_service_data['return_service_payment_status']
+        order.return_service_payment_channel = return_service_data['return_service_payment_channel']
+        order.return_service_payment_reference = return_service_data['return_service_payment_reference']
+        order.return_pickup_status = return_service_data['return_pickup_status']
+        order.save(update_fields=[
+            'return_service_type',
+            'return_service_fee',
+            'return_service_payment_status',
+            'return_service_payment_channel',
+            'return_service_payment_reference',
+            'return_pickup_status',
+            'updated_at',
+        ])
+
+        OrderService._sync_return_service_finance(
+            order,
+            before_state=before_snapshot,
+            after_state=return_service_data,
+            user=user,
+        )
+        AuditService.log_with_diff(
+            user=user,
+            action='update',
+            module='订单',
+            target=order.order_no,
+            summary='更新包回邮服务信息',
+            before=before_snapshot,
+            after=OrderService._snapshot_order(order),
+        )
         return order
 
     @staticmethod

@@ -23,7 +23,7 @@ from .models import (
     Order, OrderItem, SKU, Part, PurchaseOrder, PurchaseOrderItem, PartsMovement,
     AuditLog, User, SystemSettings, Transfer, TransferAllocation, InventoryUnit, UnitMovement,
     SKUComponent, InventoryUnitPart, RiskEvent, ApprovalTask, FinanceTransaction, DataConsistencyCheckRun,
-    AssemblyOrder, MaintenanceWorkOrder, UnitDisposalOrder, PartRecoveryInspection, PermissionTemplate,
+    AssemblyOrder, MaintenanceWorkOrder, UnitDisposalOrder, PartRecoveryInspection, PermissionTemplate, Reservation,
     TransferRecommendationLog,
 )
 from .services import (
@@ -51,6 +51,7 @@ from .utils import (
     get_system_settings,
     get_dashboard_stats_payload,
     get_role_dashboard_payload,
+    get_reservation_conflict_summary,
     build_finance_reconciliation_rows,
     run_data_consistency_checks,
     persist_data_consistency_check_result,
@@ -90,6 +91,115 @@ def _snapshot_permission_template_audit(template):
         'action_permissions': list(template.action_permissions or []),
         'is_active': template.is_active,
     }
+
+
+def _snapshot_reservation_audit(reservation):
+    return {
+        'id': reservation.id,
+        'reservation_no': reservation.reservation_no,
+        'customer_wechat': reservation.customer_wechat,
+        'customer_name': reservation.customer_name,
+        'customer_phone': reservation.customer_phone,
+        'city': reservation.city,
+        'sku_id': reservation.sku_id,
+        'sku_code': reservation.sku.code if reservation.sku_id else '',
+        'sku_name': reservation.sku.name if reservation.sku_id else '',
+        'quantity': reservation.quantity,
+        'event_date': reservation.event_date,
+        'deposit_amount': reservation.deposit_amount,
+        'status': reservation.status,
+        'status_display': reservation.get_status_display(),
+        'notes': reservation.notes,
+        'converted_order_id': reservation.converted_order_id,
+        'converted_order_no': reservation.converted_order.order_no if reservation.converted_order_id else '',
+        'owner_id': reservation.owner_id,
+        'owner_name': reservation.owner.get_full_name() if reservation.owner_id and reservation.owner.get_full_name() else (reservation.owner.username if reservation.owner_id else ''),
+    }
+
+
+def _parse_reservation_form_payload(request):
+    sku_id = (request.POST.get('sku_id') or '').strip()
+    if not sku_id:
+        raise ValueError('请选择款式')
+    event_date_raw = (request.POST.get('event_date') or '').strip()
+    if not event_date_raw:
+        raise ValueError('请选择预定日期')
+    customer_wechat = (request.POST.get('customer_wechat') or '').strip()
+    if not customer_wechat:
+        raise ValueError('微信号不能为空')
+    deposit_amount_raw = (request.POST.get('deposit_amount') or '0').strip()
+    try:
+        deposit_amount = Decimal(deposit_amount_raw or '0')
+    except Exception as exc:
+        raise ValueError('订金金额格式不正确') from exc
+    if deposit_amount < Decimal('0.00'):
+        raise ValueError('订金金额不能小于0')
+    quantity_raw = (request.POST.get('quantity') or '1').strip()
+    try:
+        quantity = int(quantity_raw or '1')
+    except Exception as exc:
+        raise ValueError('数量格式不正确') from exc
+    if quantity <= 0:
+        raise ValueError('数量必须大于0')
+    status = (request.POST.get('status') or 'pending_info').strip()
+    if status not in dict(Reservation.STATUS_CHOICES):
+        raise ValueError('预定状态无效')
+    owner_raw = (request.POST.get('owner_id') or '').strip()
+    return {
+        'customer_wechat': customer_wechat,
+        'customer_name': (request.POST.get('customer_name') or '').strip(),
+        'customer_phone': (request.POST.get('customer_phone') or '').strip(),
+        'city': (request.POST.get('city') or '').strip(),
+        'sku_id': int(sku_id),
+        'quantity': quantity,
+        'event_date': datetime.strptime(event_date_raw, '%Y-%m-%d').date(),
+        'deposit_amount': deposit_amount,
+        'status': status,
+        'notes': (request.POST.get('notes') or '').strip(),
+        'owner_id': int(owner_raw) if owner_raw.isdigit() else None,
+    }
+
+
+def _create_reservation_finance_transaction(*, reservation, transaction_type, amount, user, notes='', reference_no=''):
+    amount_decimal = Decimal(str(amount or '0'))
+    if amount_decimal <= 0:
+        return None
+    return FinanceTransaction.objects.create(
+        reservation=reservation,
+        transaction_type=transaction_type,
+        amount=amount_decimal,
+        notes=notes,
+        reference_no=reference_no,
+        created_by=user,
+    )
+
+
+def _get_reservation_owner_candidates():
+    return User.objects.filter(
+        is_active=True,
+        role__in=['admin', 'manager', 'customer_service'],
+    ).order_by('role', 'full_name', 'username')
+
+
+def _build_reservation_conflict_summary(payload=None, reservation=None):
+    if reservation is not None:
+        return get_reservation_conflict_summary(
+            reservation.sku_id,
+            reservation.event_date,
+            quantity=reservation.quantity,
+            exclude_reservation_id=reservation.id,
+        )
+    if not payload:
+        return None
+    sku_id = payload.get('sku_id')
+    event_date = payload.get('event_date')
+    if not sku_id or not event_date:
+        return None
+    return get_reservation_conflict_summary(
+        sku_id,
+        event_date,
+        quantity=payload.get('quantity') or 1,
+    )
 
 
 def _validate_permission_lists(custom_modules, custom_actions, custom_action_permissions):
@@ -210,6 +320,31 @@ def _build_querystring(request, exclude_keys=None):
     for key in (exclude_keys or []):
         params.pop(key, None)
     return params.urlencode()
+
+
+def _build_order_form_meta():
+    return {
+        'order_source_choices': Order.ORDER_SOURCE_CHOICES,
+        'return_service_type_choices': Order.RETURN_SERVICE_TYPE_CHOICES,
+        'return_service_payment_status_choices': Order.RETURN_SERVICE_PAYMENT_STATUS_CHOICES,
+        'return_service_payment_channel_choices': Order.RETURN_SERVICE_PAYMENT_CHANNEL_CHOICES,
+        'return_pickup_status_choices': Order.RETURN_PICKUP_STATUS_CHOICES,
+    }
+
+
+def _extract_order_form_values(request, fallback=None):
+    values = dict(fallback or {})
+    for key in [
+        'customer_name', 'customer_phone', 'customer_wechat', 'xianyu_order_no',
+        'customer_email', 'delivery_address', 'return_address', 'event_date',
+        'rental_days', 'notes', 'order_source', 'source_order_no',
+        'return_service_type', 'return_service_fee', 'return_service_payment_status',
+        'return_service_payment_channel', 'return_service_payment_reference',
+        'return_pickup_status',
+    ]:
+        if key in request.POST:
+            values[key] = request.POST.get(key, '')
+    return values
 
 
 def _get_page_size(setting_key=None, default=10, settings=None):
@@ -858,6 +993,24 @@ def dashboard(request):
         view_role=view_role or None,
         base_stats=stats,
     )
+    dashboard_followup_reminder = None
+    if role_dashboard.get('reservation_followup'):
+        today_followup = int(role_dashboard['reservation_followup'].get('today_count') or 0)
+        overdue_followup = int(role_dashboard['reservation_followup'].get('overdue_count') or 0)
+        if overdue_followup or today_followup:
+            dashboard_followup_reminder = {
+                'today_count': today_followup,
+                'overdue_count': overdue_followup,
+                'severity': 'danger' if overdue_followup else 'warning',
+                'title': '预定跟进提醒',
+                'message': (
+                    f'有 {overdue_followup} 张预定单已逾期未联系，请尽快跟进'
+                    if overdue_followup
+                    else f'今天有 {today_followup} 张预定单需要联系客户确认细节'
+                ),
+                'detail_query': 'contact=overdue' if overdue_followup else 'contact=today',
+                'dismiss_key': f'dashboard-followup-reminder:{request.user.id}:{timezone.localdate().isoformat()}',
+            }
 
     # 最近订单
     recent_orders = Order.objects.select_related('created_by').prefetch_related(
@@ -877,6 +1030,7 @@ def dashboard(request):
         'recent_orders': recent_orders,
         'low_stock_parts': low_stock_parts,
         'view_role': view_role,
+        'dashboard_followup_reminder': dashboard_followup_reminder,
         'role_view_options': [
             {'value': 'admin', 'label': '超级管理员'},
             {'value': 'manager', 'label': '业务经理'},
@@ -893,6 +1047,458 @@ def dashboard(request):
 def workbench(request):
     """订单处理入口已合并到订单中心，保留旧路由并跳转。"""
     return redirect('orders_list')
+
+
+@login_required
+@require_permission('reservations', 'view')
+def reservations_list(request):
+    """预定单列表"""
+    reservations = Reservation.objects.select_related('sku', 'created_by', 'owner', 'converted_order').all()
+    if not request.user.is_superuser and request.user.role == 'customer_service':
+        reservations = reservations.filter(owner=request.user)
+    status_summary = {
+        'pending_info': reservations.filter(status='pending_info').count(),
+        'ready_to_convert': reservations.filter(status='ready_to_convert').count(),
+        'converted': reservations.filter(status='converted').count(),
+        'cancelled': reservations.filter(status='cancelled').count(),
+    }
+
+    status_filter = (request.GET.get('status') or '').strip()
+    contact_filter = (request.GET.get('contact') or '').strip()
+    journey_filter = (request.GET.get('journey') or '').strip()
+    keyword = (request.GET.get('keyword') or '').strip()
+    owner_filter = (request.GET.get('owner') or '').strip()
+    status_summary['awaiting_shipment'] = reservations.filter(
+        status='converted',
+        converted_order__status__in=['pending', 'confirmed'],
+    ).count()
+    status_summary['awaiting_shipment_overdue'] = reservations.filter(
+        status='converted',
+        converted_order__status__in=['pending', 'confirmed'],
+        converted_order__ship_date__isnull=False,
+        converted_order__ship_date__lte=timezone.localdate(),
+        converted_order__ship_tracking='',
+    ).count()
+    status_summary['balance_due'] = reservations.filter(
+        status='converted',
+        converted_order__isnull=False,
+        converted_order__balance__gt=Decimal('0.00'),
+    ).exclude(
+        converted_order__status='cancelled',
+    ).count()
+    if status_filter:
+        reservations = reservations.filter(status=status_filter)
+    followup_lead_days = int(get_system_settings().get('reservation_followup_lead_days', 7) or 7)
+    target_event_date = timezone.localdate() + timedelta(days=followup_lead_days)
+    if contact_filter == 'today':
+        reservations = reservations.filter(status__in=['pending_info', 'ready_to_convert'], event_date=target_event_date)
+    elif contact_filter == 'overdue':
+        reservations = reservations.filter(status__in=['pending_info', 'ready_to_convert'], event_date__lt=target_event_date)
+    elif contact_filter == 'pending':
+        reservations = reservations.filter(status__in=['pending_info', 'ready_to_convert'], event_date__gt=target_event_date)
+    if journey_filter == 'awaiting_shipment':
+        reservations = reservations.filter(status='converted', converted_order__status__in=['pending', 'confirmed'])
+    elif journey_filter == 'awaiting_shipment_overdue':
+        reservations = reservations.filter(
+            status='converted',
+            converted_order__status__in=['pending', 'confirmed'],
+            converted_order__ship_date__isnull=False,
+            converted_order__ship_date__lte=timezone.localdate(),
+            converted_order__ship_tracking='',
+        )
+    elif journey_filter == 'balance_due':
+        reservations = reservations.filter(
+            status='converted',
+            converted_order__isnull=False,
+            converted_order__balance__gt=Decimal('0.00'),
+        ).exclude(
+            converted_order__status='cancelled',
+        )
+    elif journey_filter == 'in_fulfillment':
+        reservations = reservations.filter(status='converted', converted_order__status__in=['delivered', 'in_use', 'returned'])
+    elif journey_filter == 'completed':
+        reservations = reservations.filter(status='converted', converted_order__status='completed')
+    if owner_filter and request.user.role in ['admin', 'manager']:
+        reservations = reservations.filter(owner_id=owner_filter)
+    if keyword:
+        reservations = reservations.filter(
+            Q(reservation_no__icontains=keyword) |
+            Q(customer_wechat__icontains=keyword) |
+            Q(customer_name__icontains=keyword) |
+            Q(customer_phone__icontains=keyword) |
+            Q(city__icontains=keyword) |
+            Q(sku__name__icontains=keyword) |
+            Q(sku__code__icontains=keyword)
+        )
+
+    reservations = reservations.order_by('-created_at')
+    reservations_page = Paginator(reservations, _get_page_size('page_size_reservations')).get_page(request.GET.get('page'))
+    context = {
+        'reservations': reservations_page,
+        'reservations_page': reservations_page,
+        'status_filter': status_filter,
+        'contact_filter': contact_filter,
+        'journey_filter': journey_filter,
+        'keyword': keyword,
+        'owner_filter': owner_filter,
+        'pagination_query': _build_querystring(request, ['page']),
+        'status_choices': Reservation.STATUS_CHOICES,
+        'status_summary': status_summary,
+        'owner_choices': _get_reservation_owner_candidates() if request.user.role in ['admin', 'manager'] else [],
+        'followup_lead_days': followup_lead_days,
+    }
+    return render(request, 'reservations/list.html', context)
+
+
+@login_required
+@require_permission('reservations', 'create')
+def reservation_create(request):
+    """创建预定单"""
+    conflict_summary = None
+    if request.method == 'POST':
+        try:
+            payload = _parse_reservation_form_payload(request)
+            conflict_summary = _build_reservation_conflict_summary(payload=payload)
+            reservation = Reservation.objects.create(
+                customer_wechat=payload['customer_wechat'],
+                customer_name=payload['customer_name'],
+                customer_phone=payload['customer_phone'],
+                city=payload['city'],
+                sku_id=payload['sku_id'],
+                quantity=payload['quantity'],
+                event_date=payload['event_date'],
+                deposit_amount=payload['deposit_amount'],
+                status=payload['status'],
+                notes=payload['notes'],
+                created_by=request.user,
+                owner_id=(payload['owner_id'] if request.user.role in ['admin', 'manager'] else None) or request.user.id,
+            )
+            _create_reservation_finance_transaction(
+                reservation=reservation,
+                transaction_type='reservation_deposit_received',
+                amount=reservation.deposit_amount,
+                user=request.user,
+                notes='创建预定单收取订金',
+            )
+            AuditService.log_with_diff(
+                user=request.user,
+                action='create',
+                module='预定单',
+                target=reservation.reservation_no,
+                summary='创建预定单',
+                before={},
+                after=_snapshot_reservation_audit(reservation),
+            )
+            messages.success(request, f'预定单创建成功：{reservation.reservation_no}')
+            return redirect('reservations_list')
+        except ValueError as exc:
+            messages.error(request, str(exc))
+            if 'payload' in locals():
+                conflict_summary = _build_reservation_conflict_summary(payload=payload)
+        except Exception as exc:
+            messages.error(request, f'预定单创建失败：{str(exc)}')
+            if 'payload' in locals():
+                conflict_summary = _build_reservation_conflict_summary(payload=payload)
+
+    context = {
+        'mode': 'create',
+        'skus': SKU.objects.filter(is_active=True).order_by('code'),
+        'status_choices': Reservation.STATUS_CHOICES,
+        'conflict_summary': conflict_summary,
+        'owner_choices': _get_reservation_owner_candidates() if request.user.role in ['admin', 'manager'] else [],
+    }
+    return render(request, 'reservations/form.html', context)
+
+
+@login_required
+@require_permission('reservations', 'update')
+def reservation_edit(request, reservation_id):
+    """编辑预定单"""
+    reservation = get_object_or_404(Reservation.objects.select_related('sku', 'converted_order', 'owner'), id=reservation_id)
+    conflict_summary = _build_reservation_conflict_summary(reservation=reservation)
+    if not request.user.is_superuser and request.user.role == 'customer_service' and reservation.owner_id != request.user.id:
+        messages.error(request, '您没有权限编辑该预定单')
+        return redirect('reservations_list')
+
+    if request.method == 'POST':
+        before_snapshot = _snapshot_reservation_audit(reservation)
+        previous_deposit = reservation.deposit_amount or Decimal('0.00')
+        try:
+            payload = _parse_reservation_form_payload(request)
+            conflict_summary = get_reservation_conflict_summary(
+                payload['sku_id'],
+                payload['event_date'],
+                quantity=payload['quantity'],
+                exclude_reservation_id=reservation.id,
+            )
+            owner_id = payload.pop('owner_id', None)
+            for field, value in payload.items():
+                setattr(reservation, field, value)
+            if request.user.role in ['admin', 'manager']:
+                reservation.owner_id = owner_id or reservation.owner_id or request.user.id
+            else:
+                reservation.owner_id = reservation.owner_id or request.user.id
+            reservation.save()
+            delta = (reservation.deposit_amount or Decimal('0.00')) - previous_deposit
+            if delta > 0:
+                _create_reservation_finance_transaction(
+                    reservation=reservation,
+                    transaction_type='reservation_deposit_received',
+                    amount=delta,
+                    user=request.user,
+                    notes='编辑预定单补收订金',
+                )
+            elif delta < 0:
+                _create_reservation_finance_transaction(
+                    reservation=reservation,
+                    transaction_type='reservation_deposit_refund',
+                    amount=abs(delta),
+                    user=request.user,
+                    notes='编辑预定单退还订金差额',
+                )
+            AuditService.log_with_diff(
+                user=request.user,
+                action='update',
+                module='预定单',
+                target=reservation.reservation_no,
+                summary='编辑预定单',
+                before=before_snapshot,
+                after=_snapshot_reservation_audit(reservation),
+            )
+            messages.success(request, f'预定单已更新：{reservation.reservation_no}')
+            return redirect('reservations_list')
+        except ValueError as exc:
+            messages.error(request, str(exc))
+            if 'payload' in locals():
+                conflict_summary = get_reservation_conflict_summary(
+                    payload.get('sku_id'),
+                    payload.get('event_date'),
+                    quantity=payload.get('quantity') or 1,
+                    exclude_reservation_id=reservation.id,
+                )
+        except Exception as exc:
+            messages.error(request, f'预定单更新失败：{str(exc)}')
+            if 'payload' in locals():
+                conflict_summary = get_reservation_conflict_summary(
+                    payload.get('sku_id'),
+                    payload.get('event_date'),
+                    quantity=payload.get('quantity') or 1,
+                    exclude_reservation_id=reservation.id,
+                )
+
+    context = {
+        'mode': 'edit',
+        'reservation': reservation,
+        'skus': SKU.objects.filter(is_active=True).order_by('code'),
+        'status_choices': Reservation.STATUS_CHOICES,
+        'conflict_summary': conflict_summary,
+        'owner_choices': _get_reservation_owner_candidates() if request.user.role in ['admin', 'manager'] else [],
+    }
+    return render(request, 'reservations/form.html', context)
+
+
+@login_required
+@require_permission('reservations', 'update')
+def reservation_cancel(request, reservation_id):
+    """取消预定单"""
+    reservation = get_object_or_404(Reservation, id=reservation_id)
+    if request.method != 'POST':
+        return redirect('reservations_list')
+    if not request.user.is_superuser and request.user.role == 'customer_service' and reservation.owner_id != request.user.id:
+        messages.error(request, '您没有权限操作该预定单')
+        return redirect('reservations_list')
+    if reservation.status in ['converted', 'refunded']:
+        messages.error(request, '当前状态不可取消')
+        return redirect('reservations_list')
+    before_snapshot = _snapshot_reservation_audit(reservation)
+    reservation.status = 'cancelled'
+    reservation.notes = (reservation.notes + '\n' if reservation.notes else '') + (request.POST.get('reason') or '手动取消')
+    reservation.save(update_fields=['status', 'notes', 'updated_at'])
+    AuditService.log_with_diff(
+        user=request.user,
+        action='status_change',
+        module='预定单',
+        target=reservation.reservation_no,
+        summary='取消预定单',
+        before=before_snapshot,
+        after=_snapshot_reservation_audit(reservation),
+    )
+    messages.success(request, f'预定单已取消：{reservation.reservation_no}')
+    return redirect('reservations_list')
+
+
+@login_required
+@require_permission('reservations', 'update')
+def reservations_bulk_update_status(request):
+    """批量更新预定单跟进状态，仅限安全状态流转。"""
+    if request.method != 'POST':
+        return redirect('reservations_list')
+
+    target_status = (request.POST.get('status') or '').strip()
+    if target_status not in ['pending_info', 'ready_to_convert']:
+        messages.error(request, '批量状态无效')
+        return redirect('reservations_list')
+
+    reservation_ids = [str(i).strip() for i in request.POST.getlist('ids[]') if str(i).strip()]
+    if not reservation_ids:
+        messages.error(request, '请先勾选预定单')
+        return redirect('reservations_list')
+
+    reservations = Reservation.objects.filter(id__in=reservation_ids)
+    if not request.user.is_superuser and request.user.role == 'customer_service':
+        reservations = reservations.filter(owner=request.user)
+
+    updated = 0
+    skipped = 0
+    for reservation in reservations:
+        if reservation.status in ['converted', 'refunded']:
+            skipped += 1
+            continue
+        if reservation.status == target_status:
+            continue
+        before_snapshot = _snapshot_reservation_audit(reservation)
+        reservation.status = target_status
+        reservation.save(update_fields=['status', 'updated_at'])
+        AuditService.log_with_diff(
+            user=request.user,
+            action='status_change',
+            module='预定单',
+            target=reservation.reservation_no,
+            summary=f'批量标记为{reservation.get_status_display()}',
+            before=before_snapshot,
+            after=_snapshot_reservation_audit(reservation),
+            extra={'source': 'bulk_followup'},
+        )
+        updated += 1
+
+    if updated:
+        messages.success(request, f'批量跟进完成：已更新 {updated} 条')
+    elif skipped:
+        messages.warning(request, '所选预定单均不可批量修改')
+    else:
+        messages.info(request, '所选预定单无需变更')
+    return redirect('reservations_list')
+
+
+@login_required
+@require_permission('reservations', 'update')
+def reservations_bulk_transfer_owner(request):
+    """批量转交预定单负责人，仅管理角色可用。"""
+    if request.method != 'POST':
+        return redirect('reservations_list')
+    if request.user.role not in ['admin', 'manager']:
+        messages.error(request, '您没有权限转交预定单负责人')
+        return redirect('reservations_list')
+
+    owner_id = (request.POST.get('owner_id') or '').strip()
+    if not owner_id.isdigit():
+        messages.error(request, '请选择新的负责人')
+        return redirect('reservations_list')
+    new_owner = get_object_or_404(User, id=int(owner_id), is_active=True)
+
+    reservation_ids = [str(i).strip() for i in request.POST.getlist('ids[]') if str(i).strip()]
+    if not reservation_ids:
+        messages.error(request, '请先勾选要转交的预定单')
+        return redirect('reservations_list')
+
+    transfer_reason = (request.POST.get('transfer_reason') or '').strip()
+    reservations = Reservation.objects.filter(id__in=reservation_ids)
+    updated = 0
+    for reservation in reservations:
+        if reservation.status in ['converted', 'cancelled', 'refunded']:
+            continue
+        if reservation.owner_id == new_owner.id:
+            continue
+        before_snapshot = _snapshot_reservation_audit(reservation)
+        reservation.owner = new_owner
+        reservation.save(update_fields=['owner', 'updated_at'])
+        AuditService.log_with_diff(
+            user=request.user,
+            action='update',
+            module='预定单',
+            target=reservation.reservation_no,
+            summary='批量转交负责人',
+            before=before_snapshot,
+            after=_snapshot_reservation_audit(reservation),
+            extra={'reason': transfer_reason, 'source': 'bulk_transfer_owner'},
+        )
+        updated += 1
+
+    if updated:
+        messages.success(request, f'批量转交完成：已转交 {updated} 条')
+    else:
+        messages.info(request, '所选预定单无需转交')
+    return redirect('reservations_list')
+
+
+@login_required
+@require_permission('reservations', 'update')
+def reservation_refund(request, reservation_id):
+    """退款并关闭预定单"""
+    reservation = get_object_or_404(Reservation, id=reservation_id)
+    if request.method != 'POST':
+        return redirect('reservations_list')
+    if not request.user.is_superuser and request.user.role == 'customer_service' and reservation.owner_id != request.user.id:
+        messages.error(request, '您没有权限操作该预定单')
+        return redirect('reservations_list')
+    if reservation.status == 'converted':
+        messages.error(request, '已转正式订单的预定单不能直接退款')
+        return redirect('reservations_list')
+    before_snapshot = _snapshot_reservation_audit(reservation)
+    refund_amount = reservation.deposit_amount or Decimal('0.00')
+    _create_reservation_finance_transaction(
+        reservation=reservation,
+        transaction_type='reservation_deposit_refund',
+        amount=refund_amount,
+        user=request.user,
+        notes=(request.POST.get('reason') or '预定单退款'),
+    )
+    reservation.deposit_amount = Decimal('0.00')
+    reservation.status = 'refunded'
+    reservation.notes = (reservation.notes + '\n' if reservation.notes else '') + (request.POST.get('reason') or '预定单退款')
+    reservation.save(update_fields=['deposit_amount', 'status', 'notes', 'updated_at'])
+    AuditService.log_with_diff(
+        user=request.user,
+        action='status_change',
+        module='预定单',
+        target=reservation.reservation_no,
+        summary='预定单退款',
+        before=before_snapshot,
+        after=_snapshot_reservation_audit(reservation),
+        extra={'refund_amount': str(refund_amount)},
+    )
+    messages.success(request, f'预定单已退款：{reservation.reservation_no}')
+    return redirect('reservations_list')
+
+
+@login_required
+@require_permission('reservations', 'view')
+def reservation_detail(request, reservation_id):
+    """预定单详情"""
+    reservation = get_object_or_404(
+        Reservation.objects.select_related('sku', 'created_by', 'owner', 'converted_order'),
+        id=reservation_id,
+    )
+    if not request.user.is_superuser and request.user.role == 'customer_service' and reservation.owner_id != request.user.id:
+        messages.error(request, '您没有权限查看该预定单')
+        return redirect('reservations_list')
+
+    finance_transactions = FinanceTransaction.objects.filter(reservation=reservation).select_related('created_by').order_by('-created_at')
+    audit_logs = (
+        AuditLog.objects.filter(module='预定单', target=reservation.reservation_no)
+        .select_related('user')
+        .order_by('-created_at')
+    )
+    for log in audit_logs:
+        log.details_parsed = _parse_audit_details(log)
+
+    context = {
+        'reservation': reservation,
+        'finance_transactions': finance_transactions,
+        'audit_logs': audit_logs,
+        'conflict_summary': _build_reservation_conflict_summary(reservation=reservation),
+    }
+    return render(request, 'reservations/detail.html', context)
 
 
 @login_required
@@ -934,6 +1540,10 @@ def orders_list(request):
     status_filter = request.GET.get('status', '')
     keyword = request.GET.get('keyword', '')
     sla_filter = (request.GET.get('sla', '') or '').strip()
+    source_filter = (request.GET.get('source', '') or '').strip()
+    return_service_filter = (request.GET.get('return_service', '') or '').strip()
+    return_payment_filter = (request.GET.get('return_payment', '') or '').strip()
+    pickup_filter = (request.GET.get('pickup', '') or '').strip()
 
     if status_filter:
         orders = orders.filter(status=status_filter)
@@ -944,8 +1554,19 @@ def orders_list(request):
             Q(customer_name__icontains=keyword) |
             Q(customer_phone__icontains=keyword) |
             Q(customer_wechat__icontains=keyword) |
-            Q(xianyu_order_no__icontains=keyword)
+            Q(xianyu_order_no__icontains=keyword) |
+            Q(source_order_no__icontains=keyword) |
+            Q(return_service_payment_reference__icontains=keyword)
         )
+
+    if source_filter in dict(Order.ORDER_SOURCE_CHOICES):
+        orders = orders.filter(order_source=source_filter)
+    if return_service_filter in dict(Order.RETURN_SERVICE_TYPE_CHOICES):
+        orders = orders.filter(return_service_type=return_service_filter)
+    if return_payment_filter in dict(Order.RETURN_SERVICE_PAYMENT_STATUS_CHOICES):
+        orders = orders.filter(return_service_payment_status=return_payment_filter)
+    if pickup_filter in dict(Order.RETURN_PICKUP_STATUS_CHOICES):
+        orders = orders.filter(return_pickup_status=pickup_filter)
 
     def _timeliness_for_order(order):
         shipped = bool(order.ship_tracking) or order.status in ['delivered', 'in_use', 'returned', 'completed']
@@ -1015,6 +1636,10 @@ def orders_list(request):
         order.shipping_timeliness_label = t['label']
         order.shipping_timeliness_badge_class = t['badge_class']
         order.shipping_timeliness_priority = t['priority']
+        order.order_source_label = dict(Order.ORDER_SOURCE_CHOICES).get(order.order_source, '-')
+        order.return_service_type_label = dict(Order.RETURN_SERVICE_TYPE_CHOICES).get(order.return_service_type, '-')
+        order.return_service_payment_status_label = dict(Order.RETURN_SERVICE_PAYMENT_STATUS_CHOICES).get(order.return_service_payment_status, '-')
+        order.return_pickup_status_label = dict(Order.RETURN_PICKUP_STATUS_CHOICES).get(order.return_pickup_status, '-')
         enriched_orders.append(order)
     _attach_transfer_allocations_display(orders_page.object_list)
     current_ids = [o.id for o in orders_page.object_list]
@@ -1044,7 +1669,15 @@ def orders_list(request):
         'status_filter': status_filter,
         'keyword': keyword,
         'sla_filter': sla_filter,
+        'source_filter': source_filter,
+        'return_service_filter': return_service_filter,
+        'return_payment_filter': return_payment_filter,
+        'pickup_filter': pickup_filter,
         'pagination_query': _build_querystring(request, ['page']),
+        'order_source_choices': Order.ORDER_SOURCE_CHOICES,
+        'return_service_type_choices': Order.RETURN_SERVICE_TYPE_CHOICES,
+        'return_service_payment_status_choices': Order.RETURN_SERVICE_PAYMENT_STATUS_CHOICES,
+        'return_pickup_status_choices': Order.RETURN_PICKUP_STATUS_CHOICES,
     }
     return render(request, 'orders/list.html', context)
 
@@ -1053,8 +1686,14 @@ def orders_list(request):
 @require_permission('orders', 'create')
 def order_create(request):
     """创建订单"""
+    source_reservation = None
     if request.method == 'POST':
         try:
+            reservation_id_raw = (request.POST.get('reservation_id') or '').strip()
+            if reservation_id_raw:
+                source_reservation = get_object_or_404(Reservation.objects.select_related('sku'), id=reservation_id_raw)
+                if not source_reservation.can_convert:
+                    raise ValueError('该预定单当前状态不可转正式订单')
             # 获取订单明细
             sku_ids = request.POST.getlist('sku_id[]')
             quantities = request.POST.getlist('quantity[]')
@@ -1064,7 +1703,14 @@ def order_create(request):
             if not sku_ids or not sku_ids[0]:
                 messages.error(request, '请至少添加一个订单明细')
                 skus = SKU.objects.filter(is_active=True)
-                return render(request, 'orders/form.html', {'skus': skus, 'mode': 'create'})
+                context = {
+                    'skus': skus,
+                    'mode': 'create',
+                    'form_values': _extract_order_form_values(request),
+                    'source_reservation': source_reservation,
+                    **_build_order_form_meta(),
+                }
+                return render(request, 'orders/form.html', context)
 
             # 构建订单明细列表
             items = []
@@ -1087,17 +1733,52 @@ def order_create(request):
                 'customer_phone': request.POST.get('customer_phone'),
                 'customer_wechat': request.POST.get('customer_wechat', ''),
                 'xianyu_order_no': request.POST.get('xianyu_order_no', ''),
+                'order_source': request.POST.get('order_source', 'wechat'),
+                'source_order_no': request.POST.get('source_order_no', ''),
                 'customer_email': request.POST.get('customer_email', ''),
                 'delivery_address': request.POST.get('delivery_address'),
                 'return_address': request.POST.get('return_address', ''),
                 'event_date': datetime.strptime(request.POST.get('event_date'), '%Y-%m-%d').date(),
                 'rental_days': int(request.POST.get('rental_days', 1)),
+                'return_service_type': request.POST.get('return_service_type', 'none'),
+                'return_service_fee': request.POST.get('return_service_fee', '0'),
+                'return_service_payment_status': request.POST.get('return_service_payment_status', 'unpaid'),
+                'return_service_payment_channel': request.POST.get('return_service_payment_channel', ''),
+                'return_service_payment_reference': request.POST.get('return_service_payment_reference', ''),
+                'return_pickup_status': request.POST.get('return_pickup_status', 'not_required'),
                 'notes': request.POST.get('notes', ''),
                 'items': items
             }
 
             # 创建订单
             order = OrderService.create_order(data, request.user)
+            if source_reservation:
+                deposit_amount = source_reservation.deposit_amount or Decimal('0.00')
+                if deposit_amount > 0:
+                    order.deposit_paid = deposit_amount
+                    order.save(update_fields=['deposit_paid', 'updated_at'])
+                    FinanceTransaction.objects.create(
+                        order=order,
+                        transaction_type='reservation_deposit_applied',
+                        amount=deposit_amount,
+                        reference_no=source_reservation.reservation_no,
+                        notes='由预定单订金自动结转为订单押金，不产生新增收款',
+                        created_by=request.user,
+                    )
+                before_reservation = _snapshot_reservation_audit(source_reservation)
+                source_reservation.status = 'converted'
+                source_reservation.converted_order = order
+                source_reservation.save(update_fields=['status', 'converted_order', 'updated_at'])
+                AuditService.log_with_diff(
+                    user=request.user,
+                    action='status_change',
+                    module='预定单',
+                    target=source_reservation.reservation_no,
+                    summary='预定单转正式订单',
+                    before=before_reservation,
+                    after=_snapshot_reservation_audit(source_reservation),
+                    extra={'order_no': order.order_no},
+                )
             pending_transfer_tasks = Transfer.objects.filter(
                 order_to=order,
                 status='pending'
@@ -1118,13 +1799,40 @@ def order_create(request):
             messages.error(request, str(e))
         except Exception as e:
             messages.error(request, f'订单创建失败：{str(e)}')
+        form_values = _extract_order_form_values(request)
+    else:
+        form_values = {}
 
     # 获取可用的SKU
     skus = SKU.objects.filter(is_active=True)
+    reservation_id = (request.GET.get('reservation_id') or request.POST.get('reservation_id') or '').strip()
+    if reservation_id:
+        source_reservation = get_object_or_404(Reservation.objects.select_related('sku'), id=reservation_id)
+        if source_reservation.can_convert:
+            form_values = {
+                'customer_name': source_reservation.customer_name,
+                'customer_phone': source_reservation.customer_phone,
+                'customer_wechat': source_reservation.customer_wechat,
+                'event_date': source_reservation.event_date.strftime('%Y-%m-%d') if source_reservation.event_date else '',
+                'delivery_address': '',
+                'rental_days': 1,
+                'order_source': 'wechat',
+                'return_service_type': 'none',
+                'return_service_fee': '0.00',
+                'return_service_payment_status': 'unpaid',
+                'return_pickup_status': 'not_required',
+                'notes': f'来源预定单：{source_reservation.reservation_no}\n{source_reservation.notes}'.strip(),
+            }
+        else:
+            messages.warning(request, '该预定单当前状态不可转正式订单')
+            source_reservation = None
 
     context = {
         'skus': skus,
         'mode': 'create',
+        'source_reservation': source_reservation,
+        'form_values': form_values,
+        **_build_order_form_meta(),
     }
     return render(request, 'orders/form.html', context)
 
@@ -1163,11 +1871,19 @@ def order_edit(request, order_id):
                 'customer_phone': request.POST.get('customer_phone'),
                 'customer_wechat': request.POST.get('customer_wechat', ''),
                 'xianyu_order_no': request.POST.get('xianyu_order_no', ''),
+                'order_source': request.POST.get('order_source', order.order_source),
+                'source_order_no': request.POST.get('source_order_no', ''),
                 'customer_email': request.POST.get('customer_email', ''),
                 'delivery_address': request.POST.get('delivery_address'),
                 'return_address': request.POST.get('return_address', ''),
                 'event_date': datetime.strptime(request.POST.get('event_date'), '%Y-%m-%d').date(),
                 'rental_days': int(request.POST.get('rental_days', 1)),
+                'return_service_type': request.POST.get('return_service_type', order.return_service_type),
+                'return_service_fee': request.POST.get('return_service_fee', str(order.return_service_fee)),
+                'return_service_payment_status': request.POST.get('return_service_payment_status', order.return_service_payment_status),
+                'return_service_payment_channel': request.POST.get('return_service_payment_channel', order.return_service_payment_channel),
+                'return_service_payment_reference': request.POST.get('return_service_payment_reference', order.return_service_payment_reference),
+                'return_pickup_status': request.POST.get('return_pickup_status', order.return_pickup_status),
                 'notes': request.POST.get('notes', ''),
                 'items': items,
             }
@@ -1181,6 +1897,9 @@ def order_edit(request, order_id):
             messages.error(request, str(e))
         except Exception as e:
             messages.error(request, f'订单更新失败：{str(e)}')
+        form_values = _extract_order_form_values(request)
+    else:
+        form_values = {}
 
     skus = SKU.objects.filter(is_active=True)
     sku_preferred_source = {}
@@ -1198,6 +1917,8 @@ def order_edit(request, order_id):
         'skus': skus,
         'mode': 'edit',
         'order_items_with_transfer': order_items_with_transfer,
+        'form_values': form_values,
+        **_build_order_form_meta(),
     }
     return render(request, 'orders/form.html', context)
 
@@ -1240,6 +1961,11 @@ def order_detail(request, order_id):
         'item_rows': item_rows,
         'finance_transactions': finance_transactions,
         'expected_deposit_total': expected_deposit_total,
+        'order_source_label': dict(Order.ORDER_SOURCE_CHOICES).get(order.order_source, '-'),
+        'return_service_type_label': dict(Order.RETURN_SERVICE_TYPE_CHOICES).get(order.return_service_type, '-'),
+        'return_service_payment_status_label': dict(Order.RETURN_SERVICE_PAYMENT_STATUS_CHOICES).get(order.return_service_payment_status, '-'),
+        'return_service_payment_channel_label': dict(Order.RETURN_SERVICE_PAYMENT_CHANNEL_CHOICES).get(order.return_service_payment_channel, '-') if order.return_service_payment_channel else '-',
+        'return_pickup_status_label': dict(Order.RETURN_PICKUP_STATUS_CHOICES).get(order.return_pickup_status, '-'),
     }
     return render(request, 'orders/detail.html', context)
 
@@ -1281,6 +2007,33 @@ def order_finance_add(request, order_id):
             messages.success(request, '已新增财务流水')
         except Exception as e:
             messages.error(request, f'新增失败：{str(e)}')
+    return redirect('order_detail', order_id=order_id)
+
+
+@login_required
+@require_permission('orders', 'update')
+def order_return_service_update(request, order_id):
+    """订单详情：独立登记/修改包回邮服务，适配发货后补录场景"""
+    if request.method != 'POST':
+        return redirect('order_detail', order_id=order_id)
+    try:
+        OrderService.update_return_service(
+            order_id,
+            {
+                'return_service_type': request.POST.get('return_service_type', 'none'),
+                'return_service_fee': request.POST.get('return_service_fee', '0'),
+                'return_service_payment_status': request.POST.get('return_service_payment_status', 'unpaid'),
+                'return_service_payment_channel': request.POST.get('return_service_payment_channel', ''),
+                'return_service_payment_reference': request.POST.get('return_service_payment_reference', ''),
+                'return_pickup_status': request.POST.get('return_pickup_status', 'not_required'),
+            },
+            request.user,
+        )
+        messages.success(request, '包回邮服务信息更新成功')
+    except ValueError as exc:
+        messages.error(request, str(exc))
+    except Exception as exc:
+        messages.error(request, f'包回邮服务更新失败：{exc}')
     return redirect('order_detail', order_id=order_id)
 
 
@@ -4346,6 +5099,7 @@ def settings_view(request):
         managed_keys = [
             'ship_lead_days',
             'return_offset_days',
+            'reservation_followup_lead_days',
             'buffer_days',
             'max_transfer_gap_days',
             'transfer_score_weight_date',
@@ -4866,7 +5620,7 @@ def approval_remind_overdue(request):
 @require_permission('finance', 'view')
 def finance_transactions_list(request):
     """财务流水中心"""
-    records = FinanceTransaction.objects.select_related('order', 'created_by').all()
+    records = FinanceTransaction.objects.select_related('order', 'reservation', 'created_by').all()
     tx_type = (request.GET.get('tx_type', '') or '').strip()
     keyword = (request.GET.get('keyword', '') or '').strip()
     start_date = (request.GET.get('start_date', '') or '').strip()
@@ -4879,6 +5633,11 @@ def finance_transactions_list(request):
         records = records.filter(
             Q(order__order_no__icontains=keyword) |
             Q(order__customer_name__icontains=keyword) |
+            Q(order__source_order_no__icontains=keyword) |
+            Q(order__return_service_payment_reference__icontains=keyword) |
+            Q(reservation__reservation_no__icontains=keyword) |
+            Q(reservation__customer_wechat__icontains=keyword) |
+            Q(reservation__customer_name__icontains=keyword) |
             Q(reference_no__icontains=keyword) |
             Q(notes__icontains=keyword)
         )
@@ -4896,13 +5655,14 @@ def finance_transactions_list(request):
         response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
         response['Content-Disposition'] = 'attachment; filename="finance_transactions.csv"'
         writer = csv.writer(response)
-        writer.writerow(['时间', '订单号', '客户', '交易类型', '金额', '关联单号', '备注', '操作人'])
+        writer.writerow(['时间', '单据类型', '单号', '客户', '交易类型', '金额', '关联单号', '备注', '操作人'])
         tx_display = dict(FinanceTransaction.TYPE_CHOICES)
         for r in records:
             writer.writerow([
                 r.created_at.strftime('%Y-%m-%d %H:%M:%S'),
-                r.order.order_no if r.order else '',
-                r.order.customer_name if r.order else '',
+                r.subject_type_label,
+                r.subject_no,
+                r.subject_customer_name,
                 tx_display.get(r.transaction_type, r.transaction_type),
                 str(r.amount),
                 r.reference_no or '',

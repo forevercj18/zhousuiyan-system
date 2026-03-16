@@ -241,12 +241,44 @@ class Order(models.Model):
         ('completed', '已完成'),
         ('cancelled', '已取消'),
     ]
+    ORDER_SOURCE_CHOICES = [
+        ('wechat', '微信成交'),
+        ('xianyu', '闲鱼'),
+        ('xiaohongshu', '小红书'),
+        ('other', '其他'),
+    ]
+    RETURN_SERVICE_TYPE_CHOICES = [
+        ('none', '无'),
+        ('customer_self_return', '客户自寄回'),
+        ('platform_return_included', '包回邮服务'),
+    ]
+    RETURN_SERVICE_PAYMENT_STATUS_CHOICES = [
+        ('unpaid', '未收款'),
+        ('paid', '已收款'),
+        ('refunded', '已退款'),
+    ]
+    RETURN_SERVICE_PAYMENT_CHANNEL_CHOICES = [
+        ('xianyu', '闲鱼'),
+        ('xiaohongshu', '小红书'),
+        ('wechat', '微信'),
+        ('offline', '线下'),
+    ]
+    RETURN_PICKUP_STATUS_CHOICES = [
+        ('not_required', '无需叫件'),
+        ('pending_schedule', '待安排取件'),
+        ('scheduled', '已安排取件'),
+        ('picked_up', '已上门取件'),
+        ('completed', '已完成'),
+        ('cancelled', '已取消'),
+    ]
 
     order_no = models.CharField('订单号', max_length=50, unique=True)
     customer_name = models.CharField('客户姓名', max_length=100)
     customer_phone = models.CharField('联系电话', max_length=20)
     customer_wechat = models.CharField('微信号', max_length=100, blank=True)
     xianyu_order_no = models.CharField('闲鱼订单号', max_length=100, blank=True)
+    order_source = models.CharField('订单来源', max_length=20, choices=ORDER_SOURCE_CHOICES, default='wechat')
+    source_order_no = models.CharField('平台单号', max_length=100, blank=True)
     customer_email = models.EmailField('邮箱', blank=True)
 
     # 地址信息
@@ -267,6 +299,27 @@ class Order(models.Model):
     total_amount = models.DecimalField('订单总额', max_digits=10, decimal_places=2, default=Decimal('0.00'))
     deposit_paid = models.DecimalField('已付押金', max_digits=10, decimal_places=2, default=Decimal('0.00'))
     balance = models.DecimalField('待收尾款', max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    return_service_type = models.CharField('回寄服务类型', max_length=30, choices=RETURN_SERVICE_TYPE_CHOICES, default='none')
+    return_service_fee = models.DecimalField('包回邮服务费', max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    return_service_payment_status = models.CharField(
+        '包回邮收款状态',
+        max_length=20,
+        choices=RETURN_SERVICE_PAYMENT_STATUS_CHOICES,
+        default='unpaid',
+    )
+    return_service_payment_channel = models.CharField(
+        '包回邮收款渠道',
+        max_length=20,
+        choices=RETURN_SERVICE_PAYMENT_CHANNEL_CHOICES,
+        blank=True,
+    )
+    return_service_payment_reference = models.CharField('包回邮支付参考号', max_length=100, blank=True)
+    return_pickup_status = models.CharField(
+        '包回邮叫件状态',
+        max_length=20,
+        choices=RETURN_PICKUP_STATUS_CHOICES,
+        default='not_required',
+    )
 
     # 状态和备注
     status = models.CharField('订单状态', max_length=20, choices=STATUS_CHOICES, default='pending')
@@ -287,6 +340,8 @@ class Order(models.Model):
             models.Index(fields=['status']),
             models.Index(fields=['event_date']),
             models.Index(fields=['customer_phone']),
+            models.Index(fields=['order_source']),
+            models.Index(fields=['source_order_no']),
         ]
 
     def __str__(self):
@@ -341,6 +396,177 @@ class OrderItem(models.Model):
         # 订单明细小计仅统计租金，押金单独管理
         self.subtotal = self.rental_price * self.quantity
         super().save(*args, **kwargs)
+
+
+class Reservation(models.Model):
+    """预定单模型"""
+    STATUS_CHOICES = [
+        ('pending_info', '待补信息'),
+        ('ready_to_convert', '可转正式订单'),
+        ('converted', '已转订单'),
+        ('cancelled', '已取消'),
+        ('refunded', '已退款'),
+    ]
+
+    reservation_no = models.CharField('预定单号', max_length=50, unique=True)
+    customer_wechat = models.CharField('微信号', max_length=100)
+    customer_name = models.CharField('客户姓名', max_length=100, blank=True)
+    customer_phone = models.CharField('联系电话', max_length=20, blank=True)
+    city = models.CharField('意向城市', max_length=100, blank=True)
+    sku = models.ForeignKey(SKU, on_delete=models.PROTECT, related_name='reservations', verbose_name='意向款式')
+    quantity = models.IntegerField('数量', default=1, validators=[MinValueValidator(1)])
+    event_date = models.DateField('预定日期')
+    deposit_amount = models.DecimalField('订金金额', max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending_info')
+    notes = models.TextField('备注', blank=True)
+    converted_order = models.OneToOneField(
+        'Order',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='source_reservation',
+        verbose_name='关联正式订单',
+    )
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_reservations', verbose_name='创建人')
+    owner = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='owned_reservations', verbose_name='当前负责人')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'reservations'
+        verbose_name = '预定单'
+        verbose_name_plural = '预定单'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['reservation_no']),
+            models.Index(fields=['status']),
+            models.Index(fields=['event_date']),
+            models.Index(fields=['customer_wechat']),
+            models.Index(fields=['owner', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.reservation_no} - {self.customer_wechat}"
+
+    def save(self, *args, **kwargs):
+        if not self.reservation_no:
+            from django.utils import timezone
+            base = timezone.now().strftime('%Y%m%d%H%M%S%f')
+            self.reservation_no = f"RSV{base}"
+            suffix = 1
+            while Reservation.objects.filter(reservation_no=self.reservation_no).exists():
+                self.reservation_no = f"RSV{base}{suffix}"
+                suffix += 1
+        if not self.owner_id and self.created_by_id:
+            self.owner_id = self.created_by_id
+        super().save(*args, **kwargs)
+
+    @property
+    def can_convert(self):
+        return self.status in ['pending_info', 'ready_to_convert'] and self.converted_order_id is None
+
+    @property
+    def followup_lead_days(self):
+        from .utils import get_system_settings
+        try:
+            return int(get_system_settings().get('reservation_followup_lead_days', 7) or 7)
+        except Exception:
+            return 7
+
+    @property
+    def followup_date(self):
+        return self.event_date - timedelta(days=self.followup_lead_days) if self.event_date else None
+
+    @property
+    def contact_status_code(self):
+        if self.status == 'converted':
+            return 'converted'
+        if self.status in ['cancelled', 'refunded']:
+            return 'closed'
+        if not self.followup_date:
+            return 'unknown'
+        from django.utils import timezone
+        today = timezone.localdate()
+        if self.followup_date < today:
+            return 'overdue'
+        if self.followup_date == today:
+            return 'today'
+        return 'pending'
+
+    @property
+    def contact_status_label(self):
+        return {
+            'converted': '已转单',
+            'closed': '已关闭',
+            'overdue': '已逾期未联系',
+            'today': '今日需联系',
+            'pending': '未到联系日',
+            'unknown': '待计算',
+        }.get(self.contact_status_code, '待计算')
+
+    @property
+    def fulfillment_stage_code(self):
+        if not self.converted_order_id:
+            return 'not_converted'
+        order_status = self.converted_order.status
+        if order_status in ['pending', 'confirmed']:
+            return 'awaiting_shipment'
+        if order_status in ['delivered', 'in_use', 'returned']:
+            return 'in_fulfillment'
+        if order_status == 'completed':
+            return 'completed'
+        if order_status == 'cancelled':
+            return 'cancelled'
+        return 'unknown'
+
+    @property
+    def fulfillment_stage_label(self):
+        return {
+            'not_converted': '未转单',
+            'awaiting_shipment': '已转单待发货',
+            'in_fulfillment': '已发货履约中',
+            'completed': '已履约完成',
+            'cancelled': '正式订单已取消',
+            'unknown': '待跟进',
+        }.get(self.fulfillment_stage_code, '待跟进')
+
+    @property
+    def converted_order_shipping_followup_code(self):
+        if not self.converted_order_id:
+            return 'none'
+        order = self.converted_order
+        shipped = bool(order.ship_tracking) or order.status in ['delivered', 'in_use', 'returned', 'completed']
+        if shipped:
+            return 'shipped'
+        if order.status not in ['pending', 'confirmed']:
+            return 'none'
+        if not order.ship_date:
+            return 'missing_ship_date'
+        from django.utils import timezone
+        today = timezone.localdate()
+        if order.ship_date <= today:
+            return 'overdue'
+        return 'normal'
+
+    @property
+    def converted_order_shipping_followup_label(self):
+        return {
+            'none': '-',
+            'shipped': '已发货',
+            'missing_ship_date': '待补发货日期',
+            'overdue': '待发货超时',
+            'normal': '待发货',
+        }.get(self.converted_order_shipping_followup_code, '-')
+
+    @property
+    def converted_order_balance_followup_label(self):
+        if not self.converted_order_id:
+            return '-'
+        if self.converted_order.status == 'cancelled':
+            return '正式订单已取消'
+        if (self.converted_order.balance or Decimal('0.00')) > Decimal('0.00'):
+            return f"待收尾款 ￥{self.converted_order.balance}"
+        return '尾款已结清'
 
 
 class Part(models.Model):
@@ -909,14 +1135,20 @@ class SystemSettings(models.Model):
 class FinanceTransaction(models.Model):
     """订单资金流水"""
     TYPE_CHOICES = [
+        ('reservation_deposit_received', '收预定订金'),
+        ('reservation_deposit_refund', '退预定订金'),
+        ('reservation_deposit_applied', '预定订金转押金'),
         ('deposit_received', '收押金'),
         ('balance_received', '收尾款'),
         ('deposit_refund', '退押金'),
+        ('return_service_received', '收包回邮服务费'),
+        ('return_service_refund', '退包回邮服务费'),
         ('penalty_charge', '扣罚'),
         ('manual_adjust', '人工调整'),
     ]
 
-    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='finance_transactions', verbose_name='订单')
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, null=True, blank=True, related_name='finance_transactions', verbose_name='订单')
+    reservation = models.ForeignKey(Reservation, on_delete=models.CASCADE, null=True, blank=True, related_name='finance_transactions', verbose_name='预定单')
     transaction_type = models.CharField('交易类型', max_length=30, choices=TYPE_CHOICES)
     amount = models.DecimalField('金额', max_digits=10, decimal_places=2, default=Decimal('0.00'))
     reference_no = models.CharField('关联单号', max_length=100, blank=True)
@@ -931,11 +1163,37 @@ class FinanceTransaction(models.Model):
         ordering = ['-created_at', '-id']
         indexes = [
             models.Index(fields=['order', 'transaction_type']),
+            models.Index(fields=['reservation', 'transaction_type']),
             models.Index(fields=['created_at']),
         ]
 
     def __str__(self):
-        return f"{self.order.order_no} {self.transaction_type} {self.amount}"
+        subject = self.order.order_no if self.order else (self.reservation.reservation_no if self.reservation else '-')
+        return f"{subject} {self.transaction_type} {self.amount}"
+
+    @property
+    def subject_no(self):
+        if self.order:
+            return self.order.order_no
+        if self.reservation:
+            return self.reservation.reservation_no
+        return ''
+
+    @property
+    def subject_customer_name(self):
+        if self.order:
+            return self.order.customer_name
+        if self.reservation:
+            return self.reservation.customer_name or self.reservation.customer_wechat
+        return ''
+
+    @property
+    def subject_type_label(self):
+        if self.order:
+            return '订单'
+        if self.reservation:
+            return '预定单'
+        return '-'
 
 
 class RiskEvent(models.Model):
