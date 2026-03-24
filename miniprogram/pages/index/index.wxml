@@ -1,0 +1,86 @@
+<view class="container">
+  <view class="staff-entry card" wx:if="{{staffProfile}}">
+    <view class="staff-entry-main">
+      <view class="staff-title-row">
+        <text class="staff-title">工作模式</text>
+        <text class="staff-badge" wx:if="{{workSummary}}">{{workSummary.total}}</text>
+      </view>
+      <text class="staff-subtitle">{{staffProfile.full_name}} · {{staffProfile.role_label}}</text>
+      <text class="staff-urgent" wx:if="{{workSummary}}">{{workSummary.labels.join(' · ')}}</text>
+      <view class="mode-pill-row">
+        <view class="mode-pill {{preferredMode === 'customer' ? 'active' : ''}}" bindtap="stayCustomerMode">客户模式</view>
+        <view class="mode-pill {{preferredMode === 'work' ? 'active work' : ''}}" bindtap="goWorkHome">工作模式</view>
+      </view>
+    </view>
+    <button class="staff-btn" bindtap="goWorkHome">进入工作台</button>
+  </view>
+
+  <view class="staff-entry card" wx:elif="{{!staffProfile}}">
+    <view>
+      <text class="staff-title">员工入口</text>
+      <text class="staff-subtitle">客服和仓库人员可绑定后台账号，在手机上处理待办</text>
+    </view>
+    <button class="staff-btn secondary" bindtap="goWorkBind">员工绑定</button>
+  </view>
+
+  <!-- 搜索栏 -->
+  <view class="search-bar">
+    <view class="search-input-wrap">
+      <icon type="search" size="14" color="#999" />
+      <input class="search-input"
+             placeholder="搜索套装名称"
+             value="{{keyword}}"
+             confirm-type="search"
+             bindinput="onSearchInput"
+             bindconfirm="onSearch" />
+      <icon wx:if="{{keyword}}" type="clear" size="14" bindtap="onClearSearch" />
+    </view>
+  </view>
+
+  <!-- 加载中 -->
+  <view class="loading-wrap" wx:if="{{loading}}">
+    <view class="loading-spinner"></view>
+  </view>
+
+  <!-- 空状态 -->
+  <view class="empty-state" wx:elif="{{isEmpty}}">
+    <text class="empty-icon">🎪</text>
+    <text class="empty-text">暂无可租赁的套装</text>
+    <text class="empty-text" style="margin-top: 10rpx; font-size: 24rpx;">下拉刷新试试</text>
+  </view>
+
+  <!-- 产品列表 -->
+  <view class="sku-list" wx:else>
+    <view class="card sku-card" wx:for="{{skus}}" wx:key="id" bindtap="goDetail" data-id="{{item.id}}">
+      <!-- 产品图片 -->
+      <view class="sku-image-wrap">
+        <image class="sku-image"
+               src="{{item.cover_image}}"
+               mode="aspectFill"
+               wx:if="{{item.cover_image}}" />
+        <view class="sku-image sku-image-placeholder" wx:else>
+          <text>🎂</text>
+        </view>
+        <!-- 库存标签 -->
+        <view class="stock-tag tag-warning" wx:if="{{item.stock_status === 'warning'}}">即将售罄</view>
+        <view class="stock-tag tag-soldout" wx:elif="{{item.stock_status === 'soldout'}}">已售罄</view>
+      </view>
+
+      <!-- 产品信息 -->
+      <view class="sku-info">
+        <text class="sku-name">{{item.name}}</text>
+        <text class="sku-desc" wx:if="{{item.description}}">{{item.description}}</text>
+        <view class="sku-bottom">
+          <view class="price">
+            <text class="price-symbol">¥</text>
+            <text class="price-value">{{item.rental_price}}</text>
+            <text class="price-label">/次</text>
+          </view>
+          <view class="stock-info" wx:if="{{item.stock_status !== 'soldout'}}">
+            <text class="stock-text">剩余 {{item.display_stock}} 套</text>
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

@@ -1,0 +1,100 @@
+/**全局样式**/
+page {
+  background-color: #f5f5f5;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 28rpx;
+  color: #333;
+  box-sizing: border-box;
+}
+
+/* 通用容器 */
+.container {
+  padding: 20rpx 24rpx;
+}
+
+/* 卡片 */
+.card {
+  background: #fff;
+  border-radius: 16rpx;
+  overflow: hidden;
+  box-shadow: 0 2rpx 12rpx rgba(0,0,0,0.06);
+  margin-bottom: 20rpx;
+}
+
+/* 价格样式 */
+.price {
+  color: #ff6b81;
+  font-weight: 600;
+}
+.price-symbol {
+  font-size: 24rpx;
+}
+.price-value {
+  font-size: 36rpx;
+}
+
+/* 标签 */
+.tag {
+  display: inline-block;
+  padding: 4rpx 12rpx;
+  border-radius: 6rpx;
+  font-size: 22rpx;
+  line-height: 1.4;
+}
+.tag-normal {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+.tag-warning {
+  background: #fff3e0;
+  color: #e65100;
+}
+.tag-soldout {
+  background: #f5f5f5;
+  color: #999;
+}
+.tag-info {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+
+/* 按钮 */
+.btn-primary {
+  background: linear-gradient(135deg, #ff6b81, #ff8a80);
+  color: #fff;
+  border: none;
+  border-radius: 44rpx;
+  font-size: 30rpx;
+  font-weight: 500;
+  padding: 0 48rpx;
+  height: 88rpx;
+  line-height: 88rpx;
+  text-align: center;
+}
+.btn-primary::after {
+  border: none;
+}
+
+/* 空状态 */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 120rpx 40rpx;
+  color: #999;
+}
+.empty-state .empty-icon {
+  font-size: 100rpx;
+  margin-bottom: 20rpx;
+}
+.empty-state .empty-text {
+  font-size: 28rpx;
+}
+
+/* 加载中 */
+.loading-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 60rpx 0;
+}

@@ -30,6 +30,7 @@ from .services import (
     OrderService, ProcurementService, PartsService, InventoryUnitService, AuditService,
     RiskEventService, ApprovalService, NotificationService, AssemblyService, MaintenanceService, UnitDisposalService
 )
+from .services.storage_service import StorageService
 from .permissions import (
     require_permission,
     filter_queryset_by_permission,
@@ -926,6 +927,67 @@ def _parse_sku_components_post(request):
     return list(merged.values())
 
 
+def _build_sku_gallery_snapshot(sku):
+    gallery = []
+    for image in sku.images.all().order_by('sort_order', 'id'):
+        gallery.append({
+            'id': image.id,
+            'key': image.image_key or '',
+            'url': image.image_url,
+            'sort_order': int(image.sort_order or 0),
+            'is_cover': bool(image.is_cover),
+        })
+    return gallery
+
+
+def _parse_sku_gallery_post(request):
+    raw = (request.POST.get('gallery_payload') or '').strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f'图片画廊数据格式错误：{exc}') from exc
+    if not isinstance(payload, list):
+        raise ValueError('图片画廊数据格式错误')
+
+    normalized = []
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            continue
+        key = (item.get('key') or '').strip()
+        if not key:
+            continue
+        if not StorageService.is_valid_sku_key(key):
+            raise ValueError('图片画廊包含非法图片 Key')
+        normalized.append({
+            'key': key,
+            'sort_order': int(item.get('sort_order') or index),
+            'is_cover': bool(item.get('is_cover')),
+        })
+
+    if normalized and not any(item['is_cover'] for item in normalized):
+        normalized[0]['is_cover'] = True
+    return normalized
+
+
+def _save_sku_gallery(sku, gallery_payload):
+    if gallery_payload is None:
+        return
+    sku.images.all().delete()
+    if not gallery_payload:
+        return
+    SKUImage.objects.bulk_create([
+        SKUImage(
+            sku=sku,
+            image_key=item['key'],
+            sort_order=item['sort_order'],
+            is_cover=item['is_cover'],
+        )
+        for item in gallery_payload
+    ])
+
+
 def _parse_maintenance_items_post(request):
     """解析维修换件工单明细"""
     old_part_ids = request.POST.getlist('old_part_id[]')
@@ -1068,6 +1130,7 @@ def reservations_list(request):
     journey_filter = (request.GET.get('journey') or '').strip()
     keyword = (request.GET.get('keyword') or '').strip()
     owner_filter = (request.GET.get('owner') or '').strip()
+    source_filter = (request.GET.get('source') or '').strip()
     status_summary['awaiting_shipment'] = reservations.filter(
         status='converted',
         converted_order__status__in=['pending', 'confirmed'],
@@ -1130,6 +1193,8 @@ def reservations_list(request):
             Q(sku__name__icontains=keyword) |
             Q(sku__code__icontains=keyword)
         )
+    if source_filter:
+        reservations = reservations.filter(source=source_filter)
 
     reservations = reservations.order_by('-created_at')
     reservations_page = Paginator(reservations, _get_page_size('page_size_reservations')).get_page(request.GET.get('page'))
@@ -1141,6 +1206,7 @@ def reservations_list(request):
         'journey_filter': journey_filter,
         'keyword': keyword,
         'owner_filter': owner_filter,
+        'source_filter': source_filter,
         'pagination_query': _build_querystring(request, ['page']),
         'status_choices': Reservation.STATUS_CHOICES,
         'status_summary': status_summary,
@@ -1814,9 +1880,9 @@ def order_create(request):
                 'customer_phone': source_reservation.customer_phone,
                 'customer_wechat': source_reservation.customer_wechat,
                 'event_date': source_reservation.event_date.strftime('%Y-%m-%d') if source_reservation.event_date else '',
-                'delivery_address': '',
+                'delivery_address': source_reservation.delivery_address or '',
                 'rental_days': 1,
-                'order_source': 'wechat',
+                'order_source': 'miniprogram' if source_reservation.source == 'miniprogram' else 'wechat',
                 'return_service_type': 'none',
                 'return_service_fee': '0.00',
                 'return_service_payment_status': 'unpaid',
@@ -4346,7 +4412,7 @@ def outbound_inventory_topology_export(request):
 @require_permission('skus', 'view')
 def skus_list(request):
     """产品管理"""
-    skus = SKU.objects.filter(is_active=True).prefetch_related('components__part').order_by('code')
+    skus = SKU.objects.filter(is_active=True).prefetch_related('components__part', 'images').order_by('code')
     keyword = (request.GET.get('keyword', '') or '').strip()
     category = (request.GET.get('category', '') or '').strip()
     if category:
@@ -4383,6 +4449,10 @@ def skus_list(request):
         sku.components_b64 = base64.b64encode(
             sku.components_json.encode('utf-8')
         ).decode('ascii')
+        sku.gallery_json = json.dumps(_build_sku_gallery_snapshot(sku), ensure_ascii=False)
+        sku.gallery_b64 = base64.b64encode(
+            sku.gallery_json.encode('utf-8')
+        ).decode('ascii')
         sku_components_map[str(sku.id)] = components
 
     parts = Part.objects.filter(is_active=True).order_by('name')
@@ -4393,11 +4463,30 @@ def skus_list(request):
         'keyword': keyword,
         'category': category,
         'parts': parts,
+        'storage_status': StorageService.get_storage_status(),
         'sku_components_map_json': json.dumps(sku_components_map, ensure_ascii=False),
         'assembly_feedback_json': json.dumps(assembly_feedback, ensure_ascii=False) if assembly_feedback else '',
         'pagination_query': _build_querystring(request, ['page']),
     }
     return render(request, 'skus.html', context)
+
+
+@login_required
+@require_permission('skus', 'update')
+def sku_upload_token(request):
+    """获取 Cloudflare R2 直传上传凭证"""
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'message': '仅支持 POST 请求'}, status=405)
+    if not has_action_permission(request.user, 'sku.upload_image'):
+        return JsonResponse({'success': False, 'message': '无权上传产品图片'}, status=403)
+    try:
+        filename = (request.POST.get('filename') or '').strip()
+        payload = StorageService.get_upload_payload(filename)
+        return JsonResponse({'success': True, 'data': payload})
+    except ValueError as exc:
+        return JsonResponse({'success': False, 'message': str(exc)}, status=400)
+    except Exception as exc:
+        return JsonResponse({'success': False, 'message': f'获取上传凭证失败：{exc}'}, status=500)
 
 
 @login_required
@@ -4517,16 +4606,22 @@ def sku_create(request):
     if request.method == 'POST':
         try:
             components_payload = _parse_sku_components_post(request)
+            gallery_payload = _parse_sku_gallery_post(request)
             with transaction.atomic():
                 sku = SKU.objects.create(
                     code=request.POST.get('code'),
                     name=request.POST.get('name'),
                     category=request.POST.get('category'),
                     image=request.FILES.get('image'),
+                    image_key=(request.POST.get('image_key') or '').strip(),
                     rental_price=request.POST.get('rental_price'),
                     deposit=request.POST.get('deposit'),
                     stock=0,
                     description=request.POST.get('description', ''),
+                    mp_visible=request.POST.get('mp_visible') == '1',
+                    display_stock=int(request.POST.get('display_stock') or 0),
+                    display_stock_warning=int(request.POST.get('display_stock_warning') or 0),
+                    mp_sort_order=int(request.POST.get('mp_sort_order') or 0),
                 )
                 if components_payload:
                     SKUComponent.objects.bulk_create([
@@ -4537,9 +4632,11 @@ def sku_create(request):
                             notes=item['notes'],
                         ) for item in components_payload
                     ])
-            messages.success(request, f'SKU {sku.code} 创建成功')
-            messages.info(request, f'部件组成已保存：{len(components_payload)} 项')
-            messages.info(request, '套餐库存需通过“新增库存（装配）”操作增加')
+                _save_sku_gallery(sku, gallery_payload)
+            summary_parts = [f'SKU {sku.code} 创建成功']
+            summary_parts.append(f'部件组成已保存：{len(components_payload)} 项')
+            summary_parts.append('套餐库存需通过“新增库存（装配）”操作增加')
+            messages.success(request, '；'.join(summary_parts))
             return redirect('skus_list')
         except Exception as e:
             messages.error(request, f'SKU创建失败：{str(e)}')
@@ -4554,19 +4651,30 @@ def sku_edit(request, sku_id):
     if request.method == 'POST':
         try:
             components_payload = _parse_sku_components_post(request)
+            gallery_payload = _parse_sku_gallery_post(request)
             with transaction.atomic():
                 sku = get_object_or_404(SKU, id=sku_id)
                 sku.code = request.POST.get('code')
                 sku.name = request.POST.get('name')
                 sku.category = request.POST.get('category')
                 new_image = request.FILES.get('image')
+                image_key = (request.POST.get('image_key') or '').strip()
                 if request.POST.get('clear_image') == '1':
                     sku.image = None
+                    sku.image_key = ''
+                elif image_key:
+                    sku.image = None
+                    sku.image_key = image_key
                 elif new_image:
                     sku.image = new_image
+                    sku.image_key = ''
                 sku.rental_price = request.POST.get('rental_price')
                 sku.deposit = request.POST.get('deposit')
                 sku.description = request.POST.get('description', '')
+                sku.mp_visible = request.POST.get('mp_visible') == '1'
+                sku.display_stock = int(request.POST.get('display_stock') or 0)
+                sku.display_stock_warning = int(request.POST.get('display_stock_warning') or 0)
+                sku.mp_sort_order = int(request.POST.get('mp_sort_order') or 0)
                 sku.save()
                 SKUComponent.objects.filter(sku=sku).delete()
                 if components_payload:
@@ -4578,10 +4686,12 @@ def sku_edit(request, sku_id):
                             notes=item['notes'],
                         ) for item in components_payload
                     ])
+                _save_sku_gallery(sku, gallery_payload)
             InventoryUnitService.sync_unit_parts_for_sku(sku)
-            messages.success(request, f'SKU {sku.code} 更新成功')
-            messages.info(request, f'部件组成已更新：{len(components_payload)} 项')
-            messages.info(request, '库存变更请使用“新增库存（装配）”，不支持直接手工修改')
+            summary_parts = [f'SKU {sku.code} 更新成功']
+            summary_parts.append(f'部件组成已更新：{len(components_payload)} 项')
+            summary_parts.append('库存变更请使用“新增库存（装配）”，不支持直接手工修改')
+            messages.success(request, '；'.join(summary_parts))
             return redirect('skus_list')
         except Exception as e:
             messages.error(request, f'SKU更新失败：{str(e)}')
@@ -5178,6 +5288,7 @@ def settings_view(request):
     context = {
         'settings': settings,
         'active_tab': active_tab,
+        'storage_status': StorageService.get_storage_status(),
         'recent_consistency_runs': list(
             DataConsistencyCheckRun.objects.select_related('executed_by').all()[:10]
         ),

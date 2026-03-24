@@ -1,0 +1,60 @@
+<view class="container" wx:if="{{!loading && item}}">
+  <view class="card info-card">
+    <view class="title-row">
+      <text class="title">{{item.reservation_no}}</text>
+      <text class="badge">{{item.status_label}}</text>
+    </view>
+    <view class="tool-row">
+      <button class="mini-btn" wx:if="{{item.customer_wechat}}" bindtap="copyWechat">复制微信号</button>
+      <button class="mini-btn" wx:if="{{customerPhone}}" bindtap="callCustomer">拨打电话</button>
+    </view>
+    <text class="sub">{{item.customer_name}} · {{item.customer_wechat}}</text>
+    <text class="sub">当前进度：{{item.journey_label}}</text>
+    <text class="sub">{{item.status_tip}}</text>
+  </view>
+
+  <view class="card info-card">
+    <text class="section-title">订单信息</text>
+    <text class="sub">{{item.sku_name}} · x{{item.quantity}}</text>
+    <text class="sub">活动日期：{{item.event_date}}</text>
+    <text class="sub">当前负责人：{{item.owner_name || '未分配'}}</text>
+    <text class="sub" wx:if="{{item.followup_date}}">预计联系日期：{{item.followup_date}}</text>
+    <text class="sub">联系状态：{{item.contact_status_label}}</text>
+    <text class="sub" wx:if="{{item.converted_order_no}}">正式订单：{{item.converted_order_no}}</text>
+    <text class="sub" wx:if="{{item.shipping_followup_label && item.converted_order_no}}">发货跟进：{{item.shipping_followup_label}}</text>
+    <text class="sub" wx:if="{{item.balance_followup_label && item.converted_order_no}}">尾款跟进：{{item.balance_followup_label}}</text>
+  </view>
+
+  <view class="card info-card" wx:if="{{item.can_transfer_owner && ownerOptions.length}}">
+    <text class="section-title">转交负责人</text>
+    <picker mode="selector" range="{{ownerOptions}}" range-key="label" value="{{ownerIndex}}" bindchange="onOwnerChange">
+      <view class="picker-field">
+        <text>{{ownerOptions[ownerIndex].label}}</text>
+        <text class="picker-arrow">▼</text>
+      </view>
+    </picker>
+    <textarea class="textarea" placeholder="转交原因（选填）" value="{{transferReason}}" bindinput="onTransferReasonInput"></textarea>
+    <button class="action-btn warn full-btn" loading="{{actionLoading}}" disabled="{{actionLoading}}" bindtap="transferOwner">确认转交</button>
+  </view>
+
+  <view class="card info-card" wx:if="{{item.can_update_followup}}">
+    <text class="section-title">跟进信息</text>
+    <input class="input" placeholder="客户称呼 / 备注名" value="{{customerName}}" bindinput="onCustomerNameInput" />
+    <input class="input" placeholder="客户手机号" value="{{customerPhone}}" bindinput="onCustomerPhoneInput" />
+    <textarea class="textarea" placeholder="收货地址 / 城市 / 见面点" value="{{deliveryAddress}}" bindinput="onDeliveryAddressInput"></textarea>
+    <textarea class="textarea" placeholder="跟进备注" value="{{notes}}" bindinput="onNotesInput"></textarea>
+    <button class="action-btn primary full-btn" loading="{{actionLoading}}" disabled="{{actionLoading}}" bindtap="saveFollowup">保存跟进</button>
+  </view>
+
+  <view class="card info-card" wx:if="{{item.can_update_status}}">
+    <text class="section-title">快捷操作</text>
+    <view class="action-row">
+      <button class="action-btn" loading="{{actionLoading}}" disabled="{{actionLoading}}" data-status="pending_info" bindtap="updateStatus">标记待补信息</button>
+      <button class="action-btn primary" loading="{{actionLoading}}" disabled="{{actionLoading}}" data-status="ready_to_convert" bindtap="updateStatus">标记可转单</button>
+    </view>
+  </view>
+</view>
+
+<view class="loading-wrap" wx:if="{{loading}}">
+  <view class="loading-spinner"></view>
+</view>

@@ -1,0 +1,18 @@
+<view class="container">
+  <view class="card bind-card">
+    <text class="title">绑定员工账号</text>
+    <text class="subtitle">绑定后即可在手机上查看待办、跟进预定单和处理发货回件。</text>
+
+    <view class="field">
+      <text class="label">后台账号</text>
+      <input class="input" placeholder="请输入后台用户名" value="{{username}}" bindinput="onUsernameInput" />
+    </view>
+
+    <view class="field">
+      <text class="label">后台密码</text>
+      <input class="input" password placeholder="请输入后台密码" value="{{password}}" bindinput="onPasswordInput" />
+    </view>
+
+    <button class="submit-btn" loading="{{submitting}}" bindtap="submitBind">确认绑定</button>
+  </view>
+</view>

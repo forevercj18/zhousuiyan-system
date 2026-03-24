@@ -1,0 +1,49 @@
+<view class="container">
+  <view class="loading-wrap" wx:if="{{loading}}">
+    <view class="loading-spinner"></view>
+  </view>
+
+  <view class="card bind-card" wx:elif="{{needBind}}">
+    <text class="title">未绑定员工账号</text>
+    <text class="subtitle">请先绑定后台账号，再进入工作模式查看待办和执行订单操作。</text>
+    <button class="primary-btn" bindtap="goBind">去绑定</button>
+  </view>
+
+  <view wx:else>
+    <view class="card hero-card">
+      <view class="hero-top">
+        <view>
+          <text class="hero-title">{{staff.full_name}}</text>
+          <text class="hero-subtitle">{{staff.role_label}} · 移动工作台</text>
+        </view>
+        <view class="hero-actions">
+          <button class="secondary-btn" bindtap="goSearch">全局搜索</button>
+          <button class="secondary-btn" bindtap="goCustomerMode">切回客户模式</button>
+        </view>
+      </view>
+      <text class="hero-tip">手机端优先处理高频待办，复杂配置仍建议在电脑后台完成。</text>
+      <view class="urgent-banner" wx:if="{{urgentSummary}}">
+        <view>
+          <text class="urgent-title">高优先待办 {{urgentSummary.total}} 项</text>
+          <text class="urgent-text">{{urgentSummary.labels.join(' · ')}}</text>
+        </view>
+      </view>
+    </view>
+
+    <view class="shortcut-group" wx:for="{{groupedShortcuts}}" wx:key="title">
+      <view class="group-title-row">
+        <text class="group-title">{{item.title}}</text>
+        <view class="group-badges">
+          <text class="group-badge" wx:if="{{item.totalCount}}">共 {{item.totalCount}}</text>
+          <text class="group-badge danger" wx:if="{{item.urgentCount}}">紧急 {{item.urgentCount}}</text>
+        </view>
+      </view>
+      <view class="shortcut-grid">
+        <view class="card shortcut-card" wx:for="{{item.items}}" wx:key="key" bindtap="goTarget" data-url="{{item.target}}">
+          <text class="shortcut-count">{{item.count}}</text>
+          <text class="shortcut-label">{{item.label}}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

@@ -207,9 +207,9 @@
                     </div>
                     <hr>
                     <h4 class="mb-3">界面分页配置</h4>
-                    <div class="form-row">
-                        <div class="form-group col-md-4">
-                            <label for="page_size_default">默认分页条数</label>
+	                    <div class="form-row">
+	                        <div class="form-group col-md-4">
+	                            <label for="page_size_default">默认分页条数</label>
                             <input type="number" id="page_size_default" name="page_size_default" class="form-control"
                                    value="{{ settings.page_size_default|default:'10' }}" min="1" max="100">
                             <small class="form-text">应用于绝大多数列表页面。</small>
@@ -224,12 +224,48 @@
                             <label for="page_size_outbound_topology_units">拓扑单套分页条数</label>
                             <input type="number" id="page_size_outbound_topology_units" name="page_size_outbound_topology_units" class="form-control"
                                    value="{{ settings.page_size_outbound_topology_units|default:'5' }}" min="1" max="100">
-                            <small class="form-text">在外库存拓扑视图分页条数。</small>
-                        </div>
-                    </div>
-                    <div class="info-grid">
-                        <div class="info-item">
-                            <label>系统版本：</label>
+	                            <small class="form-text">在外库存拓扑视图分页条数。</small>
+	                        </div>
+	                    </div>
+	                    <hr>
+	                    <h4 class="mb-3">Cloudflare R2 图片存储状态</h4>
+	                    <div class="alert {% if storage_status.enabled %}alert-success{% else %}alert-warning{% endif %}">
+	                        {% if storage_status.enabled %}
+	                        Cloudflare R2 配置已就绪，后台 SKU 图片可使用直传。
+	                        {% else %}
+	                        Cloudflare R2 配置未完成，后台 SKU 图片直传当前不可用。
+	                        {% endif %}
+	                    </div>
+	                    <div class="info-grid mb-3">
+	                        <div class="info-item">
+	                            <label>启用状态：</label>
+	                            <span>{% if storage_status.enabled %}已就绪{% else %}未就绪{% endif %}</span>
+	                        </div>
+	                        <div class="info-item">
+	                            <label>Bucket：</label>
+	                            <span>{{ storage_status.bucket|default:'-' }}</span>
+	                        </div>
+	                        <div class="info-item">
+	                            <label>图片域名：</label>
+	                            <span>{{ storage_status.domain|default:'-' }}</span>
+	                        </div>
+	                        <div class="info-item">
+	                            <label>上传地址：</label>
+	                            <span>{{ storage_status.upload_url|default:'-' }}</span>
+	                        </div>
+	                        <div class="info-item">
+	                            <label>SKU 目录前缀：</label>
+	                            <span>{{ storage_status.prefix|default:'-' }}</span>
+	                        </div>
+	                        <div class="info-item">
+	                            <label>缺失项：</label>
+	                            <span>{% if storage_status.missing_items %}{{ storage_status.missing_items|join:'、' }}{% else %}-{% endif %}</span>
+	                        </div>
+	                    </div>
+	                    <small class="form-text d-block mb-3">Cloudflare R2 配置来自环境变量，不在系统设置页内保存。请在 `.env.prod` 中填写 `R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`、`R2_BUCKET`、`R2_ENDPOINT`、`R2_PUBLIC_DOMAIN`。</small>
+	                    <div class="info-grid">
+	                        <div class="info-item">
+	                            <label>系统版本：</label>
                             <span>v1.0.0</span>
                         </div>
                         <div class="info-item">

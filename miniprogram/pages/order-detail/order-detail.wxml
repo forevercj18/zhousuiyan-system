@@ -1,0 +1,123 @@
+<view class="container" wx:if="{{!loading && order}}">
+  <!-- 状态头 -->
+  <view class="status-header {{order.statusClass}}">
+    <text class="status-label">{{order.status_label}}</text>
+    <text class="status-tip">{{order.status_tip}}</text>
+  </view>
+
+  <!-- 进度卡片 -->
+  <view class="card info-card">
+    <view class="card-title">当前进度</view>
+    <view class="progress-summary">
+      <text class="summary-badge">{{order.journey_label}}</text>
+      <text class="summary-text">{{order.contact_status_label}}</text>
+    </view>
+    <view class="step-list">
+      <view class="step-item" wx:for="{{order.steps}}" wx:key="key">
+        <view class="step-dot {{item.stepClass}}"></view>
+        <view class="step-content">
+          <text class="step-title">{{item.label}}</text>
+          <text class="step-desc">{{item.desc}}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 产品信息 -->
+  <view class="card info-card">
+    <view class="card-title">产品信息</view>
+    <view class="product-row">
+      <image class="product-image" src="{{order.sku_cover_image}}" mode="aspectFill" wx:if="{{order.sku_cover_image}}" />
+      <view class="product-image product-placeholder" wx:else><text>🎂</text></view>
+      <view class="product-info">
+        <text class="product-name">{{order.sku_name}}</text>
+        <text class="product-qty">数量：x{{order.quantity}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 租赁信息 -->
+  <view class="card info-card">
+    <view class="card-title">租赁信息</view>
+    <view class="info-row">
+      <text class="info-label">订单号</text>
+      <view class="info-value-wrap">
+        <text class="info-value">{{order.reservation_no}}</text>
+        <text class="copy-btn" bindtap="copyOrderNo">复制</text>
+      </view>
+    </view>
+    <view class="info-row">
+      <text class="info-label">活动日期</text>
+      <text class="info-value">{{order.event_date}}</text>
+    </view>
+    <view class="info-row" wx:if="{{order.followup_date}}">
+      <text class="info-label">预计联系日期</text>
+      <text class="info-value">{{order.followup_date}}</text>
+    </view>
+    <view class="info-row" wx:if="{{order.city}}">
+      <text class="info-label">所在城市</text>
+      <text class="info-value">{{order.city}}</text>
+    </view>
+    <view class="info-row" wx:if="{{order.delivery_address}}">
+      <text class="info-label">收货地址</text>
+      <text class="info-value" style="max-width: 400rpx; text-align: right;">{{order.delivery_address}}</text>
+    </view>
+    <view class="info-row" wx:if="{{order.deposit_amount > 0}}">
+      <text class="info-label">已付订金</text>
+      <text class="info-value price">¥{{order.deposit_amount}}</text>
+    </view>
+    <view class="info-row">
+      <text class="info-label">提交时间</text>
+      <text class="info-value">{{order.created_at}}</text>
+    </view>
+  </view>
+
+  <!-- 联系信息 -->
+  <view class="card info-card">
+    <view class="card-title">联系方式</view>
+    <view class="info-row">
+      <text class="info-label">微信号</text>
+      <text class="info-value">{{order.customer_wechat}}</text>
+    </view>
+    <view class="info-row" wx:if="{{order.customer_name}}">
+      <text class="info-label">姓名</text>
+      <text class="info-value">{{order.customer_name}}</text>
+    </view>
+    <view class="info-row" wx:if="{{order.customer_phone}}">
+      <text class="info-label">手机号</text>
+      <text class="info-value">{{order.customer_phone}}</text>
+    </view>
+  </view>
+
+  <!-- 备注 -->
+  <view class="card info-card" wx:if="{{order.notes}}">
+    <view class="card-title">备注</view>
+    <text class="notes-text">{{order.notes}}</text>
+  </view>
+
+  <!-- 正式订单跟进 -->
+  <view class="card info-card" wx:if="{{order.converted_order_no}}">
+    <view class="card-title">正式订单跟进</view>
+    <view class="info-row">
+      <text class="info-label">正式订单号</text>
+      <text class="info-value">{{order.converted_order_no}}</text>
+    </view>
+    <view class="info-row">
+      <text class="info-label">履约阶段</text>
+      <text class="info-value">{{order.fulfillment_stage_label}}</text>
+    </view>
+    <view class="info-row">
+      <text class="info-label">发货跟进</text>
+      <text class="info-value">{{order.shipping_followup_label}}</text>
+    </view>
+    <view class="info-row">
+      <text class="info-label">尾款跟进</text>
+      <text class="info-value">{{order.balance_followup_label}}</text>
+    </view>
+  </view>
+</view>
+
+<!-- 加载中 -->
+<view class="loading-wrap" wx:if="{{loading}}">
+  <view class="loading-spinner"></view>
+</view>

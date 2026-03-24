@@ -111,6 +111,14 @@
         </select>
       </div>
       {% endif %}
+      <div class="col-md-2">
+        <label class="form-label">来源</label>
+        <select class="form-select" name="source">
+          <option value="">全部来源</option>
+          <option value="manual" {% if source_filter == 'manual' %}selected{% endif %}>客服录入</option>
+          <option value="miniprogram" {% if source_filter == 'miniprogram' %}selected{% endif %}>小程序</option>
+        </select>
+      </div>
       <div class="col-md-12 d-flex gap-2 flex-wrap">
         <button class="btn btn-primary" type="submit">查询</button>
         <a class="btn btn-secondary" href="{% url 'reservations_list' %}">重置</a>
@@ -171,13 +179,20 @@
           <td>
             <div>{{ reservation.reservation_no }}</div>
             <small class="text-muted">{{ reservation.created_at|date:"Y-m-d H:i" }}</small>
+            {% if reservation.source == 'miniprogram' %}<span class="badge bg-info ms-1" style="font-size:10px;">小程序</span>{% endif %}
           </td>
           <td>{{ reservation.customer_wechat }}</td>
           <td>
             <div>{{ reservation.customer_name|default:"-" }}</div>
             <small class="text-muted">{{ reservation.customer_phone|default:reservation.city|default:"-" }}</small>
           </td>
-          <td>{{ reservation.owner.get_full_name|default:reservation.owner.username|default:"-" }}</td>
+          <td>
+            {% if reservation.owner %}
+              {{ reservation.owner.get_full_name|default:reservation.owner.username|default:"-" }}
+            {% else %}
+              -
+            {% endif %}
+          </td>
           <td>{{ reservation.sku.name }}</td>
           <td>{{ reservation.event_date|date:"Y-m-d" }}</td>
           <td>{{ reservation.followup_date|date:"Y-m-d" }}</td>

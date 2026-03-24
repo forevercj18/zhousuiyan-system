@@ -1,0 +1,38 @@
+.bind-card {
+  padding: 32rpx;
+}
+.title {
+  display: block;
+  font-size: 34rpx;
+  font-weight: 700;
+  color: #333;
+}
+.subtitle {
+  display: block;
+  font-size: 24rpx;
+  color: #666;
+  margin-top: 12rpx;
+  line-height: 1.6;
+}
+.field {
+  margin-top: 28rpx;
+}
+.label {
+  display: block;
+  font-size: 24rpx;
+  color: #666;
+  margin-bottom: 12rpx;
+}
+.input {
+  background: #f8f8f8;
+  border-radius: 16rpx;
+  padding: 24rpx;
+  font-size: 28rpx;
+}
+.submit-btn {
+  margin-top: 36rpx;
+  background: #ff6b81;
+  color: #fff;
+  border-radius: 999rpx;
+  font-size: 28rpx;
+}

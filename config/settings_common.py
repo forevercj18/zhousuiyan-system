@@ -117,6 +117,27 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
+R2_BUCKET = os.getenv("R2_BUCKET", "").strip()
+R2_ENDPOINT = os.getenv("R2_ENDPOINT", "").strip()
+R2_PUBLIC_DOMAIN = os.getenv("R2_PUBLIC_DOMAIN", "").strip()
+R2_REGION = os.getenv("R2_REGION", "auto").strip()
+R2_UPLOAD_PREFIX_SKU = os.getenv("R2_UPLOAD_PREFIX_SKU", "sku-images/").strip()
+R2_UPLOAD_EXPIRE = int(os.getenv("R2_UPLOAD_EXPIRE", "900"))
+R2_ENABLED = all([R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET, R2_ENDPOINT, R2_PUBLIC_DOMAIN])
+
+# Legacy aliases for historical 七牛云配置。保留只为了避免旧环境变量导致直接崩溃，
+# 业务侧统一使用 Cloudflare R2 配置。
+QINIU_ACCESS_KEY = os.getenv("QINIU_ACCESS_KEY", "").strip()
+QINIU_SECRET_KEY = os.getenv("QINIU_SECRET_KEY", "").strip()
+QINIU_BUCKET = os.getenv("QINIU_BUCKET", "").strip()
+QINIU_DOMAIN = os.getenv("QINIU_DOMAIN", "").strip()
+QINIU_UPLOAD_URL = os.getenv("QINIU_UPLOAD_URL", "").strip()
+QINIU_UPLOAD_PREFIX_SKU = os.getenv("QINIU_UPLOAD_PREFIX_SKU", "").strip()
+QINIU_UPLOAD_TOKEN_EXPIRE = int(os.getenv("QINIU_UPLOAD_TOKEN_EXPIRE", "900"))
+MP_PUBLIC_BASE_URL = os.getenv("MP_PUBLIC_BASE_URL", "").strip()
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 LOGIN_URL = "/login/"

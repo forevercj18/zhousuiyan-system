@@ -583,6 +583,45 @@ class OrderService:
 
     @staticmethod
     @transaction.atomic
+    def record_balance_payment(order_id, amount, user, notes=''):
+        order = Order.objects.get(id=order_id)
+        amount_decimal = Decimal(str(amount or '0'))
+        if amount_decimal <= 0:
+            raise ValueError('尾款金额必须大于0')
+        if order.status in ['completed', 'cancelled']:
+            raise ValueError(f"订单状态为 {order.get_status_display()}，当前不支持登记尾款")
+        if Decimal(str(order.balance or '0')) <= 0:
+            raise ValueError('当前订单没有待收尾款')
+        if amount_decimal > Decimal(str(order.balance)):
+            raise ValueError('登记金额不能大于待收尾款')
+
+        before_snapshot = OrderService._snapshot_order(order)
+        order.balance = Decimal(str(order.balance)) - amount_decimal
+        order.save(update_fields=['balance', 'updated_at'])
+        OrderService._create_finance_transaction(
+            order=order,
+            transaction_type='balance_received',
+            amount=amount_decimal,
+            user=user,
+            notes=notes or '员工端登记尾款',
+        )
+        AuditService.log_with_diff(
+            user=user,
+            action='update',
+            module='订单',
+            target=order.order_no,
+            summary='登记尾款收款',
+            before=before_snapshot,
+            after=OrderService._snapshot_order(order),
+            extra={
+                'balance_paid_input': str(amount_decimal),
+                'notes': notes or '',
+            },
+        )
+        return order
+
+    @staticmethod
+    @transaction.atomic
     def confirm_order(order_id, deposit_paid, user):
         """
         确认订单（收取押金并进入待发货）

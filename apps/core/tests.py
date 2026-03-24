@@ -8,7 +8,7 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.db.models import Sum
 from django.http import HttpResponse
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.test.client import RequestFactory
 from django.urls import reverse
 from django.utils import timezone
@@ -44,6 +44,9 @@ from .models import (
     PartRecoveryInspection,
     PermissionTemplate,
     Reservation,
+    WechatCustomer,
+    WechatStaffBinding,
+    SKUImage,
 )
 from .services import AuditService
 from .services import OrderService, PartsService, ProcurementService
@@ -2072,6 +2075,24 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertContains(resp, '待转正式订单')
         self.assertEqual(resp.context['status_summary']['pending_info'], 1)
         self.assertEqual(resp.context['status_summary']['ready_to_convert'], 1)
+
+    def test_reservations_list_should_handle_null_owner_without_template_error(self):
+        reservation = Reservation.objects.create(
+            customer_wechat='wx_null_owner_001',
+            customer_name='无负责人客户',
+            sku=self.sku,
+            quantity=1,
+            event_date=timezone.localdate() + timedelta(days=9),
+            deposit_amount=Decimal('50.00'),
+            status='pending_info',
+            created_by=self.user,
+            owner=None,
+        )
+
+        resp = self.client.get(reverse('reservations_list'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, reservation.reservation_no)
+        self.assertContains(resp, '无负责人客户')
 
     def test_dashboard_followup_cards_should_only_count_current_owner_for_customer_service(self):
         service_user = User.objects.create_user(
@@ -4386,6 +4407,20 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertNotContains(second_resp, 'id="skuAssemblyFeedbackData"')
         self.assertNotContains(second_resp, 'ASM-TEST-001')
 
+    @override_settings(
+        R2_ACCESS_KEY_ID='',
+        R2_SECRET_ACCESS_KEY='',
+        R2_BUCKET='',
+        R2_ENDPOINT='',
+        R2_PUBLIC_DOMAIN='',
+        R2_ENABLED=False,
+    )
+    def test_skus_list_should_show_r2_warning_when_storage_not_ready(self):
+        resp = self.client.get(reverse('skus_list'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'Cloudflare R2 图片直传未就绪')
+        self.assertContains(resp, 'R2_ACCESS_KEY_ID')
+
     def test_dashboard_should_render_role_risk_entries_and_quick_actions(self):
         resp = self.client.get(reverse('dashboard'))
         self.assertEqual(resp.status_code, 200)
@@ -5497,6 +5532,23 @@ class AuditDiffLogTests(TestCase):
         value = SystemSettings.objects.filter(key='approval_required_count_map').values_list('value', flat=True).first()
         self.assertEqual(value, '{"order.force_cancel": 2}')
 
+    @override_settings(
+        R2_ACCESS_KEY_ID='ak-test',
+        R2_SECRET_ACCESS_KEY='sk-test',
+        R2_BUCKET='bucket-test',
+        R2_ENDPOINT='https://example.r2.cloudflarestorage.com',
+        R2_PUBLIC_DOMAIN='https://pic.yanli.net.cn',
+        R2_UPLOAD_PREFIX_SKU='sku-images/',
+        R2_ENABLED=True,
+    )
+    def test_settings_should_render_r2_status_summary(self):
+        resp = self.client.get(reverse('settings') + '?tab=system')
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'Cloudflare R2 图片存储状态')
+        self.assertContains(resp, '已就绪')
+        self.assertContains(resp, 'bucket-test')
+        self.assertContains(resp, 'https://pic.yanli.net.cn')
+
     def test_settings_test_alert_notify_should_write_notification_audit(self):
         before_count = AuditLog.objects.filter(module='通知中心', target='通知测试').count()
         resp = self.client.post(
@@ -5963,6 +6015,120 @@ class SKUBOMViewTests(TestCase):
         self.assertEqual(comp.part_id, self.part_b.id)
         self.assertEqual(comp.quantity_per_set, 3)
         self.assertEqual(InventoryUnit.objects.filter(sku=sku).count(), 0)
+
+    @override_settings(
+        R2_ACCESS_KEY_ID='ak-test',
+        R2_SECRET_ACCESS_KEY='sk-test',
+        R2_BUCKET='bucket-test',
+        R2_ENDPOINT='https://example.r2.cloudflarestorage.com',
+        R2_PUBLIC_DOMAIN='https://pic.yanli.net.cn',
+        R2_ENABLED=True,
+        R2_UPLOAD_PREFIX_SKU='sku-images/',
+    )
+    def test_sku_upload_token_should_return_r2_payload(self):
+        resp = self.client.post(reverse('sku_upload_token'), {'filename': 'cover.jpg'})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data['success'])
+        self.assertTrue(data['data']['key'].startswith('sku-images/'))
+        self.assertEqual(data['data']['upload_method'], 'PUT')
+        self.assertIn('X-Amz-Algorithm=', data['data']['upload_url'])
+
+    def test_sku_create_should_save_image_key(self):
+        resp = self.client.post(
+            reverse('sku_create'),
+            {
+                'code': 'SKU-IMG-KEY-001',
+                'name': 'R2图片套餐',
+                'category': '主题套餐',
+                'rental_price': '188.00',
+                'deposit': '100.00',
+                'description': 'r2',
+                'image_key': 'sku-images/2026/03/demo-cover.jpg',
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        sku = SKU.objects.get(code='SKU-IMG-KEY-001')
+        self.assertEqual(sku.image_key, 'sku-images/2026/03/demo-cover.jpg')
+
+    def test_sku_edit_should_update_image_key(self):
+        sku = SKU.objects.create(
+            code='SKU-IMG-EDIT',
+            name='图片编辑套餐',
+            category='主题套餐',
+            rental_price=Decimal('99.00'),
+            deposit=Decimal('50.00'),
+            stock=0,
+            image_key='sku-images/old-key.jpg',
+        )
+        resp = self.client.post(
+            reverse('sku_edit', kwargs={'sku_id': sku.id}),
+            {
+                'code': sku.code,
+                'name': sku.name,
+                'category': sku.category,
+                'rental_price': '120.00',
+                'deposit': '60.00',
+                'description': 'updated',
+                'image_key': 'sku-images/2026/03/new-key.jpg',
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        sku.refresh_from_db()
+        self.assertEqual(sku.image_key, 'sku-images/2026/03/new-key.jpg')
+
+    def test_sku_create_should_save_gallery_payload(self):
+        resp = self.client.post(
+            reverse('sku_create'),
+            {
+                'code': 'SKU-GALLERY-001',
+                'name': '多图套餐',
+                'category': '主题套餐',
+                'rental_price': '188.00',
+                'deposit': '100.00',
+                'gallery_payload': json.dumps([
+                    {'key': 'sku-images/2026/03/gallery-cover.jpg', 'sort_order': 0, 'is_cover': True},
+                    {'key': 'sku-images/2026/03/gallery-side.jpg', 'sort_order': 1, 'is_cover': False},
+                ]),
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        sku = SKU.objects.get(code='SKU-GALLERY-001')
+        self.assertEqual(sku.images.count(), 2)
+        self.assertTrue(sku.images.filter(image_key='sku-images/2026/03/gallery-cover.jpg', is_cover=True).exists())
+
+    def test_sku_edit_should_replace_gallery_payload(self):
+        sku = SKU.objects.create(
+            code='SKU-GALLERY-EDIT',
+            name='多图编辑套餐',
+            category='主题套餐',
+            rental_price=Decimal('99.00'),
+            deposit=Decimal('50.00'),
+            stock=0,
+        )
+        SKUImage.objects.create(sku=sku, image_key='sku-images/old-gallery.jpg', sort_order=0, is_cover=True)
+        resp = self.client.post(
+            reverse('sku_edit', kwargs={'sku_id': sku.id}),
+            {
+                'code': sku.code,
+                'name': sku.name,
+                'category': sku.category,
+                'rental_price': '120.00',
+                'deposit': '60.00',
+                'description': 'updated',
+                'gallery_payload': json.dumps([
+                    {'key': 'sku-images/2026/03/new-cover.jpg', 'sort_order': 0, 'is_cover': True},
+                ]),
+            },
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        sku.refresh_from_db()
+        self.assertEqual(sku.images.count(), 1)
+        self.assertTrue(sku.images.filter(image_key='sku-images/2026/03/new-cover.jpg', is_cover=True).exists())
 
     def test_sku_assemble_should_deduct_parts_and_create_units(self):
         sku = SKU.objects.create(
@@ -8018,3 +8184,941 @@ class SmokeFlowCommandTests(TestCase):
         content = out.getvalue()
         self.assertIn('冒烟通过', content)
         self.assertNotIn('页面/API连通性检查通过', content)
+
+
+# ============================================================
+# 小程序 API 测试
+# ============================================================
+
+class MiniProgramModelTestCase(TestCase):
+    """小程序相关模型测试"""
+
+    def test_sku_display_stock_independent_of_effective_stock(self):
+        """display_stock 不影响 effective_stock"""
+        sku = SKU.objects.create(
+            code='MP-TEST-001', name='测试套装', category='主题套餐',
+            rental_price=Decimal('168.00'), deposit=Decimal('200.00'),
+            stock=5, display_stock=99, display_stock_warning=10,
+        )
+        self.assertEqual(sku.effective_stock, 5)
+        self.assertEqual(sku.display_stock, 99)
+
+    def test_sku_mp_visible_default_false(self):
+        """mp_visible 默认 False"""
+        sku = SKU.objects.create(
+            code='MP-TEST-002', name='测试套装2', category='主题套餐',
+            rental_price=Decimal('100.00'), deposit=Decimal('100.00'),
+            stock=1,
+        )
+        self.assertFalse(sku.mp_visible)
+
+    def test_wechat_customer_unique_openid(self):
+        """openid 唯一约束"""
+        WechatCustomer.objects.create(openid='test_openid_001')
+        from django.db import IntegrityError
+        with self.assertRaises(IntegrityError):
+            WechatCustomer.objects.create(openid='test_openid_001')
+
+    def test_reservation_source_default_manual(self):
+        """预定单来源默认为客服录入"""
+        sku = SKU.objects.create(
+            code='MP-TEST-003', name='测试套装3', category='主题套餐',
+            rental_price=Decimal('100.00'), deposit=Decimal('100.00'),
+            stock=1,
+        )
+        reservation = Reservation.objects.create(
+            customer_wechat='test_wx', sku=sku,
+            event_date=date.today() + timedelta(days=30),
+        )
+        self.assertEqual(reservation.source, 'manual')
+
+    def test_reservation_source_miniprogram(self):
+        """预定单可标记来源为小程序"""
+        sku = SKU.objects.create(
+            code='MP-TEST-004', name='测试套装4', category='主题套餐',
+            rental_price=Decimal('100.00'), deposit=Decimal('100.00'),
+            stock=1,
+        )
+        customer = WechatCustomer.objects.create(openid='test_openid_mp')
+        reservation = Reservation.objects.create(
+            customer_wechat='test_wx', sku=sku,
+            event_date=date.today() + timedelta(days=30),
+            source='miniprogram', wechat_customer=customer,
+        )
+        self.assertEqual(reservation.source, 'miniprogram')
+        self.assertEqual(reservation.wechat_customer, customer)
+
+    def test_sku_image_model(self):
+        """SKUImage 多图模型"""
+        sku = SKU.objects.create(
+            code='MP-TEST-005', name='测试套装5', category='主题套餐',
+            rental_price=Decimal('100.00'), deposit=Decimal('100.00'),
+            stock=1,
+        )
+        img1 = SKUImage.objects.create(sku=sku, sort_order=0, is_cover=True)
+        img2 = SKUImage.objects.create(sku=sku, sort_order=1, is_cover=False)
+        self.assertEqual(sku.images.count(), 2)
+        self.assertEqual(sku.images.filter(is_cover=True).count(), 1)
+
+    def test_order_source_miniprogram(self):
+        """订单来源新增小程序枚举"""
+        User = get_user_model()
+        user = User.objects.create_user(username='mp_test_user', password='test123')
+        sku = SKU.objects.create(
+            code='MP-TEST-006', name='测试套装6', category='主题套餐',
+            rental_price=Decimal('100.00'), deposit=Decimal('100.00'),
+            stock=1,
+        )
+        order = Order.objects.create(
+            customer_name='测试客户', customer_phone='13800000000',
+            delivery_address='测试地址', event_date=date.today() + timedelta(days=30),
+            order_source='miniprogram', created_by=user,
+        )
+        self.assertEqual(order.order_source, 'miniprogram')
+
+
+class MiniProgramAPITestCase(TestCase):
+    """小程序 API 接口测试"""
+
+    def setUp(self):
+        self.sku_visible = SKU.objects.create(
+            code='MP-V-001', name='可见套装', category='主题套餐',
+            rental_price=Decimal('168.00'), deposit=Decimal('200.00'),
+            stock=3, mp_visible=True, display_stock=5,
+            display_stock_warning=2, mp_sort_order=1,
+            description='这是一个可见的测试套装',
+        )
+        self.sku_hidden = SKU.objects.create(
+            code='MP-H-001', name='隐藏套装', category='主题套餐',
+            rental_price=Decimal('100.00'), deposit=Decimal('100.00'),
+            stock=2, mp_visible=False,
+        )
+        self.part = Part.objects.create(
+            name='背景板', spec='120x180cm', category='main',
+            current_stock=10, safety_stock=2,
+        )
+        SKUComponent.objects.create(
+            sku=self.sku_visible, part=self.part, quantity_per_set=1,
+        )
+        self.customer = WechatCustomer.objects.create(
+            openid='test_openid_api', nickname='测试用户', phone='13800000001',
+        )
+        self.staff_user = User.objects.create_user(
+            username='cs_mobile',
+            password='mobile123',
+            role='customer_service',
+            full_name='移动客服',
+            is_active=True,
+        )
+        self.warehouse_user = User.objects.create_user(
+            username='wh_mobile',
+            password='mobile123',
+            role='warehouse_staff',
+            full_name='移动仓库',
+            is_active=True,
+        )
+        self.manager_user = User.objects.create_user(
+            username='mgr_mobile',
+            password='mobile123',
+            role='manager',
+            full_name='移动经理',
+            is_active=True,
+        )
+        # 生成有效 token
+        from apps.core.services.wechat_auth_service import generate_token
+        self.token = generate_token(self.customer.id, self.customer.openid)
+
+    def _auth_header(self):
+        return {'HTTP_AUTHORIZATION': f'Bearer {self.token}'}
+
+    # --- 产品列表 ---
+    def test_sku_list_only_visible(self):
+        """只返回 mp_visible=True 的产品"""
+        resp = self.client.get('/api/mp/skus/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        names = [r['name'] for r in data['results']]
+        self.assertIn('可见套装', names)
+        self.assertNotIn('隐藏套装', names)
+
+    def test_sku_list_category_filter(self):
+        """分类筛选"""
+        resp = self.client.get('/api/mp/skus/?category=主题套餐')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(len(data['results']) >= 1)
+
+    def test_sku_list_keyword_search(self):
+        """关键词搜索"""
+        resp = self.client.get('/api/mp/skus/?keyword=可见')
+        data = resp.json()
+        self.assertEqual(len(data['results']), 1)
+        self.assertEqual(data['results'][0]['name'], '可见套装')
+
+    def test_sku_list_stock_status_normal(self):
+        """库存状态：正常"""
+        resp = self.client.get('/api/mp/skus/')
+        data = resp.json()
+        item = [r for r in data['results'] if r['name'] == '可见套装'][0]
+        self.assertEqual(item['stock_status'], 'normal')
+        self.assertEqual(item['display_stock'], 5)
+
+    def test_sku_list_stock_status_warning(self):
+        """库存状态：即将售罄"""
+        self.sku_visible.display_stock = 2
+        self.sku_visible.save()
+        resp = self.client.get('/api/mp/skus/')
+        data = resp.json()
+        item = [r for r in data['results'] if r['name'] == '可见套装'][0]
+        self.assertEqual(item['stock_status'], 'warning')
+
+    def test_sku_list_stock_status_soldout(self):
+        """库存状态：已售罄"""
+        self.sku_visible.display_stock = 0
+        self.sku_visible.save()
+        resp = self.client.get('/api/mp/skus/')
+        data = resp.json()
+        item = [r for r in data['results'] if r['name'] == '可见套装'][0]
+        self.assertEqual(item['stock_status'], 'soldout')
+
+    # --- 产品详情 ---
+    def test_sku_detail_with_components(self):
+        """产品详情包含部件列表"""
+        resp = self.client.get(f'/api/mp/skus/{self.sku_visible.id}/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['name'], '可见套装')
+        self.assertEqual(len(data['components']), 1)
+        self.assertEqual(data['components'][0]['name'], '背景板')
+        self.assertEqual(data['components'][0]['quantity'], 1)
+
+    def test_sku_detail_not_visible_404(self):
+        """不可见的产品返回 404"""
+        resp = self.client.get(f'/api/mp/skus/{self.sku_hidden.id}/')
+        self.assertEqual(resp.status_code, 404)
+
+    @override_settings(R2_PUBLIC_DOMAIN='https://pic.yanli.net.cn')
+    def test_sku_list_should_prefer_r2_image_key(self):
+        self.sku_visible.image_key = 'sku-images/2026/03/cover.jpg'
+        self.sku_visible.save(update_fields=['image_key'])
+        resp = self.client.get('/api/mp/skus/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        item = [r for r in data['results'] if r['name'] == '可见套装'][0]
+        self.assertEqual(item['cover_image'], 'https://pic.yanli.net.cn/sku-images/2026/03/cover.jpg')
+
+    @override_settings(R2_PUBLIC_DOMAIN='https://pic.yanli.net.cn')
+    def test_sku_detail_should_return_r2_gallery_url(self):
+        SKUImage.objects.create(
+            sku=self.sku_visible,
+            image_key='sku-images/2026/03/gallery.jpg',
+            sort_order=0,
+            is_cover=True,
+        )
+        resp = self.client.get(f'/api/mp/skus/{self.sku_visible.id}/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['images'][0]['url'], 'https://pic.yanli.net.cn/sku-images/2026/03/gallery.jpg')
+
+    # --- 意向下单 ---
+    def test_create_reservation_success(self):
+        """正常提交意向订单"""
+        resp = self.client.post('/api/mp/reservations/', data=json.dumps({
+            'sku_id': self.sku_visible.id,
+            'event_date': str(date.today() + timedelta(days=30)),
+            'customer_wechat': 'test_wx_user',
+            'customer_name': '张三',
+            'customer_phone': '13900000000',
+            'city': '广州',
+            'notes': '希望多加气球',
+        }), content_type='application/json', **self._auth_header())
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertIn('reservation_no', data)
+        # 验证数据库记录
+        r = Reservation.objects.get(reservation_no=data['reservation_no'])
+        self.assertEqual(r.source, 'miniprogram')
+        self.assertEqual(r.wechat_customer, self.customer)
+        self.assertEqual(r.customer_wechat, 'test_wx_user')
+        self.assertEqual(r.sku, self.sku_visible)
+
+    def test_create_reservation_requires_login(self):
+        """未登录不能提交"""
+        resp = self.client.post('/api/mp/reservations/', data=json.dumps({
+            'sku_id': self.sku_visible.id,
+            'event_date': str(date.today() + timedelta(days=30)),
+            'customer_wechat': 'test_wx',
+        }), content_type='application/json')
+        self.assertEqual(resp.status_code, 401)
+
+    def test_create_reservation_missing_wechat(self):
+        """缺少微信号校验"""
+        resp = self.client.post('/api/mp/reservations/', data=json.dumps({
+            'sku_id': self.sku_visible.id,
+            'event_date': str(date.today() + timedelta(days=30)),
+        }), content_type='application/json', **self._auth_header())
+        self.assertEqual(resp.status_code, 400)
+
+    def test_create_reservation_invalid_sku(self):
+        """不可见的 SKU 不能下单"""
+        resp = self.client.post('/api/mp/reservations/', data=json.dumps({
+            'sku_id': self.sku_hidden.id,
+            'event_date': str(date.today() + timedelta(days=30)),
+            'customer_wechat': 'test_wx',
+        }), content_type='application/json', **self._auth_header())
+        self.assertEqual(resp.status_code, 400)
+
+    def test_create_reservation_daily_limit(self):
+        """每日提交上限 10 个"""
+        for i in range(10):
+            self.client.post('/api/mp/reservations/', data=json.dumps({
+                'sku_id': self.sku_visible.id,
+                'event_date': str(date.today() + timedelta(days=30)),
+                'customer_wechat': f'wx_{i}',
+            }), content_type='application/json', **self._auth_header())
+        resp = self.client.post('/api/mp/reservations/', data=json.dumps({
+            'sku_id': self.sku_visible.id,
+            'event_date': str(date.today() + timedelta(days=30)),
+            'customer_wechat': 'wx_overflow',
+        }), content_type='application/json', **self._auth_header())
+        self.assertEqual(resp.status_code, 429)
+
+    # --- 我的订单 ---
+    def test_my_reservations_only_own(self):
+        """只能看到自己的意向订单"""
+        # 创建一个属于当前客户的预定单
+        Reservation.objects.create(
+            customer_wechat='my_wx', sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=30),
+            source='miniprogram', wechat_customer=self.customer,
+        )
+        # 创建一个不属于当前客户的预定单
+        other_customer = WechatCustomer.objects.create(openid='other_openid')
+        Reservation.objects.create(
+            customer_wechat='other_wx', sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=30),
+            source='miniprogram', wechat_customer=other_customer,
+        )
+        resp = self.client.get('/api/mp/my-reservations/', **self._auth_header())
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data['results']), 1)
+        self.assertEqual(data['results'][0]['sku_name'], '可见套装')
+
+    def test_my_reservations_status_label(self):
+        """状态文案正确映射"""
+        r = Reservation.objects.create(
+            customer_wechat='my_wx', sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=30),
+            source='miniprogram', wechat_customer=self.customer,
+            status='pending_info',
+        )
+        resp = self.client.get('/api/mp/my-reservations/', **self._auth_header())
+        data = resp.json()
+        self.assertEqual(data['results'][0]['status_label'], '待客服确认')
+
+    def test_my_reservations_should_include_progress_fields(self):
+        """我的订单列表返回进度可视化字段"""
+        Reservation.objects.create(
+            customer_wechat='my_wx',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=7),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            status='pending_info',
+        )
+        resp = self.client.get('/api/mp/my-reservations/', **self._auth_header())
+        self.assertEqual(resp.status_code, 200)
+        item = resp.json()['results'][0]
+        self.assertIn('contact_status_code', item)
+        self.assertIn('contact_status_label', item)
+        self.assertIn('journey_code', item)
+        self.assertIn('journey_label', item)
+        self.assertIn('status_tip', item)
+        self.assertIn('followup_date', item)
+        self.assertTrue(item['journey_label'])
+
+    def test_reservation_detail_should_include_converted_fulfillment_fields(self):
+        """订单详情返回转正式订单后的履约跟进字段"""
+        order = Order.objects.create(
+            customer_name='小程序客户',
+            customer_phone='13812345678',
+            delivery_address='测试地址 1 号',
+            event_date=date.today() + timedelta(days=10),
+            rental_days=1,
+            ship_date=date.today() + timedelta(days=2),
+            status='confirmed',
+            total_amount=Decimal('168.00'),
+            balance=Decimal('68.00'),
+        )
+        reservation = Reservation.objects.create(
+            customer_wechat='my_wx',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=10),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            status='converted',
+            converted_order=order,
+        )
+        resp = self.client.get(f'/api/mp/my-reservations/{reservation.id}/', **self._auth_header())
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['converted_order_no'], order.order_no)
+        self.assertEqual(data['journey_code'], 'awaiting_shipment')
+        self.assertEqual(data['fulfillment_stage_label'], '已转单待发货')
+        self.assertEqual(data['shipping_followup_label'], '待发货')
+        self.assertEqual(data['balance_followup_label'], '待收尾款 ￥68.00')
+        self.assertEqual(len(data['steps']), 4)
+
+    def test_my_reservations_requires_login(self):
+        """未登录不能查看"""
+        resp = self.client.get('/api/mp/my-reservations/')
+        self.assertEqual(resp.status_code, 401)
+
+    def test_staff_bind_should_bind_backend_user(self):
+        resp = self.client.post(
+            '/api/mp/staff/bind/',
+            data=json.dumps({'username': 'cs_mobile', 'password': 'mobile123'}),
+            content_type='application/json',
+            **self._auth_header(),
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(WechatStaffBinding.objects.filter(customer=self.customer, user=self.staff_user).exists())
+
+    def test_staff_profile_should_return_bound_user(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.staff_user)
+        resp = self.client.get('/api/mp/staff/profile/', **self._auth_header())
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data['is_staff_bound'])
+        self.assertEqual(data['staff']['username'], 'cs_mobile')
+
+    def test_staff_dashboard_should_return_customer_service_counts(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.staff_user)
+        Reservation.objects.create(
+            customer_wechat='my_wx',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=7),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            owner=self.staff_user,
+            status='pending_info',
+        )
+        resp = self.client.get('/api/mp/staff/dashboard/', **self._auth_header())
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        labels = [item['label'] for item in data['shortcuts']]
+        self.assertIn('今日需联系', labels)
+
+    def test_staff_reservations_should_only_return_owned_for_customer_service(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.staff_user)
+        Reservation.objects.create(
+            customer_wechat='my_wx',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=5),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            owner=self.staff_user,
+            status='ready_to_convert',
+        )
+        Reservation.objects.create(
+            customer_wechat='other_wx',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=5),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            owner=self.warehouse_user,
+            status='ready_to_convert',
+        )
+        resp = self.client.get('/api/mp/staff/reservations/', **self._auth_header())
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data['results']), 1)
+        self.assertEqual(data['results'][0]['owner_name'], '移动客服')
+
+    def test_staff_should_update_reservation_followup(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.staff_user)
+        reservation = Reservation.objects.create(
+            customer_wechat='old_wx',
+            customer_name='旧客户名',
+            customer_phone='',
+            delivery_address='',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=6),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            owner=self.staff_user,
+            status='pending_info',
+        )
+        resp = self.client.post(
+            f'/api/mp/staff/reservations/{reservation.id}/followup/',
+            data=json.dumps({
+                'customer_name': '新客户名',
+                'customer_phone': '13888889999',
+                'delivery_address': '上海市徐汇区测试路 1 号',
+                'notes': '已电话沟通，等补最终地址',
+            }),
+            content_type='application/json',
+            **self._auth_header(),
+        )
+        self.assertEqual(resp.status_code, 200)
+        reservation.refresh_from_db()
+        self.assertEqual(reservation.customer_name, '新客户名')
+        self.assertEqual(reservation.customer_phone, '13888889999')
+        self.assertEqual(reservation.delivery_address, '上海市徐汇区测试路 1 号')
+        self.assertEqual(reservation.notes, '已电话沟通，等补最终地址')
+
+    def test_staff_reservation_list_should_expose_quick_status_actions(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.staff_user)
+        active_reservation = Reservation.objects.create(
+            customer_wechat='quick_status_wx',
+            customer_name='快捷推进客户',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=4),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            owner=self.staff_user,
+            status='pending_info',
+        )
+        closed_reservation = Reservation.objects.create(
+            customer_wechat='closed_status_wx',
+            customer_name='已关闭客户',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=4),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            owner=self.staff_user,
+            status='converted',
+        )
+
+        resp = self.client.get('/api/mp/staff/reservations/', **self._auth_header())
+        self.assertEqual(resp.status_code, 200)
+        results = {item['id']: item for item in resp.json()['results']}
+        self.assertFalse(results[active_reservation.id]['can_mark_pending_info'])
+        self.assertTrue(results[active_reservation.id]['can_mark_ready_to_convert'])
+        self.assertFalse(results[closed_reservation.id]['can_mark_pending_info'])
+        self.assertFalse(results[closed_reservation.id]['can_mark_ready_to_convert'])
+
+    def test_manager_should_transfer_reservation_owner(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.manager_user)
+        reservation = Reservation.objects.create(
+            customer_wechat='owner_wx',
+            customer_name='待转交客户',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=6),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            owner=self.staff_user,
+            status='pending_info',
+        )
+        detail_resp = self.client.get(f'/api/mp/staff/reservations/{reservation.id}/', **self._auth_header())
+        self.assertEqual(detail_resp.status_code, 200)
+        detail_data = detail_resp.json()
+        self.assertTrue(detail_data['can_transfer_owner'])
+        self.assertTrue(any(item['id'] == self.staff_user.id for item in detail_data['owner_options']))
+
+        transfer_resp = self.client.post(
+            f'/api/mp/staff/reservations/{reservation.id}/transfer/',
+            data=json.dumps({'owner_id': self.manager_user.id, 'reason': '客服请假转交'}),
+            content_type='application/json',
+            **self._auth_header(),
+        )
+        self.assertEqual(transfer_resp.status_code, 200)
+        reservation.refresh_from_db()
+        self.assertEqual(reservation.owner_id, self.manager_user.id)
+
+    def test_customer_service_should_not_transfer_reservation_owner(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.staff_user)
+        reservation = Reservation.objects.create(
+            customer_wechat='owner_wx',
+            customer_name='待转交客户',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=6),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            owner=self.staff_user,
+            status='pending_info',
+        )
+        resp = self.client.post(
+            f'/api/mp/staff/reservations/{reservation.id}/transfer/',
+            data=json.dumps({'owner_id': self.manager_user.id, 'reason': '尝试转交'}),
+            content_type='application/json',
+            **self._auth_header(),
+        )
+        self.assertEqual(resp.status_code, 403)
+        reservation.refresh_from_db()
+        self.assertEqual(reservation.owner_id, self.staff_user.id)
+
+    def test_staff_order_detail_and_delivery_action_for_warehouse(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.warehouse_user)
+        order = Order.objects.create(
+            customer_name='仓库客户',
+            customer_phone='13800000002',
+            delivery_address='仓库地址',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            ship_date=date.today(),
+            status='confirmed',
+            total_amount=Decimal('168.00'),
+            balance=Decimal('68.00'),
+            created_by=self.warehouse_user,
+        )
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku_visible,
+            quantity=1,
+            rental_price=self.sku_visible.rental_price,
+            deposit=self.sku_visible.deposit,
+            subtotal=Decimal('168.00'),
+        )
+
+        resp = self.client.get(f'/api/mp/staff/orders/{order.id}/', **self._auth_header())
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()['can_mark_delivered'])
+
+        deliver_resp = self.client.post(
+            f'/api/mp/staff/orders/{order.id}/deliver/',
+            data=json.dumps({'ship_tracking': 'SF123456'}),
+            content_type='application/json',
+            **self._auth_header(),
+        )
+        self.assertEqual(deliver_resp.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'delivered')
+        self.assertEqual(order.ship_tracking, 'SF123456')
+
+    def test_staff_order_detail_should_expose_balance_and_return_service_actions(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.warehouse_user)
+        order = Order.objects.create(
+            customer_name='移动执行客户',
+            customer_phone='13800000009',
+            delivery_address='移动执行地址',
+            event_date=date.today() + timedelta(days=4),
+            rental_days=1,
+            ship_date=date.today() - timedelta(days=1),
+            status='delivered',
+            total_amount=Decimal('200.00'),
+            balance=Decimal('45.00'),
+            return_service_type='platform_return_included',
+            return_service_fee=Decimal('45.00'),
+            return_service_payment_status='paid',
+            return_service_payment_channel='wechat',
+            return_service_payment_reference='WX-REF-1',
+            return_pickup_status='pending_schedule',
+            created_by=self.warehouse_user,
+        )
+        OrderItem.objects.create(
+            order=order,
+            sku=self.sku_visible,
+            quantity=1,
+            rental_price=self.sku_visible.rental_price,
+            deposit=self.sku_visible.deposit,
+            subtotal=Decimal('168.00'),
+        )
+
+        resp = self.client.get(f'/api/mp/staff/orders/{order.id}/', **self._auth_header())
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data['can_record_balance'])
+        self.assertTrue(data['can_update_return_service'])
+        self.assertEqual(data['return_service_type'], 'platform_return_included')
+        self.assertEqual(data['return_pickup_status'], 'pending_schedule')
+
+    def test_staff_should_record_balance_and_update_return_service(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.warehouse_user)
+        order = Order.objects.create(
+            customer_name='移动财务客户',
+            customer_phone='13800000010',
+            delivery_address='移动财务地址',
+            event_date=date.today() + timedelta(days=4),
+            rental_days=1,
+            ship_date=date.today() - timedelta(days=1),
+            status='delivered',
+            total_amount=Decimal('200.00'),
+            balance=Decimal('80.00'),
+            return_service_type='none',
+            return_service_fee=Decimal('0.00'),
+            return_service_payment_status='unpaid',
+            return_pickup_status='not_required',
+            created_by=self.warehouse_user,
+        )
+
+        balance_resp = self.client.post(
+            f'/api/mp/staff/orders/{order.id}/balance/',
+            data=json.dumps({'amount': '30.00', 'notes': '移动端补收尾款'}),
+            content_type='application/json',
+            **self._auth_header(),
+        )
+        self.assertEqual(balance_resp.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.balance, Decimal('50.00'))
+        self.assertTrue(FinanceTransaction.objects.filter(order=order, transaction_type='balance_received', amount=Decimal('30.00')).exists())
+
+        return_service_resp = self.client.post(
+            f'/api/mp/staff/orders/{order.id}/return-service/',
+            data=json.dumps({
+                'return_service_type': 'platform_return_included',
+                'return_service_fee': '45.00',
+                'return_service_payment_status': 'paid',
+                'return_service_payment_channel': 'wechat',
+                'return_service_payment_reference': 'WX-RETURN-30',
+                'return_pickup_status': 'scheduled',
+            }),
+            content_type='application/json',
+            **self._auth_header(),
+        )
+        self.assertEqual(return_service_resp.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.return_service_type, 'platform_return_included')
+        self.assertEqual(order.return_service_payment_status, 'paid')
+        self.assertEqual(order.return_pickup_status, 'scheduled')
+        self.assertTrue(FinanceTransaction.objects.filter(order=order, transaction_type='return_service_received', amount=Decimal('45.00')).exists())
+
+    def test_manager_should_filter_staff_reservations_by_source_and_owner(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.manager_user)
+        Reservation.objects.create(
+            customer_wechat='mp_wx',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=5),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            owner=self.staff_user,
+            status='ready_to_convert',
+        )
+        Reservation.objects.create(
+            customer_wechat='manual_wx',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=5),
+            source='manual',
+            owner=self.manager_user,
+            status='pending_info',
+        )
+        resp = self.client.get(
+            f'/api/mp/staff/reservations/?source=miniprogram&owner_id={self.staff_user.id}',
+            **self._auth_header(),
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data['results']), 1)
+        self.assertEqual(data['results'][0]['source'], 'miniprogram')
+        self.assertTrue(any(item['value'] == 'manual' for item in data['filters']['sources']))
+        self.assertTrue(any(item['value'] == self.staff_user.id for item in data['filters']['owners']))
+
+    def test_manager_should_filter_staff_orders_by_source_and_owner(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.manager_user)
+        order_mp = Order.objects.create(
+            customer_name='来源客户A',
+            customer_phone='13800000111',
+            delivery_address='地址A',
+            event_date=date.today() + timedelta(days=4),
+            rental_days=1,
+            status='confirmed',
+            order_source='miniprogram',
+            total_amount=Decimal('168.00'),
+            balance=Decimal('0.00'),
+            created_by=self.manager_user,
+        )
+        order_manual = Order.objects.create(
+            customer_name='来源客户B',
+            customer_phone='13800000222',
+            delivery_address='地址B',
+            event_date=date.today() + timedelta(days=4),
+            rental_days=1,
+            status='confirmed',
+            order_source='wechat',
+            total_amount=Decimal('168.00'),
+            balance=Decimal('20.00'),
+            created_by=self.manager_user,
+        )
+        Reservation.objects.create(
+            customer_wechat='a_wx',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=4),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            owner=self.staff_user,
+            status='converted',
+            converted_order=order_mp,
+        )
+        Reservation.objects.create(
+            customer_wechat='b_wx',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=4),
+            source='manual',
+            owner=self.manager_user,
+            status='converted',
+            converted_order=order_manual,
+        )
+        resp = self.client.get(
+            f'/api/mp/staff/orders/?order_source=miniprogram&owner_id={self.staff_user.id}',
+            **self._auth_header(),
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data['results']), 1)
+        self.assertEqual(data['results'][0]['order_source'], 'miniprogram')
+        self.assertEqual(data['results'][0]['owner_name'], '移动客服')
+        self.assertTrue(any(item['value'] == 'wechat' for item in data['filters']['sources']))
+        self.assertTrue(any(item['value'] == self.staff_user.id for item in data['filters']['owners']))
+
+    def test_staff_order_list_should_expose_quick_action_flags(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.warehouse_user)
+        confirmed_order = Order.objects.create(
+            customer_name='待发货客户',
+            customer_phone='13900000011',
+            delivery_address='待发货地址',
+            event_date=date.today() + timedelta(days=2),
+            rental_days=1,
+            ship_date=date.today(),
+            status='confirmed',
+            total_amount=Decimal('168.00'),
+            balance=Decimal('68.00'),
+            created_by=self.warehouse_user,
+            return_service_type='platform_return_included',
+            return_pickup_status='pending_schedule',
+        )
+        delivered_order = Order.objects.create(
+            customer_name='待归还客户',
+            customer_phone='13900000012',
+            delivery_address='待归还地址',
+            event_date=date.today() + timedelta(days=2),
+            rental_days=1,
+            ship_date=date.today(),
+            status='delivered',
+            total_amount=Decimal('168.00'),
+            balance=Decimal('0.00'),
+            created_by=self.warehouse_user,
+        )
+        for order in [confirmed_order, delivered_order]:
+            OrderItem.objects.create(
+                order=order,
+                sku=self.sku_visible,
+                quantity=1,
+                rental_price=self.sku_visible.rental_price,
+                deposit=self.sku_visible.deposit,
+                subtotal=self.sku_visible.rental_price,
+            )
+
+        resp = self.client.get('/api/mp/staff/orders/', **self._auth_header())
+        self.assertEqual(resp.status_code, 200)
+        results = {item['id']: item for item in resp.json()['results']}
+        self.assertTrue(results[confirmed_order.id]['can_mark_delivered'])
+        self.assertTrue(results[confirmed_order.id]['can_record_balance'])
+        self.assertTrue(results[confirmed_order.id]['can_update_return_service'])
+        self.assertFalse(results[confirmed_order.id]['can_mark_returned'])
+        self.assertFalse(results[delivered_order.id]['can_mark_delivered'])
+        self.assertTrue(results[delivered_order.id]['can_mark_returned'])
+
+    def test_staff_reservations_should_support_keyword_search(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.manager_user)
+        matched = Reservation.objects.create(
+            customer_wechat='search_wx',
+            customer_name='搜索客户',
+            customer_phone='13811112222',
+            sku=self.sku_visible,
+            event_date=date.today() + timedelta(days=5),
+            source='miniprogram',
+            wechat_customer=self.customer,
+            owner=self.staff_user,
+            status='pending_info',
+        )
+        Reservation.objects.create(
+            customer_wechat='other_wx',
+            customer_name='其他客户',
+            customer_phone='13999990000',
+            sku=self.sku_hidden,
+            event_date=date.today() + timedelta(days=6),
+            source='manual',
+            owner=self.manager_user,
+            status='pending_info',
+        )
+
+        resp = self.client.get(
+            '/api/mp/staff/reservations/?keyword=搜索客户',
+            **self._auth_header(),
+        )
+        self.assertEqual(resp.status_code, 200)
+        results = resp.json()['results']
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['id'], matched.id)
+
+    def test_staff_orders_should_support_keyword_search_by_sku_name(self):
+        WechatStaffBinding.objects.create(customer=self.customer, user=self.warehouse_user)
+        matched_order = Order.objects.create(
+            customer_name='搜索订单客户',
+            customer_phone='13855556666',
+            delivery_address='搜索地址',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='confirmed',
+            total_amount=Decimal('168.00'),
+            balance=Decimal('0.00'),
+            created_by=self.warehouse_user,
+        )
+        other_order = Order.objects.create(
+            customer_name='其他订单客户',
+            customer_phone='13877778888',
+            delivery_address='其他地址',
+            event_date=date.today() + timedelta(days=3),
+            rental_days=1,
+            status='confirmed',
+            total_amount=Decimal('168.00'),
+            balance=Decimal('0.00'),
+            created_by=self.warehouse_user,
+        )
+        OrderItem.objects.create(
+            order=matched_order,
+            sku=self.sku_visible,
+            quantity=1,
+            rental_price=self.sku_visible.rental_price,
+            deposit=self.sku_visible.deposit,
+            subtotal=self.sku_visible.rental_price,
+        )
+        OrderItem.objects.create(
+            order=other_order,
+            sku=self.sku_hidden,
+            quantity=1,
+            rental_price=self.sku_hidden.rental_price,
+            deposit=self.sku_hidden.deposit,
+            subtotal=self.sku_hidden.rental_price,
+        )
+
+        resp = self.client.get(
+            f'/api/mp/staff/orders/?keyword={self.sku_visible.name}',
+            **self._auth_header(),
+        )
+        self.assertEqual(resp.status_code, 200)
+        results = resp.json()['results']
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['id'], matched_order.id)
+
+    # --- 认证 ---
+    def test_token_expired(self):
+        """过期 token 被拒绝"""
+        import time
+        from apps.core.services.wechat_auth_service import generate_token, verify_token
+        import hmac, hashlib
+        from django.conf import settings
+        # 手动创建一个过期 token
+        expire_ts = int(time.time()) - 100
+        payload = f"{self.customer.id}.{expire_ts}"
+        signature = hmac.new(
+            settings.SECRET_KEY.encode(), payload.encode(), hashlib.sha256
+        ).hexdigest()[:32]
+        expired_token = f"{payload}.{signature}"
+        resp = self.client.get('/api/mp/my-reservations/',
+                               HTTP_AUTHORIZATION=f'Bearer {expired_token}')
+        self.assertEqual(resp.status_code, 401)
+
+    def test_invalid_token_format(self):
+        """格式错误的 token 被拒绝"""
+        resp = self.client.get('/api/mp/my-reservations/',
+                               HTTP_AUTHORIZATION='Bearer invalid.token')
+        self.assertEqual(resp.status_code, 401)
+
+    def test_token_verify_roundtrip(self):
+        """Token 签发与校验往返测试"""
+        from apps.core.services.wechat_auth_service import generate_token, verify_token
+        token = generate_token(self.customer.id, self.customer.openid)
+        customer_id = verify_token(token)
+        self.assertEqual(customer_id, self.customer.id)

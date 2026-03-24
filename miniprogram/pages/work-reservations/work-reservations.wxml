@@ -1,0 +1,82 @@
+<view class="container">
+  <view class="search-bar">
+    <view class="search-input-wrap">
+      <icon type="search" size="14" color="#999" />
+      <input class="search-input" placeholder="搜预定单号/客户/微信/手机号" value="{{keyword}}" bindinput="onKeywordInput" confirm-type="search" bindconfirm="onSearch" />
+      <icon wx:if="{{keyword}}" type="clear" size="14" bindtap="clearSearch" />
+    </view>
+  </view>
+
+  <scroll-view class="filter-scroll" scroll-x="true" enable-flex="true">
+    <view class="filter-chip {{activeQuickFilter === '' ? 'active' : ''}}" data-key="" bindtap="applyQuickFilter">全部</view>
+    <view class="filter-chip {{activeQuickFilter === 'today' ? 'active' : ''}}" data-key="today" bindtap="applyQuickFilter">今日需联系</view>
+    <view class="filter-chip {{activeQuickFilter === 'overdue' ? 'active danger' : ''}}" data-key="overdue" bindtap="applyQuickFilter">逾期未联系</view>
+    <view class="filter-chip {{activeQuickFilter === 'ready' ? 'active work' : ''}}" data-key="ready" bindtap="applyQuickFilter">待转正式订单</view>
+    <view class="filter-chip {{activeQuickFilter === 'awaiting' ? 'active blue' : ''}}" data-key="awaiting" bindtap="applyQuickFilter">转单待发货</view>
+  </scroll-view>
+
+  <view class="picker-row" wx:if="{{sourceOptions.length > 1 || ownerOptions.length > 1}}">
+    <picker class="picker-wrap" mode="selector" range="{{sourceOptions}}" range-key="label" value="{{sourceIndex}}" bindchange="onSourceChange">
+      <view class="picker-field">
+        <text>来源：{{sourceOptions[sourceIndex].label}}</text>
+        <text class="picker-arrow">▼</text>
+      </view>
+    </picker>
+    <picker class="picker-wrap" wx:if="{{ownerOptions.length > 1}}" mode="selector" range="{{ownerOptions}}" range-key="label" value="{{ownerIndex}}" bindchange="onOwnerChange">
+      <view class="picker-field">
+        <text>负责人：{{ownerOptions[ownerIndex].label}}</text>
+        <text class="picker-arrow">▼</text>
+      </view>
+    </picker>
+  </view>
+
+  <view class="loading-wrap" wx:if="{{loading}}">
+    <view class="loading-spinner"></view>
+  </view>
+
+  <view class="empty-state" wx:elif="{{!items.length}}">
+    <text class="empty-icon">📭</text>
+    <text class="empty-text">当前没有符合条件的预定单</text>
+  </view>
+
+  <view wx:else class="order-list">
+    <view class="card order-card" wx:for="{{items}}" wx:key="id" bindtap="goDetail" data-id="{{item.id}}">
+      <view class="order-header">
+        <text class="order-no">{{item.reservation_no}}</text>
+        <text class="order-status">{{item.status_label}}</text>
+      </view>
+      <text class="main-line">{{item.customer_name}} · {{item.sku_name}}</text>
+      <view class="meta-row">
+        <text class="meta-tag blue">{{item.source_label}}</text>
+        <text class="meta-tag">{{item.contact_status_label}}</text>
+        <text class="meta-tag blue">{{item.journey_label}}</text>
+      </view>
+      <text class="sub-line">活动日期：{{item.event_date}}<text wx:if="{{item.followup_date}}"> · 应联系：{{item.followup_date}}</text></text>
+      <text class="sub-line" wx:if="{{item.owner_name}}">负责人：{{item.owner_name}}</text>
+      <text class="sub-line" wx:if="{{item.customer_phone}}">电话：{{item.customer_phone}}</text>
+      <text class="sub-line" wx:if="{{item.customer_wechat}}">微信：{{item.customer_wechat}}</text>
+      <view class="tool-row">
+        <button class="mini-btn" wx:if="{{item.customer_phone}}" catchtap="callCustomer" data-phone="{{item.customer_phone}}">拨打电话</button>
+        <button class="mini-btn" wx:if="{{item.customer_wechat}}" catchtap="copyWechat" data-wechat="{{item.customer_wechat}}">复制微信</button>
+      </view>
+      <view class="tool-row" wx:if="{{item.can_mark_pending_info || item.can_mark_ready_to_convert}}">
+        <button class="mini-btn subtle"
+                wx:if="{{item.can_mark_pending_info}}"
+                catchtap="quickUpdateStatus"
+                data-id="{{item.id}}"
+                data-status="pending_info"
+                data-label="待补信息"
+                loading="{{actionLoadingId === item.id}}"
+                disabled="{{actionLoadingId === item.id}}">标记待补信息</button>
+        <button class="mini-btn primary"
+                wx:if="{{item.can_mark_ready_to_convert}}"
+                catchtap="quickUpdateStatus"
+                data-id="{{item.id}}"
+                data-status="ready_to_convert"
+                data-label="可转正式订单"
+                loading="{{actionLoadingId === item.id}}"
+                disabled="{{actionLoadingId === item.id}}">标记可转单</button>
+      </view>
+    </view>
+  </view>
+</view>

@@ -70,6 +70,7 @@ urlpatterns = [
     path('skus/assembly-orders/', views.assembly_orders_list, name='assembly_orders_list'),
     path('skus/assembly-orders/export/', views.assembly_orders_export, name='assembly_orders_export'),
     path('skus/assembly-orders/<int:assembly_id>/cancel/', views.assembly_order_cancel, name='assembly_order_cancel'),
+    path('skus/upload-token/', views.sku_upload_token, name='sku_upload_token'),
     path('skus/create/', views.sku_create, name='sku_create'),
     path('skus/<int:sku_id>/edit/', views.sku_edit, name='sku_edit'),
     path('skus/<int:sku_id>/assemble/', views.sku_assemble, name='sku_assemble'),

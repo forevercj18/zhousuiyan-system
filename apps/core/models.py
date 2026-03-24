@@ -2,6 +2,9 @@
 核心业务模型
 包含：用户扩展、订单、SKU、部件、采购、转寄、设置、日志等
 """
+from urllib.parse import quote
+
+from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import MinValueValidator
@@ -81,17 +84,39 @@ class PermissionTemplate(models.Model):
         return self.name
 
 
+def _build_storage_public_url(key):
+    cleaned_key = (key or '').strip().lstrip('/')
+    if not cleaned_key:
+        return ''
+    domain = (getattr(settings, 'R2_PUBLIC_DOMAIN', '') or '').strip().rstrip('/')
+    if not domain:
+        return ''
+    return f"{domain}/{quote(cleaned_key, safe='/~')}"
+
+
 class SKU(models.Model):
     """SKU模型（租赁套装）"""
     code = models.CharField('SKU编码', max_length=50, unique=True)
     name = models.CharField('SKU名称', max_length=100)
     category = models.CharField('分类', max_length=50, default='主题套餐')
     image = models.FileField('SKU图片', upload_to='sku_images/', blank=True, null=True)
+    image_key = models.CharField('七牛图片Key', max_length=255, blank=True, default='')
     rental_price = models.DecimalField('租金', max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
     deposit = models.DecimalField('押金', max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))])
     stock = models.IntegerField('总库存', validators=[MinValueValidator(0)])
     description = models.TextField('描述', blank=True)
     is_active = models.BooleanField('是否启用', default=True)
+
+    # 小程序展示字段（与真实库存独立，纯营销用途）
+    display_stock = models.IntegerField('展示库存', default=0,
+        help_text='小程序展示用，手动设置，不影响真实库存')
+    display_stock_warning = models.IntegerField('展示库存预警线', default=0,
+        help_text='低于此值时小程序显示即将售罄')
+    mp_visible = models.BooleanField('小程序可见', default=False,
+        help_text='控制是否在小程序中展示')
+    mp_sort_order = models.IntegerField('小程序排序', default=0,
+        help_text='小程序产品列表排序，数字越小越靠前')
+
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
@@ -103,10 +128,32 @@ class SKU(models.Model):
         indexes = [
             models.Index(fields=['code']),
             models.Index(fields=['is_active']),
+            models.Index(fields=['mp_visible', 'mp_sort_order']),
         ]
 
     def __str__(self):
         return f"{self.code} - {self.name}"
+
+    @property
+    def image_url(self):
+        cover_image = self.images.filter(is_cover=True).first()
+        if cover_image and cover_image.image_url:
+            return cover_image.image_url
+        first_image = self.images.first()
+        if first_image and first_image.image_url:
+            return first_image.image_url
+        if self.image_key:
+            return _build_storage_public_url(self.image_key)
+        if self.image:
+            try:
+                return self.image.url
+            except ValueError:
+                return ''
+        return ''
+
+    @property
+    def image_display_url(self):
+        return self.image_url
 
     @property
     def effective_stock(self):
@@ -245,6 +292,7 @@ class Order(models.Model):
         ('wechat', '微信成交'),
         ('xianyu', '闲鱼'),
         ('xiaohongshu', '小红书'),
+        ('miniprogram', '小程序'),
         ('other', '其他'),
     ]
     RETURN_SERVICE_TYPE_CHOICES = [
@@ -413,6 +461,7 @@ class Reservation(models.Model):
     customer_name = models.CharField('客户姓名', max_length=100, blank=True)
     customer_phone = models.CharField('联系电话', max_length=20, blank=True)
     city = models.CharField('意向城市', max_length=100, blank=True)
+    delivery_address = models.TextField('收货地址', blank=True)
     sku = models.ForeignKey(SKU, on_delete=models.PROTECT, related_name='reservations', verbose_name='意向款式')
     quantity = models.IntegerField('数量', default=1, validators=[MinValueValidator(1)])
     event_date = models.DateField('预定日期')
@@ -429,6 +478,17 @@ class Reservation(models.Model):
     )
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_reservations', verbose_name='创建人')
     owner = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='owned_reservations', verbose_name='当前负责人')
+    wechat_customer = models.ForeignKey(
+        'WechatCustomer', on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='reservations',
+        verbose_name='小程序客户'
+    )
+    SOURCE_CHOICES = [
+        ('manual', '客服录入'),
+        ('miniprogram', '小程序'),
+    ]
+    source = models.CharField('来源渠道', max_length=20, choices=SOURCE_CHOICES, default='manual')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
@@ -1397,3 +1457,85 @@ class AuditLog(models.Model):
     def __str__(self):
         return f"{self.user} - {self.get_action_display()} - {self.target}"
 
+
+class WechatCustomer(models.Model):
+    """微信小程序客户"""
+    openid = models.CharField('微信OpenID', max_length=128, unique=True, db_index=True)
+    unionid = models.CharField('微信UnionID', max_length=128, blank=True, db_index=True)
+    nickname = models.CharField('昵称', max_length=100, blank=True)
+    avatar_url = models.URLField('头像URL', blank=True)
+    phone = models.CharField('手机号', max_length=20, blank=True)
+    wechat_id = models.CharField('微信号', max_length=100, blank=True)
+    is_active = models.BooleanField('是否启用', default=True)
+    created_at = models.DateTimeField('首次访问', auto_now_add=True)
+    updated_at = models.DateTimeField('最近访问', auto_now=True)
+
+    class Meta:
+        db_table = 'wechat_customers'
+        verbose_name = '微信客户'
+        verbose_name_plural = '微信客户'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['openid']),
+            models.Index(fields=['phone']),
+        ]
+
+    def __str__(self):
+        return f"{self.nickname or self.openid}"
+
+
+class WechatStaffBinding(models.Model):
+    """微信小程序员工绑定关系"""
+    customer = models.OneToOneField(
+        WechatCustomer,
+        on_delete=models.CASCADE,
+        related_name='staff_binding',
+        verbose_name='微信客户身份',
+    )
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name='wechat_staff_binding',
+        verbose_name='后台用户',
+    )
+    is_active = models.BooleanField('是否启用', default=True)
+    bound_at = models.DateTimeField('绑定时间', auto_now_add=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'wechat_staff_bindings'
+        verbose_name = '微信员工绑定'
+        verbose_name_plural = '微信员工绑定'
+
+    def __str__(self):
+        return f"{self.customer} -> {self.user}"
+
+
+class SKUImage(models.Model):
+    """SKU展示图片（多图）"""
+    sku = models.ForeignKey(SKU, on_delete=models.CASCADE, related_name='images', verbose_name='SKU')
+    image = models.FileField('图片', upload_to='sku_images/', blank=True, null=True)
+    image_key = models.CharField('七牛图片Key', max_length=255, blank=True, default='')
+    sort_order = models.IntegerField('排序', default=0)
+    is_cover = models.BooleanField('是否封面', default=False)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        db_table = 'sku_images'
+        verbose_name = 'SKU展示图片'
+        verbose_name_plural = 'SKU展示图片'
+        ordering = ['sort_order', 'id']
+
+    def __str__(self):
+        return f"{self.sku.code} - 图{self.sort_order}"
+
+    @property
+    def image_url(self):
+        if self.image_key:
+            return _build_storage_public_url(self.image_key)
+        if self.image:
+            try:
+                return self.image.url
+            except ValueError:
+                return ''
+        return ''

@@ -1,0 +1,72 @@
+<view class="container" wx:if="{{!loading && item}}">
+  <view class="card info-card">
+    <view class="title-row">
+      <text class="title">{{item.order_no}}</text>
+      <text class="badge">{{item.status_label}}</text>
+    </view>
+    <view class="tool-row">
+      <button class="mini-btn" bindtap="copyOrderNo">复制订单号</button>
+      <button class="mini-btn" wx:if="{{item.customer_phone}}" bindtap="copyPhone">复制手机号</button>
+    </view>
+    <text class="sub">{{item.customer_name}} · {{item.customer_phone}}</text>
+    <text class="sub">{{item.delivery_address}}</text>
+  </view>
+
+  <view class="card info-card">
+    <text class="section-title">订单信息</text>
+    <text class="sub">活动日期：{{item.event_date}}</text>
+    <text class="sub">发货日期：{{item.ship_date || '待定'}}</text>
+    <text class="sub">发货单号：{{item.ship_tracking || '未填写'}}</text>
+    <text class="sub">回件单号：{{item.return_tracking || '未填写'}}</text>
+    <text class="sub">待收尾款：¥{{item.balance}}</text>
+    <text class="sub">包回邮：{{item.return_service_type_label}} / {{item.return_pickup_status_label}}</text>
+  </view>
+
+  <view class="card info-card">
+    <text class="section-title">套装明细</text>
+    <text class="sub" wx:for="{{item.items}}" wx:key="sku_name">{{item.sku_name}} x{{item.quantity}}</text>
+  </view>
+
+  <view class="card info-card" id="deliver-section" wx:if="{{item.can_mark_delivered}}">
+    <text class="section-title">发货操作</text>
+    <input class="input" placeholder="请输入快递单号" value="{{shipTracking}}" bindinput="onShipTrackingInput" />
+    <button class="primary-btn" loading="{{actionLoading}}" disabled="{{actionLoading}}" bindtap="markDelivered">标记已发货</button>
+  </view>
+
+  <view class="card info-card" id="balance-section" wx:if="{{item.can_record_balance}}">
+    <text class="section-title">尾款登记</text>
+    <input class="input" placeholder="请输入本次收款金额" value="{{balancePaid}}" bindinput="onBalancePaidInput" />
+    <input class="input" placeholder="备注（可留空）" value="{{balanceNotes}}" bindinput="onBalanceNotesInput" />
+    <button class="primary-btn" loading="{{actionLoading}}" disabled="{{actionLoading}}" bindtap="recordBalance">登记尾款</button>
+  </view>
+
+  <view class="card info-card" id="return-service-section" wx:if="{{item.can_update_return_service}}">
+    <text class="section-title">包回邮处理</text>
+    <picker mode="selector" range="{{returnServiceTypeOptions}}" range-key="label" value="{{returnServiceTypeIndex}}" bindchange="onReturnServiceTypeChange">
+      <view class="picker-field">服务类型：{{returnServiceTypeOptions[returnServiceTypeIndex].label}}</view>
+    </picker>
+    <input class="input" placeholder="服务费，默认 45" value="{{returnServiceFee}}" bindinput="onReturnServiceFeeInput" />
+    <picker mode="selector" range="{{paymentStatusOptions}}" range-key="label" value="{{paymentStatusIndex}}" bindchange="onPaymentStatusChange">
+      <view class="picker-field">收款状态：{{paymentStatusOptions[paymentStatusIndex].label}}</view>
+    </picker>
+    <picker mode="selector" range="{{paymentChannelOptions}}" range-key="label" value="{{paymentChannelIndex}}" bindchange="onPaymentChannelChange">
+      <view class="picker-field">收款渠道：{{paymentChannelOptions[paymentChannelIndex].label}}</view>
+    </picker>
+    <input class="input" placeholder="支付参考号 / 备注" value="{{returnServicePaymentReference}}" bindinput="onReturnServicePaymentReferenceInput" />
+    <picker mode="selector" range="{{pickupStatusOptions}}" range-key="label" value="{{pickupStatusIndex}}" bindchange="onPickupStatusChange">
+      <view class="picker-field">取件状态：{{pickupStatusOptions[pickupStatusIndex].label}}</view>
+    </picker>
+    <button class="primary-btn secondary-btn" loading="{{actionLoading}}" disabled="{{actionLoading}}" bindtap="updateReturnService">更新包回邮</button>
+  </view>
+
+  <view class="card info-card" id="return-section" wx:if="{{item.can_mark_returned}}">
+    <text class="section-title">回件操作</text>
+    <input class="input" placeholder="请输入回件单号" value="{{returnTracking}}" bindinput="onReturnTrackingInput" />
+    <input class="input" placeholder="本次收尾款金额（可留空）" value="{{balancePaid}}" bindinput="onBalancePaidInput" />
+    <button class="primary-btn" loading="{{actionLoading}}" disabled="{{actionLoading}}" bindtap="markReturned">标记已归还</button>
+  </view>
+</view>
+
+<view class="loading-wrap" wx:if="{{loading}}">
+  <view class="loading-spinner"></view>
+</view>

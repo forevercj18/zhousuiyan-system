@@ -1,0 +1,151 @@
+/* 产品摘要 */
+.summary-card {
+  padding: 24rpx;
+}
+.summary-name {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #333;
+  display: block;
+}
+.summary-price-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-top: 12rpx;
+}
+.summary-deposit {
+  font-size: 24rpx;
+  color: #999;
+}
+
+/* 表单 */
+.form-card {
+  padding: 24rpx;
+}
+.form-section-title {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 20rpx;
+  padding-left: 16rpx;
+  border-left: 6rpx solid #ff6b81;
+}
+.form-item {
+  display: flex;
+  align-items: center;
+  padding: 20rpx 0;
+  border-bottom: 1rpx solid #f0f0f0;
+}
+.form-item:last-child {
+  border-bottom: none;
+}
+.form-item-textarea {
+  flex-direction: column;
+  align-items: flex-start;
+}
+.form-label {
+  font-size: 28rpx;
+  color: #333;
+  width: 160rpx;
+  flex-shrink: 0;
+}
+.required {
+  color: #ff6b81;
+}
+.form-input {
+  flex: 1;
+  font-size: 28rpx;
+  height: 64rpx;
+  padding: 0 16rpx;
+  background: #f9f9f9;
+  border-radius: 8rpx;
+}
+.form-picker {
+  flex: 1;
+  font-size: 28rpx;
+  height: 64rpx;
+  line-height: 64rpx;
+  padding: 0 16rpx;
+  background: #f9f9f9;
+  border-radius: 8rpx;
+  color: #333;
+}
+.form-picker.placeholder {
+  color: #999;
+}
+.form-textarea {
+  width: 100%;
+  font-size: 28rpx;
+  padding: 16rpx;
+  background: #f9f9f9;
+  border-radius: 8rpx;
+  margin-top: 12rpx;
+  min-height: 120rpx;
+  box-sizing: border-box;
+}
+
+/* 数量选择器 */
+.quantity-picker {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  background: #f9f9f9;
+  border-radius: 8rpx;
+  overflow: hidden;
+}
+.qty-btn {
+  width: 64rpx;
+  height: 64rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 32rpx;
+  color: #333;
+  font-weight: 600;
+}
+.qty-btn.disabled {
+  color: #ccc;
+}
+.qty-value {
+  width: 64rpx;
+  text-align: center;
+  font-size: 28rpx;
+  font-weight: 600;
+}
+
+/* 提示 */
+.notice-card {
+  display: flex;
+  gap: 12rpx;
+  padding: 20rpx 24rpx;
+  margin-top: 8rpx;
+}
+.notice-icon {
+  flex-shrink: 0;
+  font-size: 28rpx;
+}
+.notice-text {
+  font-size: 24rpx;
+  color: #999;
+  line-height: 1.6;
+}
+
+/* 底部 */
+.bottom-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: #fff;
+  padding: 16rpx 24rpx;
+  padding-bottom: calc(16rpx + env(safe-area-inset-bottom));
+  box-shadow: 0 -4rpx 16rpx rgba(0,0,0,0.06);
+  z-index: 100;
+}
+.btn-submit {
+  width: 100%;
+}
+.btn-disabled {
+  background: #ccc !important;
+}

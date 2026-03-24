@@ -13,6 +13,21 @@
 
 {% block content %}
 <div class="skus-list">
+    {% if not storage_status.enabled %}
+    <div class="alert alert-warning d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+            <strong>Cloudflare R2 图片直传未就绪：</strong>
+            当前缺少
+            {% if storage_status.missing_items %}
+                {{ storage_status.missing_items|join:'、' }}
+            {% else %}
+                必要配置
+            {% endif %}
+            。SKU 图片仍可查看旧图，但新图直传会失败。
+        </div>
+        <a class="btn btn-sm btn-outline-dark" href="{% url 'settings' %}?tab=system">查看配置说明</a>
+    </div>
+    {% endif %}
     <div class="page-header">
         <div class="header-left">
             <div class="filter-group">
@@ -60,9 +75,9 @@
                     <td>{{ sku.code }}</td>
                     <td>{{ sku.name }}</td>
                     <td>
-                        {% if sku.image %}
-                        <a href="#" onclick="openSkuImagePreview('{{ sku.image.url }}', '{{ sku.name|escapejs }}'); return false;" title="点击放大预览">
-                            <img src="{{ sku.image.url }}" alt="{{ sku.name }}" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid #dbe2ea;">
+                        {% if sku.image_display_url %}
+                        <a href="#" onclick="openSkuImagePreview('{{ sku.image_display_url }}', '{{ sku.name|escapejs }}'); return false;" title="点击放大预览">
+                            <img src="{{ sku.image_display_url }}" alt="{{ sku.name }}" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid #dbe2ea;">
                         </a>
                         {% else %}
                         <span class="text-muted">-</span>
@@ -93,8 +108,14 @@
                                     data-deposit="{{ sku.deposit }}"
                                     data-stock="{{ sku.effective_stock }}"
                                     data-description="{{ sku.description|default:''|escape }}"
-                                    data-image-url="{% if sku.image %}{{ sku.image.url }}{% endif %}"
+                                    data-image-url="{% if sku.image_display_url %}{{ sku.image_display_url }}{% endif %}"
+                                    data-image-key="{{ sku.image_key|default:'' }}"
+                                    data-gallery-b64="{{ sku.gallery_b64 }}"
                                     data-components-b64="{{ sku.components_b64 }}"
+                                    data-mp-visible="{{ sku.mp_visible|yesno:'1,0' }}"
+                                    data-display-stock="{{ sku.display_stock }}"
+                                    data-display-stock-warning="{{ sku.display_stock_warning }}"
+                                    data-mp-sort-order="{{ sku.mp_sort_order }}"
                                     onclick="showEditModal(this)">编辑</button>
                             <button class="btn btn-sm btn-danger" onclick="deleteSKU({{ sku.id }}, '{{ sku.code }}')">删除</button>
                         </div>
@@ -176,6 +197,7 @@ const BOM_PARTS = [
 ];
 const BOM_EDITOR_STATES = {};
 const BOM_PAGE_SIZE = 5;
+const SKU_GALLERY_STATES = {};
 
 function createBomRowId() {
     return `bom_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -308,6 +330,148 @@ function decodeSkuComponents(b64Text) {
         console.error('sku components decode failed', e);
         return [];
     }
+}
+
+function createGalleryItem(item) {
+    return {
+        id: item && item.id ? String(item.id) : `gallery_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        key: item && item.key ? String(item.key) : '',
+        url: item && item.url ? String(item.url) : '',
+        sort_order: item && item.sort_order !== undefined ? Number(item.sort_order) : 0,
+        is_cover: !!(item && item.is_cover),
+        file: item && item.file ? item.file : null,
+    };
+}
+
+function decodeSkuGallery(b64Text) {
+    if (!b64Text) return [];
+    try {
+        const binary = window.atob(b64Text);
+        const bytes = Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
+        const jsonText = new TextDecoder('utf-8').decode(bytes);
+        const parsed = JSON.parse(jsonText);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+        console.error('sku gallery decode failed', e);
+        return [];
+    }
+}
+
+function initGalleryEditor(prefix, items) {
+    const normalized = (Array.isArray(items) ? items : []).map(createGalleryItem).sort((a, b) => a.sort_order - b.sort_order);
+    SKU_GALLERY_STATES[prefix] = {
+        items: normalized,
+    };
+    if (normalized.length && !normalized.some((item) => item.is_cover)) {
+        normalized[0].is_cover = true;
+    }
+    renderGallery(prefix);
+}
+
+function getGalleryState(prefix) {
+    if (!SKU_GALLERY_STATES[prefix]) {
+        SKU_GALLERY_STATES[prefix] = { items: [] };
+    }
+    return SKU_GALLERY_STATES[prefix];
+}
+
+function renderGallery(prefix) {
+    const state = getGalleryState(prefix);
+    const wrap = document.getElementById(`${prefix}GalleryWrap`);
+    if (!wrap) return;
+    if (!state.items.length) {
+        wrap.innerHTML = '<div class="text-muted small">暂无展示图</div>';
+        return;
+    }
+    wrap.innerHTML = state.items.map((item, index) => {
+        const badge = item.file ? '<span class="badge bg-info-subtle text-info-emphasis">待上传</span>' : '';
+        const imageUrl = item.url || '';
+        return `
+            <div class="d-flex align-items-center gap-3 border rounded p-2">
+                <div style="width:72px;height:72px;flex:0 0 72px;">
+                    ${imageUrl
+                        ? `<a href="#" onclick="openSkuImagePreview('${imageUrl}', '画廊图'); return false;"><img src="${imageUrl}" alt="画廊图" style="width:72px;height:72px;object-fit:cover;border-radius:8px;border:1px solid #dbe2ea;"></a>`
+                        : '<div class="text-muted small d-flex align-items-center justify-content-center h-100 border rounded">待上传</div>'}
+                </div>
+                <div class="flex-grow-1 d-flex flex-column gap-2">
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                        <label class="mb-0"><input type="radio" name="${prefix}GalleryCover" ${item.is_cover ? 'checked' : ''} onchange="setGalleryCover('${prefix}', '${item.id}')"> 设为封面</label>
+                        ${badge}
+                    </div>
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                        <label class="mb-0 small text-muted">排序</label>
+                        <input type="number" class="form-control" value="${item.sort_order}" style="width:96px;" oninput="updateGallerySort('${prefix}', '${item.id}', this.value)">
+                    </div>
+                </div>
+                <div class="d-flex gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" ${index === 0 ? 'disabled' : ''} onclick="moveGalleryItem('${prefix}', '${item.id}', -1)">上移</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" ${index === state.items.length - 1 ? 'disabled' : ''} onclick="moveGalleryItem('${prefix}', '${item.id}', 1)">下移</button>
+                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="removeGalleryItem('${prefix}', '${item.id}')">删除</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function bindSkuGalleryInput(prefix) {
+    const inputEl = document.getElementById(`${prefix}GalleryInput`);
+    if (!inputEl) return;
+    inputEl.addEventListener('change', function () {
+        const files = Array.from(this.files || []);
+        if (!files.length) return;
+        const state = getGalleryState(prefix);
+        files.forEach((file, idx) => {
+            if (!file.type || !file.type.startsWith('image/')) return;
+            state.items.push(createGalleryItem({
+                file,
+                url: URL.createObjectURL(file),
+                sort_order: state.items.length + idx,
+                is_cover: state.items.length === 0 && idx === 0,
+            }));
+        });
+        if (state.items.length && !state.items.some((item) => item.is_cover)) {
+            state.items[0].is_cover = true;
+        }
+        inputEl.value = '';
+        renderGallery(prefix);
+    });
+}
+
+function setGalleryCover(prefix, itemId) {
+    const state = getGalleryState(prefix);
+    state.items.forEach((item) => {
+        item.is_cover = item.id === itemId;
+    });
+    renderGallery(prefix);
+}
+
+function updateGallerySort(prefix, itemId, value) {
+    const state = getGalleryState(prefix);
+    const item = state.items.find((row) => row.id === itemId);
+    if (!item) return;
+    item.sort_order = parseInt(value || '0', 10) || 0;
+}
+
+function moveGalleryItem(prefix, itemId, delta) {
+    const state = getGalleryState(prefix);
+    const index = state.items.findIndex((item) => item.id === itemId);
+    const target = index + delta;
+    if (index < 0 || target < 0 || target >= state.items.length) return;
+    const [current] = state.items.splice(index, 1);
+    state.items.splice(target, 0, current);
+    state.items.forEach((item, idx) => {
+        if (!item.file) item.sort_order = idx;
+    });
+    renderGallery(prefix);
+}
+
+function removeGalleryItem(prefix, itemId) {
+    const state = getGalleryState(prefix);
+    state.items = state.items.filter((item) => item.id !== itemId);
+    if (state.items.length && !state.items.some((item) => item.is_cover)) {
+        state.items[0].is_cover = true;
+    }
+    renderGallery(prefix);
 }
 
 function initBomEditor(prefix, rows) {
@@ -443,8 +607,12 @@ function createSkuModalDom(mode, payload) {
     const prefix = isEdit ? 'editDynamic' : 'createDynamic';
     const imagePreviewWrapId = `${prefix}ImagePreviewWrap`;
     const selectedPreviewWrapId = `${prefix}SelectedImagePreviewWrap`;
+    const galleryInputId = `${prefix}GalleryInput`;
+    const galleryWrapId = `${prefix}GalleryWrap`;
+    const galleryPayloadId = `${prefix}GalleryPayload`;
     const bomRowsId = `${prefix}BomRows`;
     const imageInputId = `${prefix}ImageInput`;
+    const imageKeyId = `${prefix}ImageKey`;
     const clearImageId = `${prefix}ClearImage`;
     const stockTextId = `${prefix}StockText`;
     const title = isEdit ? '编辑产品' : '新建产品';
@@ -465,6 +633,8 @@ function createSkuModalDom(mode, payload) {
                     <div class="modal-body" style="max-height: calc(100vh - 170px); overflow-y: auto; overflow-x: hidden;">
                         <form method="POST" action="${action}" enctype="multipart/form-data">
                             <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+                            <input type="hidden" name="image_key" id="${imageKeyId}" value="${payload.imageKey || ''}">
+                            <input type="hidden" name="gallery_payload" id="${galleryPayloadId}" value="">
                             <div class="form-row">
                                 <div class="form-group">
                                     <label>产品编号 <span class="required">*</span></label>
@@ -512,6 +682,12 @@ function createSkuModalDom(mode, payload) {
                                     </label>
                                 </div>` : ''}
                             </div>
+                            <div class="form-group">
+                                <label>展示画廊（多图）</label>
+                                <input type="file" id="${galleryInputId}" class="form-control" accept="image/*" multiple>
+                                <small class="form-text">支持多张上传。可设置封面、调整排序；小程序详情页优先展示这里的图片。</small>
+                                <div id="${galleryWrapId}" class="mt-3 d-flex flex-column gap-2"></div>
+                            </div>
                                 <div class="form-group">
                                     <label>部件组成（BOM）</label>
                                     <div class="d-flex justify-content-between align-items-center gap-2 mb-2 flex-wrap">
@@ -525,6 +701,32 @@ function createSkuModalDom(mode, payload) {
                                         <div id="${prefix}BomPagination" class="d-flex align-items-center gap-2"></div>
                                     </div>
                                     <div id="${prefix}BomHiddenInputs"></div>
+                                </div>
+                                <div class="form-group mt-3" style="background:#f0f7ff;padding:16px;border-radius:8px;border:1px solid #d0e3f7;">
+                                    <label style="font-weight:600;font-size:15px;color:#2563eb;">小程序设置</label>
+                                    <div class="form-row mt-2">
+                                        <div class="form-group" style="flex:0 0 auto;">
+                                            <label><input type="checkbox" name="mp_visible" value="1" ${payload.mpVisible === '1' ? 'checked' : ''}> 小程序可见</label>
+                                            <small class="form-text">勾选后该产品将在小程序中展示</small>
+                                        </div>
+                                        <div class="form-group">
+                                            <label>小程序排序</label>
+                                            <input type="number" name="mp_sort_order" class="form-control" min="0" value="${payload.mpSortOrder || '0'}">
+                                            <small class="form-text">数字越小越靠前</small>
+                                        </div>
+                                    </div>
+                                    <div class="form-row mt-2">
+                                        <div class="form-group">
+                                            <label>展示库存</label>
+                                            <input type="number" name="display_stock" class="form-control" min="0" value="${payload.displayStock || '0'}">
+                                            <small class="form-text">小程序展示用，不影响真实库存</small>
+                                        </div>
+                                        <div class="form-group">
+                                            <label>库存预警线</label>
+                                            <input type="number" name="display_stock_warning" class="form-control" min="0" value="${payload.displayStockWarning || '0'}">
+                                            <small class="form-text">低于此值显示"即将售罄"</small>
+                                        </div>
+                                    </div>
                                 </div>
                             <div class="form-actions">
                                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
@@ -554,18 +756,31 @@ function showSkuFormModal(mode, payload) {
     wrapper.innerHTML = createSkuModalDom(mode, payload);
     document.body.appendChild(wrapper.firstElementChild);
 
-	    initBomEditor(prefix, mode === 'edit' ? (payload.components || []) : []);
-	    bindSkuImageInputPreview(`#${prefix}ImageInput`, `#${prefix}SelectedImagePreviewWrap`);
+		    initBomEditor(prefix, mode === 'edit' ? (payload.components || []) : []);
+		    initGalleryEditor(prefix, payload.gallery || []);
+		    bindSkuGalleryInput(prefix);
+		    bindSkuImageInputPreview(`#${prefix}ImageInput`, `#${prefix}SelectedImagePreviewWrap`, `#${prefix}ClearImage`, `#${prefix}ImageKey`);
 
 	    const modalEl = document.getElementById(modalId);
-        const formEl = modalEl.querySelector('form');
-        if (formEl) {
-            formEl.addEventListener('submit', function (event) {
-                if (!serializeBomRows(prefix, formEl)) {
+	        const formEl = modalEl.querySelector('form');
+	        if (formEl) {
+	            formEl.addEventListener('submit', async function (event) {
+	                if (!serializeBomRows(prefix, formEl)) {
+	                    event.preventDefault();
+                        return;
+	                }
                     event.preventDefault();
-                }
-            });
-        }
+                    const uploaded = await ensureSkuImageUploaded(formEl, prefix, event);
+                    if (!uploaded) {
+                        return;
+	                }
+                    const galleryReady = await ensureSkuGalleryUploaded(formEl, prefix, event);
+                    if (!galleryReady) {
+                        return;
+	                }
+                    formEl.submit();
+	            });
+	        }
 	    if (window.bootstrap) {
         const instance = new window.bootstrap.Modal(modalEl, { backdrop: 'static' });
         modalEl.addEventListener('hidden.bs.modal', function () {
@@ -604,7 +819,13 @@ function showEditModal(btn) {
         stock: btn.getAttribute('data-stock') || '0',
         description: btn.getAttribute('data-description') || '',
         imageUrl: btn.getAttribute('data-image-url') || '',
-        components: buttonComponents.length ? buttonComponents : normalizeBomRows(SKU_COMPONENTS_MAP[String(skuId)] || [])
+        imageKey: btn.getAttribute('data-image-key') || '',
+        gallery: decodeSkuGallery(btn.getAttribute('data-gallery-b64')),
+        components: buttonComponents.length ? buttonComponents : normalizeBomRows(SKU_COMPONENTS_MAP[String(skuId)] || []),
+        mpVisible: btn.getAttribute('data-mp-visible') || '0',
+        displayStock: btn.getAttribute('data-display-stock') || '0',
+        displayStockWarning: btn.getAttribute('data-display-stock-warning') || '0',
+        mpSortOrder: btn.getAttribute('data-mp-sort-order') || '0',
     });
 }
 
@@ -688,9 +909,11 @@ function openSkuImagePreview(imageUrl, title) {
     modal.show();
 }
 
-function bindSkuImageInputPreview(inputSelector, previewSelector) {
+function bindSkuImageInputPreview(inputSelector, previewSelector, clearSelector, imageKeySelector) {
     const inputEl = document.querySelector(inputSelector);
     const previewWrap = document.querySelector(previewSelector);
+    const clearEl = clearSelector ? document.querySelector(clearSelector) : null;
+    const imageKeyEl = imageKeySelector ? document.querySelector(imageKeySelector) : null;
     if (!inputEl || !previewWrap) return;
 
     inputEl.addEventListener('change', function () {
@@ -699,6 +922,8 @@ function bindSkuImageInputPreview(inputSelector, previewSelector) {
             previewWrap.textContent = '未选择图片';
             return;
         }
+        if (clearEl) clearEl.checked = false;
+        if (imageKeyEl) imageKeyEl.value = '';
         if (!file.type || !file.type.startsWith('image/')) {
             previewWrap.textContent = '所选文件不是图片';
             return;
@@ -710,6 +935,177 @@ function bindSkuImageInputPreview(inputSelector, previewSelector) {
             `<img src="${objectUrl}" alt="本地预览" style="width:88px;height:88px;object-fit:cover;border-radius:8px;border:1px solid #dbe2ea;">` +
             `</a>`;
     });
+}
+
+async function ensureSkuImageUploaded(formEl, prefix, event) {
+    const imageInput = formEl.querySelector(`#${prefix}ImageInput`);
+    const imageKeyInput = formEl.querySelector(`#${prefix}ImageKey`);
+    if (!imageInput || !imageKeyInput) {
+        return true;
+    }
+    const file = imageInput.files && imageInput.files[0];
+    if (!file) {
+        return true;
+    }
+
+    event.preventDefault();
+    const submitBtn = formEl.querySelector('button[type="submit"]');
+    const originalText = submitBtn ? submitBtn.textContent : '';
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '上传中...';
+    }
+    try {
+        const csrfToken = formEl.querySelector('input[name="csrfmiddlewaretoken"]')?.value || '';
+        const tokenResp = await fetch('{% url "sku_upload_token" %}', {
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': csrfToken,
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: new URLSearchParams({ filename: file.name || 'image.jpg' }),
+            credentials: 'same-origin',
+        });
+        const tokenData = await tokenResp.json();
+        if (!tokenResp.ok || !tokenData.success || !tokenData.data) {
+            throw new Error(tokenData.message || '获取上传凭证失败');
+        }
+        const uploadResp = await fetch(tokenData.data.upload_url, {
+            method: tokenData.data.upload_method || 'PUT',
+            headers: tokenData.data.headers || {},
+            body: file,
+        });
+        if (!uploadResp.ok) {
+            let detail = '';
+            try {
+                detail = await uploadResp.text();
+            } catch (e) {
+                detail = '';
+            }
+            throw new Error(formatR2UploadError(uploadResp.status, detail));
+        }
+        imageKeyInput.value = tokenData.data.key;
+        imageInput.value = '';
+        return true;
+    } catch (error) {
+        const message = normalizeR2UploadError(error);
+        if (window.AppUI && typeof window.AppUI.alert === 'function') {
+            window.AppUI.alert(message, '上传失败');
+        } else {
+            window.alert(message);
+        }
+        return false;
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = originalText;
+        }
+    }
+}
+
+async function ensureSkuGalleryUploaded(formEl, prefix, event) {
+    const galleryPayloadInput = formEl.querySelector(`#${prefix}GalleryPayload`);
+    if (!galleryPayloadInput) {
+        return true;
+    }
+    const state = getGalleryState(prefix);
+    const pendingItems = state.items.filter((item) => item.file);
+    if (!pendingItems.length) {
+        galleryPayloadInput.value = JSON.stringify(state.items.map((item, index) => ({
+            key: item.key,
+            sort_order: Number.isFinite(item.sort_order) ? item.sort_order : index,
+            is_cover: !!item.is_cover,
+        })).filter((item) => item.key));
+        return true;
+    }
+
+    event.preventDefault();
+    const submitBtn = formEl.querySelector('button[type="submit"]');
+    const originalText = submitBtn ? submitBtn.textContent : '';
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '上传画廊中...';
+    }
+    try {
+        const csrfToken = formEl.querySelector('input[name="csrfmiddlewaretoken"]')?.value || '';
+        for (const item of pendingItems) {
+            const tokenResp = await fetch('{% url "sku_upload_token" %}', {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': csrfToken,
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                body: new URLSearchParams({ filename: item.file.name || 'gallery.jpg' }),
+                credentials: 'same-origin',
+            });
+            const tokenData = await tokenResp.json();
+            if (!tokenResp.ok || !tokenData.success || !tokenData.data) {
+                throw new Error(tokenData.message || '获取画廊上传凭证失败');
+            }
+            const uploadResp = await fetch(tokenData.data.upload_url, {
+                method: tokenData.data.upload_method || 'PUT',
+                headers: tokenData.data.headers || {},
+                body: item.file,
+            });
+            if (!uploadResp.ok) {
+                let detail = '';
+                try {
+                    detail = await uploadResp.text();
+                } catch (e) {
+                    detail = '';
+                }
+                throw new Error(formatR2UploadError(uploadResp.status, detail));
+            }
+            item.key = tokenData.data.key;
+            item.url = tokenData.data.public_url || item.url;
+            item.file = null;
+        }
+        galleryPayloadInput.value = JSON.stringify(state.items.map((item, index) => ({
+            key: item.key,
+            sort_order: Number.isFinite(item.sort_order) ? item.sort_order : index,
+            is_cover: !!item.is_cover,
+        })).filter((item) => item.key));
+        renderGallery(prefix);
+        return true;
+    } catch (error) {
+        const message = normalizeR2UploadError(error);
+        if (window.AppUI && typeof window.AppUI.alert === 'function') {
+            window.AppUI.alert(message, '上传失败');
+        } else {
+            window.alert(message);
+        }
+        return false;
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = originalText;
+        }
+    }
+}
+
+function formatR2UploadError(status, detail) {
+    const cleanDetail = (detail || '').replace(/\s+/g, ' ').trim();
+    if (status === 403) {
+        return `上传被 Cloudflare R2 拒绝（403）。请检查预签名 URL、Bucket 权限或 CORS 配置。${cleanDetail ? ` 详情：${cleanDetail}` : ''}`;
+    }
+    if (status === 400) {
+        return `上传请求格式被 Cloudflare R2 拒绝（400）。请检查 R2 Endpoint、预签名参数或对象 Key。${cleanDetail ? ` 详情：${cleanDetail}` : ''}`;
+    }
+    if (status === 404) {
+        return '上传目标不存在（404）。请检查 R2 Endpoint 或 Bucket 名称是否正确。';
+    }
+    return `上传图片到 Cloudflare R2 失败（HTTP ${status}）。${cleanDetail || '请检查 Bucket、CORS 和 Endpoint 配置。'}`;
+}
+
+function normalizeR2UploadError(error) {
+    const raw = error && error.message ? String(error.message) : '';
+    if (!raw) {
+        return '上传图片失败，请检查 Cloudflare R2 配置。';
+    }
+    if (raw === 'Failed to fetch' || /NetworkError/i.test(raw)) {
+        return '浏览器未能连通 Cloudflare R2 上传地址。通常是 Bucket 尚未配置 CORS，或 R2 Endpoint / 网络访问不通。';
+    }
+    return raw;
 }
 
 function showAssemblyFeedbackIfReady() {

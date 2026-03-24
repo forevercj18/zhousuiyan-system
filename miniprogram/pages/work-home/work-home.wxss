@@ -1,0 +1,125 @@
+.bind-card,.hero-card,.shortcut-card {
+  padding: 28rpx;
+}
+.hero-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16rpx;
+}
+.hero-actions {
+  display: flex;
+  gap: 12rpx;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.title,.hero-title {
+  display: block;
+  font-size: 34rpx;
+  font-weight: 700;
+  color: #333;
+}
+.subtitle,.hero-subtitle {
+  display: block;
+  font-size: 24rpx;
+  color: #666;
+  margin-top: 12rpx;
+}
+.hero-tip {
+  display: block;
+  margin-top: 16rpx;
+  font-size: 22rpx;
+  color: #999;
+  line-height: 1.6;
+}
+.urgent-banner {
+  margin-top: 18rpx;
+  padding: 20rpx 22rpx;
+  border-radius: 24rpx;
+  background: linear-gradient(135deg, #fff2f0 0%, #fff8f7 100%);
+  border: 2rpx solid #ffd8cf;
+}
+.urgent-title {
+  display: block;
+  font-size: 26rpx;
+  font-weight: 600;
+  color: #cf1322;
+}
+.urgent-text {
+  display: block;
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  color: #8c1d18;
+  line-height: 1.5;
+}
+.primary-btn {
+  margin-top: 28rpx;
+  background: #ff6b81;
+  color: #fff;
+  border-radius: 999rpx;
+  font-size: 28rpx;
+}
+.secondary-btn {
+  margin: 0;
+  padding: 0 24rpx;
+  min-width: 0;
+  height: 64rpx;
+  line-height: 64rpx;
+  border-radius: 999rpx;
+  background: #fff;
+  color: #1677ff;
+  border: 2rpx solid #cfe2ff;
+  font-size: 24rpx;
+}
+.shortcut-group {
+  margin-top: 20rpx;
+}
+.group-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16rpx;
+}
+.group-title {
+  display: block;
+  margin-bottom: 16rpx;
+  padding-left: 8rpx;
+  font-size: 26rpx;
+  font-weight: 600;
+  color: #333;
+}
+.group-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10rpx;
+  margin-bottom: 16rpx;
+}
+.group-badge {
+  padding: 6rpx 14rpx;
+  border-radius: 999rpx;
+  background: #f5f5f5;
+  color: #666;
+  font-size: 20rpx;
+}
+.group-badge.danger {
+  background: #fff2f0;
+  color: #cf1322;
+}
+.shortcut-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20rpx;
+  margin-top: 20rpx;
+}
+.shortcut-count {
+  display: block;
+  font-size: 42rpx;
+  font-weight: 700;
+  color: #ff6b81;
+}
+.shortcut-label {
+  display: block;
+  margin-top: 12rpx;
+  font-size: 24rpx;
+  color: #666;
+}

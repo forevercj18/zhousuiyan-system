@@ -1,0 +1,46 @@
+{
+  "pages": [
+    "pages/index/index",
+    "pages/detail/detail",
+    "pages/order/order",
+    "pages/my-orders/my-orders",
+    "pages/order-detail/order-detail",
+    "pages/work-bind/work-bind",
+    "pages/work-home/work-home",
+    "pages/work-search/work-search",
+    "pages/work-reservations/work-reservations",
+    "pages/work-reservation-detail/work-reservation-detail",
+    "pages/work-orders/work-orders",
+    "pages/work-order-detail/work-order-detail"
+  ],
+  "window": {
+    "navigationBarBackgroundColor": "#ff6b81",
+    "navigationBarTitleText": "周岁宴道具租赁",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#f5f5f5",
+    "backgroundTextStyle": "dark"
+  },
+  "tabBar": {
+    "color": "#999",
+    "selectedColor": "#ff6b81",
+    "backgroundColor": "#fff",
+    "borderStyle": "black",
+    "list": [
+      {
+        "pagePath": "pages/index/index",
+        "text": "首页",
+        "iconPath": "images/tab-home.png",
+        "selectedIconPath": "images/tab-home-active.png"
+      },
+      {
+        "pagePath": "pages/my-orders/my-orders",
+        "text": "我的订单",
+        "iconPath": "images/tab-order.png",
+        "selectedIconPath": "images/tab-order-active.png"
+      }
+    ]
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json",
+  "lazyCodeLoading": "requiredComponents"
+}

@@ -8,6 +8,7 @@ venv/
 .venv/
 .vscode/
 .idea/
+.claude/
 .DS_Store
 __MACOSX/
 staticfiles/

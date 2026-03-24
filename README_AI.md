@@ -1,185 +1,276 @@
-﻿# README_AI.md
-## 项目是做什么的
-本项目是一个面向“宝宝周岁宴道具租赁”场景的业务系统，核心目标是把周岁宴套餐/道具的租赁、发货、转寄、归还、装配、维修、部件库存、财务与审批流程放到同一套系统内管理。
+# README_AI.md
+## 1. 项目定位
+这是一个面向“宝宝周岁宴道具租赁”场景的一体化业务系统，当前仓库已经同时包含：
 
-从当前代码看，系统不是简单的订单录入工具，而是已经扩展到了“订单流转 + 转寄任务 + 单套库存 + BOM 装配 + 仓储维修处置 + 运营风控”的一体化后台。
+- Django 后台管理系统
+- Django 内部/小程序 API
+- 微信小程序前端工程
 
-## 技术栈
-根据当前代码实际情况，项目技术栈如下：
+核心目标不是单纯录订单，而是把以下链路放在一套系统里：
 
-- 后端框架：Django 4.2.9
-- API：Django REST framework 3.14.0
-- 应用形态：Django 单体应用（服务端模板渲染为主，辅以部分 API）
-- 前端：Django Templates + 原生 JavaScript + Bootstrap 风格主题样式
-- WSGI 服务：Gunicorn（生产依赖已配置）
-- 静态资源：WhiteNoise
+- 订单创建、发货、归还、完成、取消
+- 转寄候选、转寄任务、来源挂靠
+- 单套库存、部件库存、BOM、装配
+- 维修、回件质检、处置
+- 财务流水、审批、风险、审计、运维
+- 预定单、客服跟进、负责人移交
+- 包回邮服务
+- 微信小程序展示与意向下单
+
+## 2. 当前技术栈
+基于真实代码，不是规划：
+
+- 后端：Django 4.2.9
+- API：Django REST framework
+- 前端后台：Django Templates + Bootstrap + 原生 JS
 - 数据库：
-  - 开发默认支持 SQLite
-  - 生产配置支持 PostgreSQL（`psycopg2-binary`）
-- 其他依赖：python-dateutil
-- 运行方式：
-  - Windows 启动脚本：`start.bat`、`start.ps1`
-  - Shell 启动脚本：`start.sh`
-  - 生产脚本：`scripts/start_prod.sh`
-  - Docker 生产样板：`docker-compose.prod.yml`
+  - 开发默认 SQLite
+  - 生产配置支持 PostgreSQL
+- 静态资源：WhiteNoise
+- 生产运行：
+  - Windows：Waitress + `start_prod_windows.bat/.ps1`
+  - Docker / Nginx：`docker-compose.prod.yml`、`deploy/`
+- 小程序前端：微信原生小程序工程
 
-## 目录结构
-基于当前仓库代码，核心目录结构如下：
+## 3. 仓库结构总览
+当前应重点关注这些目录：
 
 ```text
 zhousuiyan-system/
 ├─ apps/
-│  ├─ core/                     # 核心业务：模型、视图、服务、权限、测试
-│  │  ├─ management/commands/   # 巡检、修复、验收、提醒等命令
-│  │  └─ services/              # 订单、库存、装配、审批、风控等服务层
-│  └─ api/                      # API 序列化与接口
-├─ config/                      # Django 配置（common/dev/prod）
-├─ templates/                   # 页面模板
-│  ├─ orders/                   # 订单列表/表单/详情
-│  └─ procurement/              # 采购、部件、装配、维修、处置、报表
-├─ static/                      # CSS / JS / 图片 / 第三方前端资源
-├─ media/                       # 用户上传文件（如 SKU 图片）
-├─ docs/                        # 项目进度、状态矩阵、生产部署等文档
-├─ deploy/                      # Nginx 等部署样板
-├─ scripts/                     # 初始化、启动、验收等脚本
-├─ manage.py
-├─ requirements.txt
-└─ README.md
+│  ├─ core/                      # 核心业务模型、视图、服务、权限、测试
+│  └─ api/                       # API，含 /api/mp/ 小程序接口
+├─ config/                       # Django settings、urls
+├─ templates/                    # 后台模板
+├─ static/                       # 后台静态资源
+├─ docs/                         # 状态矩阵、部署、小程序设计文档
+├─ deploy/                       # Docker/Nginx 部署样板
+├─ scripts/                      # 初始化、部署、验收脚本
+├─ miniprogram/                  # 当前在用的微信小程序工程
+├─ zhousuiyan-mp/                # 旧的微信小程序脚手架/示例目录，非当前主工程
+├─ README_AI.md
+├─ RULES_AI.md
+└─ TASKS_AI.md
 ```
 
-## 主要模块
-### 1. 订单中心
-核心文件：
+## 4. 目录职责说明
+### 4.1 Django 主项目
+重点文件：
+
 - `apps/core/models.py`
-- `apps/core/services/order_service.py`
-- `templates/orders/list.html`
-- `templates/orders/form.html`
-- `templates/orders/detail.html`
-
-当前支持：
-- 新建/编辑/查看订单
-- 微信号、闲鱼订单号等客户信息维护
-- 发货日期推算与时效判断
-- 发货、归还、完成、取消等状态流转
-- 列表筛选、关键词查询、分页、导出类操作基础
-
-### 2. 转寄中心
-核心文件：
-- `templates/transfers.html`
-- `apps/core/utils.py`
 - `apps/core/views.py`
+- `apps/core/utils.py`
+- `apps/core/services/`
+- `apps/core/tests.py`
+- `config/urls.py`
 
-当前支持：
-- 转寄候选池
-- 当前挂靠 / 推荐来源展示
-- 转寄任务生成、完成、取消
-- 候选重推、转寄来源推荐
-- 转寄任务状态分栏与历史说明
+这里承载了绝大多数业务规则。  
+后续开发不要先改模板，优先确认模型、服务层、视图层是否已有对应能力。
 
-### 3. 在外库存 / 单套库存看板
-核心文件：
-- `templates/outbound_inventory.html`
-- `apps/core/services/inventory_unit_service.py`
+### 4.2 后台模板
+重点目录：
 
-当前支持：
-- 单套编号管理
-- 单套流转节点追踪
-- 单套与订单、转寄、维修、处置的关联
-- 在外库存可视化基础能力
-
-### 4. SKU / BOM / 装配
-核心文件：
-- `templates/skus.html`
-- `apps/core/services/assembly_service.py`
-- `apps/core/models.py`
-
-当前支持：
-- SKU 基础资料维护
-- BOM（部件组成）配置
-- 通过装配单新增库存
-- 装配时扣减部件库存
-- 自动生成单套编号与单套部件快照
-
-### 5. 维修、处置、回件质检
-核心文件：
-- `templates/procurement/maintenance_work_orders.html`
-- `templates/procurement/unit_disposal_orders.html`
-- `templates/procurement/part_issue_pool.html`
-- `templates/procurement/part_recovery_inspections.html`
-
-当前支持：
-- 维修工单
-- 单套拆解/报废处置
-- 部件折损池
-- 回件质检池
-- 回件回库 / 转待维修 / 报废的二段处理
-
-### 6. 采购与部件库存
-核心文件：
-- `templates/procurement/purchase_orders.html`
-- `templates/procurement/parts_inventory.html`
-- `templates/procurement/parts_movements.html`
-- `apps/core/services/procurement_service.py`
-
-当前支持：
-- 采购单
-- 部件库存
-- 部件流水
-- 与 BOM / 装配 / 维修的联动
-
-### 7. 财务、审批、风控、审计、运维
-核心文件：
-- `templates/finance_transactions.html`
-- `templates/finance_reconciliation.html`
-- `templates/approvals.html`
-- `templates/risk_events.html`
-- `templates/audit_logs.html`
-- `templates/ops_center.html`
-
-当前支持：
-- 财务流水与对账基础页面
-- 审批中心
-- 风险事件管理
-- 审计日志
-- 运维中心与部分管理命令
-
-### 8. 工作台 / 角色看板 / 仓储报表
-核心文件：
+- `templates/orders/`
+- `templates/reservations/`
+- `templates/procurement/`
 - `templates/dashboard.html`
-- `templates/procurement/warehouse_reports.html`
-- `static/js/workbench.js`
+- `templates/transfers.html`
+- `templates/users.html`
 
-当前支持：
-- 工作台卡片
-- 角色视图切换
-- KPI 统计
-- 仓储待办卡片
-- 仓储报表、趋势、榜单、导出
+当前后台仍是服务端模板渲染为主，前端 JS 多数为页面内局部增强，不是 SPA。
 
-## 当前开发状态
-从当前代码和文档看，项目已经不处于“起步阶段”，而是处于：
+### 4.3 微信小程序后端
+重点文件：
 
-- 核心模块基本落地
-- 主业务流转已基本跑通
-- 状态机、权限、库存口径已做过多轮收口
-- 正在持续做：
-  - 页面交互优化
-  - 状态闭环校验
-  - 生产部署准备
-  - UI 一致性与稳定性修复
+- `config/urls.py`：已注册 `path('api/mp/', include('apps.api.mp_urls'))`
+- `apps/api/mp_urls.py`
+- `apps/api/mp_views.py`
+- `apps/api/mp_auth.py`
+- `apps/core/services/wechat_auth_service.py`
 
-可以概括为：
-- **已完成：核心业务骨架和主流程**
-- **进行中：细节体验、异常边界、生产上线准备**
+当前 `/api/mp/` 已有 6 个接口：
 
-## 推荐阅读顺序
-如果后续继续开发，建议按这个顺序快速理解项目：
+- `POST /api/mp/login/`
+- `GET /api/mp/skus/`
+- `GET /api/mp/skus/<id>/`
+- `POST /api/mp/reservations/`
+- `GET /api/mp/my-reservations/`
+- `GET /api/mp/my-reservations/<id>/`
 
-1. `docs/PROJECT_PROGRESS.md`
-2. `docs/ORDER_STATUS_MATRIX_20260311.md`
-3. `docs/TRANSFER_STATUS_MATRIX_20260311.md`
-4. `docs/INVENTORY_UNIT_NODE_MATRIX_20260311.md`
-5. `docs/ORDER_TRANSFER_UNIT_LINKAGE_OVERVIEW_20260311.md`
-6. `apps/core/models.py`
-7. `apps/core/services/`
-8. `templates/orders/`、`templates/procurement/`、`templates/transfers.html`
+### 4.4 微信小程序前端
+当前在用目录是：
+
+- `miniprogram/`
+
+当前页面：
+
+- `pages/index/`：首页 / 产品列表
+- `pages/detail/`：产品详情
+- `pages/order/`：提交意向单
+- `pages/my-orders/`：我的意向单列表
+- `pages/order-detail/`：意向单详情
+- `utils/api.js`：请求与登录封装
+
+请注意：
+
+- `zhousuiyan-mp/` 目录是旧脚手架，不是当前主小程序工程
+- 后续如继续开发小程序，默认改 `miniprogram/`
+
+## 5. 当前已经落地的核心业务
+### 5.1 订单中心
+已支持：
+
+- 新建、编辑、详情
+- 发货、归还、完成、取消
+- 时效状态判断与筛选
+- 转寄挂靠展示
+- 包回邮服务登记
+- 平台来源 / 平台单号 / 回邮支付参考号搜索
+
+### 5.2 预定单主线
+已支持：
+
+- 极简预定单录入
+- 转正式订单
+- 订金流水
+- 负责人机制
+- 联系提醒
+- 负责人转交
+- 跟进分布、移交建议、履约跟进看板
+
+### 5.3 转寄中心
+已支持：
+
+- 候选池
+- 推荐来源计算
+- 任务生成、完成、取消
+- 当前挂靠与推荐来源展示
+
+### 5.4 仓储主线
+已支持：
+
+- SKU / BOM
+- 装配单
+- 单套库存
+- 部件库存
+- 维修
+- 回件质检
+- 处置
+
+### 5.5 财务与审计
+已支持：
+
+- 财务流水
+- 对账基础页面
+- 包回邮服务流水
+- 预定订金流水
+- 审批、风险、审计、运维
+
+### 5.6 微信小程序
+后端已完成：
+
+- 微信客户模型
+- SKU 小程序展示字段
+- SKU 多图模型
+- 小程序登录
+- 产品列表/详情
+- 意向预定提交
+- 我的意向单列表/详情
+
+前端已有一版可运行的小程序工程，但是否完全联调通过，需要继续实机验证。
+
+## 6. 当前重要模型补充认知
+以下模型是近期接手时必须知道的：
+
+- `Order`
+- `Reservation`
+- `FinanceTransaction`
+- `InventoryUnit`
+- `TransferTask`
+- `SKU`
+- `SKUImage`
+- `WechatCustomer`
+
+近期新增的重要字段/概念：
+
+- `Order.order_source`
+- `Order.source_order_no`
+- `Order.return_service_*`
+- `Reservation.owner`
+- `Reservation.source`
+- `Reservation.wechat_customer`
+- `SKU.mp_visible`
+- `SKU.display_stock`
+- `SKU.display_stock_warning`
+- `SKU.mp_sort_order`
+
+## 7. 当前重要迁移
+最近与接手高度相关的迁移：
+
+- `0022_reservation_and_finance_transaction_updates`
+- `0023_reservation_owner`
+- `0024_order_return_service_fields`
+- `0025_miniprogram_models`
+- `0026_reservation_delivery_address`
+
+接手后如果环境不一致，优先检查：
+
+- `python manage.py showmigrations`
+- `python manage.py migrate`
+
+## 8. 运行方式
+### 8.1 本地开发
+优先使用：
+
+- `start.bat`
+- `start.ps1`
+
+常用命令：
+
+```powershell
+.\.venv\Scripts\python manage.py check
+.\.venv\Scripts\python manage.py test apps.core.tests -v 1
+.\.venv\Scripts\python manage.py test apps.api.tests -v 1
+```
+
+### 8.2 Windows 本机生产
+优先使用：
+
+- `start_prod_windows.bat`
+- `start_prod_windows.ps1`
+
+### 8.3 微信小程序
+小程序前端目录：
+
+- `miniprogram/`
+
+接手时至少先看：
+
+- `miniprogram/app.json`
+- `miniprogram/utils/api.js`
+- `apps/api/mp_views.py`
+
+## 9. 推荐阅读顺序
+如果是第一次接手，建议按下面顺序：
+
+1. `README_AI.md`
+2. `RULES_AI.md`
+3. `TASKS_AI.md`
+4. `apps/core/models.py`
+5. `apps/core/services/`
+6. `apps/core/views.py`
+7. `apps/api/mp_views.py`
+8. `templates/orders/`
+9. `templates/reservations/`
+10. `templates/dashboard.html`
+11. `miniprogram/`
+12. `docs/MINIPROGRAM_DESIGN_20260322.md`
+13. `docs/MINIPROGRAM_DEV_20260322.md`
+
+## 10. 当前接手时最容易踩坑的点
+- `zhousuiyan-mp/` 不是当前主小程序工程，默认看 `miniprogram/`
+- 后台很多页面仍是模板 + 页面脚本组合，不要误判成前后端分离项目
+- 预定单和正式订单是两条链路，不要混
+- 包回邮服务是订单附加服务，且支持发货后补录
+- 旧数据可能存在后加字段为空的情况，模板层必须做空值兼容
+- 有些展示字段是营销/运营字段，不等于真实库存字段，例如小程序展示库存

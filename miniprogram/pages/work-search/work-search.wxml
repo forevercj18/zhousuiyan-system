@@ -1,0 +1,85 @@
+<view class="container">
+  <view class="search-bar card">
+    <view class="search-input-wrap">
+      <icon type="search" size="14" color="#999" />
+      <input class="search-input" placeholder="搜预定单 / 订单 / 微信 / 手机 / 平台单号" value="{{keyword}}" bindinput="onKeywordInput" confirm-type="search" bindconfirm="onSearch" />
+      <icon wx:if="{{keyword}}" type="clear" size="14" bindtap="clearKeyword" />
+    </view>
+    <button class="search-btn" loading="{{loading}}" disabled="{{loading}}" bindtap="onSearch">搜索</button>
+  </view>
+
+  <view class="loading-wrap" wx:if="{{loading}}">
+    <view class="loading-spinner"></view>
+  </view>
+
+  <view class="empty-state" wx:elif="{{searched && !reservationResults.length && !orderResults.length}}">
+    <text class="empty-icon">🔎</text>
+    <text class="empty-text">没有找到匹配的预定单或订单</text>
+  </view>
+
+  <view class="empty-state" wx:elif="{{!searched}}">
+    <text class="empty-icon">📱</text>
+    <text class="empty-text">输入关键词后可同时搜索预定单和订单</text>
+  </view>
+
+  <view wx:else>
+    <view class="result-section" wx:if="{{reservationResults.length}}">
+      <view class="section-head">
+        <text class="section-title">预定单结果</text>
+        <text class="section-count">{{reservationResults.length}} 条</text>
+      </view>
+      <view class="card result-card" wx:for="{{reservationResults}}" wx:key="id" bindtap="goReservationDetail" data-id="{{item.id}}">
+        <view class="result-top">
+          <text class="result-no">{{item.reservation_no}}</text>
+          <text class="result-status">{{item.status_label}}</text>
+        </view>
+        <text class="result-main">{{item.customer_name}} · {{item.sku_name}}</text>
+        <view class="meta-row">
+          <text class="meta-tag blue">{{item.source_label}}</text>
+          <text class="meta-tag">{{item.contact_status_label}}</text>
+          <text class="meta-tag blue">{{item.journey_label}}</text>
+        </view>
+        <text class="sub-line">活动日期：{{item.event_date}}</text>
+        <text class="sub-line" wx:if="{{item.customer_phone}}">电话：{{item.customer_phone}}</text>
+        <text class="sub-line" wx:if="{{item.customer_wechat}}">微信：{{item.customer_wechat}}</text>
+        <view class="tool-row">
+          <button class="mini-btn" wx:if="{{item.customer_phone}}" catchtap="callCustomer" data-phone="{{item.customer_phone}}">拨打电话</button>
+          <button class="mini-btn" wx:if="{{item.customer_wechat}}" catchtap="copyWechat" data-wechat="{{item.customer_wechat}}">复制微信</button>
+        </view>
+      </view>
+    </view>
+
+    <view class="result-section" wx:if="{{orderResults.length}}">
+      <view class="section-head">
+        <text class="section-title">订单结果</text>
+        <text class="section-count">{{orderResults.length}} 条</text>
+      </view>
+      <view class="card result-card" wx:for="{{orderResults}}" wx:key="id" bindtap="goOrderDetail" data-id="{{item.id}}">
+        <view class="result-top">
+          <text class="result-no">{{item.order_no}}</text>
+          <text class="result-status">{{item.status_label}}</text>
+        </view>
+        <text class="result-main">{{item.customer_name}} · {{item.items_summary}}</text>
+        <view class="meta-row">
+          <text class="meta-tag blue">{{item.order_source_label || '订单'}}</text>
+          <text class="meta-tag danger" wx:if="{{item.shipment_overdue}}">待发货超时</text>
+          <text class="meta-tag work" wx:if="{{item.balance_pending}}">待收尾款</text>
+          <text class="meta-tag" wx:if="{{item.return_service_type === 'platform_return_included'}}">包回邮</text>
+        </view>
+        <text class="sub-line">活动日期：{{item.event_date}}<text wx:if="{{item.ship_date}}"> · 发货日期：{{item.ship_date}}</text></text>
+        <text class="sub-line" wx:if="{{item.customer_phone}}">电话：{{item.customer_phone}}</text>
+        <text class="sub-line" wx:if="{{item.source_order_no}}">平台单号：{{item.source_order_no}}</text>
+        <view class="tool-row">
+          <button class="mini-btn" catchtap="copyOrderNo" data-order-no="{{item.order_no}}">复制订单号</button>
+          <button class="mini-btn" wx:if="{{item.customer_phone}}" catchtap="callCustomer" data-phone="{{item.customer_phone}}">拨打电话</button>
+        </view>
+        <view class="tool-row" wx:if="{{item.can_mark_delivered || item.can_record_balance || item.can_update_return_service || item.can_mark_returned}}">
+          <button class="mini-btn primary" wx:if="{{item.can_mark_delivered}}" catchtap="goOrderDetail" data-id="{{item.id}}" data-action="deliver">去发货</button>
+          <button class="mini-btn work" wx:if="{{item.can_record_balance}}" catchtap="goOrderDetail" data-id="{{item.id}}" data-action="balance">去收尾款</button>
+          <button class="mini-btn subtle" wx:if="{{item.can_update_return_service}}" catchtap="goOrderDetail" data-id="{{item.id}}" data-action="return_service">处理回邮</button>
+          <button class="mini-btn blue" wx:if="{{item.can_mark_returned}}" catchtap="goOrderDetail" data-id="{{item.id}}" data-action="return">去归还</button>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

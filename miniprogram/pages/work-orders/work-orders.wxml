@@ -1,0 +1,73 @@
+<view class="container">
+  <view class="search-bar">
+    <view class="search-input-wrap">
+      <icon type="search" size="14" color="#999" />
+      <input class="search-input" placeholder="搜订单号/客户/平台单号/回邮参考号" value="{{keyword}}" bindinput="onKeywordInput" confirm-type="search" bindconfirm="onSearch" />
+      <icon wx:if="{{keyword}}" type="clear" size="14" bindtap="clearSearch" />
+    </view>
+  </view>
+
+  <scroll-view class="filter-scroll" scroll-x="true" enable-flex="true">
+    <view class="filter-chip {{activeQuickFilter === '' ? 'active' : ''}}" data-key="" bindtap="applyQuickFilter">全部</view>
+    <view class="filter-chip {{activeQuickFilter === 'waiting_ship' ? 'active blue' : ''}}" data-key="waiting_ship" bindtap="applyQuickFilter">待发货</view>
+    <view class="filter-chip {{activeQuickFilter === 'shipment_overdue' ? 'active danger' : ''}}" data-key="shipment_overdue" bindtap="applyQuickFilter">待发货超时</view>
+    <view class="filter-chip {{activeQuickFilter === 'balance_pending' ? 'active work' : ''}}" data-key="balance_pending" bindtap="applyQuickFilter">待收尾款</view>
+    <view class="filter-chip {{activeQuickFilter === 'return_service_pending' ? 'active' : ''}}" data-key="return_service_pending" bindtap="applyQuickFilter">包回邮待处理</view>
+  </scroll-view>
+
+  <view class="picker-row" wx:if="{{sourceOptions.length > 1 || ownerOptions.length > 1}}">
+    <picker class="picker-wrap" mode="selector" range="{{sourceOptions}}" range-key="label" value="{{sourceIndex}}" bindchange="onSourceChange">
+      <view class="picker-field">
+        <text>来源：{{sourceOptions[sourceIndex].label}}</text>
+        <text class="picker-arrow">▼</text>
+      </view>
+    </picker>
+    <picker class="picker-wrap" wx:if="{{ownerOptions.length > 1}}" mode="selector" range="{{ownerOptions}}" range-key="label" value="{{ownerIndex}}" bindchange="onOwnerChange">
+      <view class="picker-field">
+        <text>负责人：{{ownerOptions[ownerIndex].label}}</text>
+        <text class="picker-arrow">▼</text>
+      </view>
+    </picker>
+  </view>
+
+  <view class="loading-wrap" wx:if="{{loading}}">
+    <view class="loading-spinner"></view>
+  </view>
+
+  <view class="empty-state" wx:elif="{{!items.length}}">
+    <text class="empty-icon">📦</text>
+    <text class="empty-text">当前没有符合条件的订单</text>
+  </view>
+
+  <view wx:else class="order-list">
+    <view class="card order-card" wx:for="{{items}}" wx:key="id" bindtap="goDetail" data-id="{{item.id}}">
+      <view class="order-header">
+        <text class="order-no">{{item.order_no}}</text>
+        <text class="order-status">{{item.status_label}}</text>
+      </view>
+      <text class="main-line">{{item.customer_name}} · {{item.items_summary}}</text>
+      <view class="meta-row">
+        <text class="meta-tag blue">{{item.order_source_label || '订单'}}</text>
+        <text class="meta-tag" wx:if="{{item.return_service_type === 'platform_return_included'}}">包回邮</text>
+        <text class="meta-tag danger" wx:if="{{item.shipment_overdue}}">待发货超时</text>
+        <text class="meta-tag work" wx:if="{{item.balance_pending}}">待收尾款</text>
+      </view>
+      <text class="sub-line">发货日期：{{item.ship_date || '待定'}} · 活动日期：{{item.event_date}}</text>
+      <text class="sub-line" wx:if="{{item.owner_name}}">负责人：{{item.owner_name}}</text>
+      <text class="sub-line" wx:if="{{item.customer_phone}}">电话：{{item.customer_phone}}</text>
+      <text class="sub-line" wx:if="{{item.source_order_no}}">平台单号：{{item.source_order_no}}</text>
+      <text class="sub-line" wx:if="{{item.return_service_pending}}">包回邮进度：{{item.return_pickup_status_label}}</text>
+      <text class="sub-line" wx:if="{{item.balance_pending}}">待收尾款：¥{{item.balance}}</text>
+      <view class="tool-row">
+        <button class="mini-btn" catchtap="copyOrderNo" data-order-no="{{item.order_no}}">复制订单号</button>
+        <button class="mini-btn" wx:if="{{item.customer_phone}}" catchtap="callCustomer" data-phone="{{item.customer_phone}}">拨打电话</button>
+      </view>
+      <view class="tool-row" wx:if="{{item.can_mark_delivered || item.can_record_balance || item.can_update_return_service || item.can_mark_returned}}">
+        <button class="mini-btn primary" wx:if="{{item.can_mark_delivered}}" catchtap="goAction" data-id="{{item.id}}" data-action="deliver">去发货</button>
+        <button class="mini-btn work" wx:if="{{item.can_record_balance}}" catchtap="goAction" data-id="{{item.id}}" data-action="balance">去收尾款</button>
+        <button class="mini-btn subtle" wx:if="{{item.can_update_return_service}}" catchtap="goAction" data-id="{{item.id}}" data-action="return_service">处理回邮</button>
+        <button class="mini-btn blue" wx:if="{{item.can_mark_returned}}" catchtap="goAction" data-id="{{item.id}}" data-action="return">去归还</button>
+      </view>
+    </view>
+  </view>
+</view>
