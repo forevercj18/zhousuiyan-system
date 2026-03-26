@@ -1,428 +1,103 @@
-/* 基础样式 */
-:root {
-    --sidebar-width: 240px;
-}
+/* 
+ * 2026 Dashboard V5 - Professional & Spacious
+ */
 
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
+:root {
+    --primary: #4f46e5;
+    --primary-hover: #4338ca;
+    --primary-light: #f5f3ff;
+    
+    --text-main: #0f172a;
+    --text-muted: #64748b;
+    --text-light: #94a3b8;
+
+    --bg-body: #f1f5f9;
+    --bg-sidebar: #0f172a; 
+    
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --shadow-soft: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
 }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
-                 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-    font-size: 14px;
-    line-height: 1.5;
-    color: #333;
-    background-color: #f5f5f5;
+    font-family: 'Inter', -apple-system, sans-serif;
+    background-color: var(--bg-body);
+    color: var(--text-main);
+    margin: 0;
 }
 
-/* 布局 */
-.layout {
-    display: flex;
-    min-height: 100vh;
-}
+.layout { display: flex; min-height: 100vh; }
 
-/* 侧边栏 */
 .sidebar {
-    width: var(--sidebar-width);
-    background: #001529;
-    color: #fff;
-    display: flex;
-    flex-direction: column;
+    width: 260px;
+    background: var(--bg-sidebar);
     position: fixed;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    overflow-y: auto;
+    left: 0; top: 0; bottom: 0;
+    z-index: 1000;
+    padding: 32px 16px;
 }
 
-.logo {
-    padding: 20px;
-    text-align: center;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.logo img {
-    width: 40px;
-    height: 40px;
-    margin-bottom: 10px;
-}
-
-.logo h1 {
-    font-size: 18px;
-    font-weight: 600;
-    color: #fff;
-}
-
-/* 导航菜单 */
-.nav-menu {
-    flex: 1;
-    padding: 20px 0;
-}
+.logo { padding: 0 16px 48px; }
+.logo h1 { color: #fff; font-size: 20px; font-weight: 800; margin: 0; letter-spacing: -1px; }
 
 .nav-item {
-    display: flex;
-    align-items: center;
-    padding: 12px 20px;
-    color: rgba(255, 255, 255, 0.65);
+    display: flex; align-items: center;
+    padding: 12px 16px;
+    color: #94a3b8;
     text-decoration: none;
-    transition: all 0.3s;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    transition: 0.2s;
 }
 
-.nav-item:hover {
-    color: #fff;
-    background: rgba(255, 255, 255, 0.08);
-}
+.nav-item:hover { color: #fff; background: rgba(255,255,255,0.05); }
+.nav-item.active { color: #fff; background: var(--primary); }
+.nav-item .icon { margin-right: 12px; font-size: 18px; }
 
-.nav-item.active {
-    color: #fff;
-    background: #1890ff;
-}
+.main-content { flex: 1; margin-left: 260px; }
 
-.nav-item .icon {
-    margin-right: 10px;
-    font-size: 16px;
-}
-
-.nav-group {
-    margin-top: 20px;
-}
-
-.nav-group-title {
-    padding: 8px 20px;
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.45);
-    text-transform: uppercase;
-}
-
-/* 主内容区 */
-.main-content {
-    flex: 1;
-    margin-left: var(--sidebar-width);
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-}
-
-/* 顶部栏 */
+/* 顶部栏 - 修复 bunched up 问题 */
 .topbar {
-    height: 64px;
+    height: 72px;
     background: #fff;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-    display: flex;
+    padding: 0 40px;
+    display: flex; 
     align-items: center;
-    justify-content: space-between;
-    padding: 0 24px;
+    justify-content: space-between; /* 关键：确保标题和用户信息分居两侧 */
+    border-bottom: 1px solid #e2e8f0;
     position: sticky;
     top: 0;
-    z-index: 100;
+    z-index: 900;
 }
 
-.topbar-left h2 {
-    font-size: 20px;
-    font-weight: 500;
-}
-
-.topbar-right {
+.topbar-left, .topbar-right {
     display: flex;
     align-items: center;
     gap: 16px;
 }
 
+.topbar h2 {
+    font-size: 20px;
+    font-weight: 800;
+    margin: 0;
+    color: var(--text-main);
+}
+
 .user-info {
-    color: #666;
-}
-
-/* 内容区 */
-.content {
-    flex: 1;
-    padding: 24px;
-    width: 100%;
-}
-
-/* 消息提示 */
-.messages {
-    margin: 16px 24px;
-}
-
-.alert {
-    padding: 12px 16px;
-    border-radius: 4px;
-    margin-bottom: 12px;
-}
-
-.alert-success {
-    background: #f6ffed;
-    border: 1px solid #b7eb8f;
-    color: #52c41a;
-}
-
-.alert-error {
-    background: #fff2f0;
-    border: 1px solid #ffccc7;
-    color: #ff4d4f;
-}
-
-.alert-warning {
-    background: #fffbe6;
-    border: 1px solid #ffe58f;
-    color: #faad14;
-}
-
-.alert-info {
-    background: #e6f7ff;
-    border: 1px solid #91d5ff;
-    color: #1890ff;
-}
-
-/* 登录页面 */
-.login-container {
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-}
-
-.login-box {
-    width: 400px;
-    background: #fff;
-    border-radius: 8px;
-    padding: 40px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
-}
-
-.login-header {
-    text-align: center;
-    margin-bottom: 32px;
-}
-
-.login-logo {
-    width: 60px;
-    height: 60px;
-    margin-bottom: 16px;
-}
-
-.login-header h1 {
-    font-size: 24px;
-    margin-bottom: 8px;
-}
-
-.login-header p {
-    color: #999;
     font-size: 14px;
-}
-
-.login-footer {
-    text-align: center;
-    margin-top: 24px;
-    color: #999;
-    font-size: 12px;
-}
-
-/* 响应式 */
-@media (max-width: 1200px) {
-    :root {
-        --sidebar-width: 200px;
-    }
-}
-
-@media (max-width: 992px) {
-    :root {
-        --sidebar-width: 72px;
-    }
-
-    .logo h1,
-    .nav-group-title,
-    .nav-item span:not(.icon) {
-        display: none;
-    }
-
-    .logo {
-        padding: 12px 8px;
-    }
-
-    .logo img {
-        margin-bottom: 0;
-    }
-
-    .nav-item {
-        justify-content: center;
-        padding: 12px 8px;
-    }
-
-    .nav-item .icon {
-        margin-right: 0;
-    }
-}
-
-@media (max-width: 768px) {
-    .layout {
-        flex-direction: column;
-    }
-
-    .sidebar {
-        width: 100%;
-        position: sticky;
-        top: 0;
-        bottom: auto;
-        z-index: 300;
-        max-height: none;
-    }
-
-    .logo h1 {
-        display: block;
-    }
-
-    .nav-menu {
-        display: flex;
-        gap: 8px;
-        overflow-x: auto;
-        padding: 8px;
-    }
-
-    .nav-item {
-        flex: 0 0 auto;
-        border-radius: 6px;
-        padding: 8px 10px;
-    }
-
-    .nav-item span:not(.icon) {
-        display: inline;
-    }
-
-    .nav-group {
-        display: none;
-    }
-
-    .main-content {
-        margin-left: 0;
-    }
-
-    .topbar {
-        padding: 0 16px;
-    }
-
-    .content {
-        padding: 16px;
-    }
-}
-
-/* ===== 2026 Refresh Theme Overrides ===== */
-:root {
-    --sidebar-width: 244px;
-    --theme-bg: #edf2f8;
-    --theme-bg-2: #f7f9fc;
-    --theme-surface: #ffffff;
-    --theme-line: #d8e1ee;
-    --theme-text: #1f2a37;
-    --theme-subtext: #5e6c80;
-    --theme-primary: #1f5ea8;
-    --theme-primary-2: #174b87;
-    --theme-shadow: 0 10px 26px rgba(20, 35, 60, 0.08);
-    --theme-radius: 12px;
-}
-
-body {
-    font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
-    color: var(--theme-text);
-    background:
-        radial-gradient(circle at 12% 8%, #ffffff 0%, transparent 38%),
-        radial-gradient(circle at 88% 16%, #f2f6ff 0%, transparent 32%),
-        linear-gradient(180deg, var(--theme-bg-2) 0%, var(--theme-bg) 100%);
-}
-
-.sidebar {
-    background: linear-gradient(180deg, #10233b 0%, #0e1d33 55%, #0b1829 100%);
-    border-right: 1px solid rgba(173, 197, 226, 0.2);
-    box-shadow: 10px 0 34px rgba(10, 24, 42, 0.28);
-}
-
-.logo {
-    border-bottom: 1px solid rgba(191, 215, 242, 0.18);
-}
-
-.logo img {
-    width: 56px;
-    height: 56px;
-    border-radius: 14px;
-    background: #fff;
-    padding: 3px;
-}
-
-.logo h1 {
-    letter-spacing: 0.2px;
-    font-weight: 700;
-}
-
-.nav-menu {
-    padding: 14px 10px;
-}
-
-.nav-item {
-    margin: 2px 0;
-    border-radius: 10px;
-    color: rgba(237, 244, 255, 0.78);
-}
-
-.nav-item:hover {
-    background: rgba(166, 201, 245, 0.16);
-}
-
-.nav-item.active {
-    background: linear-gradient(135deg, #1e64b7 0%, #245995 100%);
-    box-shadow: inset 0 0 0 1px rgba(196, 222, 255, 0.3), 0 8px 18px rgba(18, 55, 96, 0.35);
-}
-
-.topbar {
-    background: rgba(255, 255, 255, 0.92);
-    backdrop-filter: blur(8px);
-    border-bottom: 1px solid var(--theme-line);
-    box-shadow: none;
-}
-
-.topbar-left h2 {
-    font-weight: 700;
-    color: #1f3044;
-}
-
-.user-info {
-    color: var(--theme-subtext);
     font-weight: 600;
+    color: var(--text-muted);
 }
 
-.content {
-    padding: 22px;
-}
+.content { padding: 40px; max-width: 1600px; margin: 0 auto; }
 
-.messages {
-    margin: 14px 22px 0;
-}
-
-.alert {
-    border-radius: 10px;
-    box-shadow: 0 1px 3px rgba(16, 24, 40, 0.08);
-    border-width: 1px;
-    font-weight: 500;
-}
-
-.login-container {
-    background:
-        radial-gradient(circle at 15% 15%, #ffffff 0%, transparent 36%),
-        radial-gradient(circle at 85% 20%, #eff5ff 0%, transparent 32%),
-        linear-gradient(135deg, #e9eff7 0%, #dce7f4 100%);
-}
-
-.login-box {
-    border: 1px solid var(--theme-line);
-    border-radius: 16px;
-    box-shadow: 0 18px 42px rgba(17, 35, 62, 0.14);
-}
-
-@media (max-width: 992px) {
-    :root {
-        --sidebar-width: 76px;
-    }
+.card {
+    background: #fff;
+    border-radius: 20px;
+    padding: 32px;
+    border: 1px solid #e2e8f0;
+    box-shadow: var(--shadow-soft);
+    margin-bottom: 32px;
 }

@@ -7,6 +7,44 @@ Param(
 $ErrorActionPreference = "Stop"
 $env:PYTHONIOENCODING = "utf-8"
 
+function Import-EnvFile {
+    Param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [string[]]$OnlyNames = @(),
+        [switch]$SkipExisting
+    )
+
+    if (!(Test-Path $Path)) {
+        return
+    }
+
+    $onlyMap = @{}
+    foreach ($name in $OnlyNames) {
+        $onlyMap[$name] = $true
+    }
+
+    Get-Content $Path -Encoding UTF8 | ForEach-Object {
+        $line = $_.Trim()
+        if (-not $line -or $line.StartsWith('#')) {
+            return
+        }
+        $parts = $line.Split('=', 2)
+        if ($parts.Count -ne 2) {
+            return
+        }
+        $name = $parts[0].Trim()
+        if ($onlyMap.Count -gt 0 -and -not $onlyMap.ContainsKey($name)) {
+            return
+        }
+        if ($SkipExisting -and (Test-Path "Env:$name") -and -not [string]::IsNullOrWhiteSpace((Get-Item "Env:$name").Value)) {
+            return
+        }
+        $value = $parts[1].Trim().Trim('"')
+        Set-Item -Path "Env:$name" -Value $value
+    }
+}
+
 # Development defaults for local run
 if (-not $env:DJANGO_SETTINGS_MODULE) {
     $env:DJANGO_SETTINGS_MODULE = "config.settings_dev"
@@ -44,6 +82,29 @@ function Invoke-Checked {
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
+
+$devEnvFile = Join-Path $projectRoot ".env"
+$prodEnvFile = Join-Path $projectRoot ".env.prod"
+
+Import-EnvFile -Path $devEnvFile -SkipExisting
+Import-EnvFile -Path $prodEnvFile -OnlyNames @(
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+    "R2_BUCKET",
+    "R2_ENDPOINT",
+    "R2_PUBLIC_DOMAIN",
+    "R2_REGION",
+    "R2_UPLOAD_PREFIX_SKU",
+    "R2_UPLOAD_EXPIRE",
+    "QINIU_ACCESS_KEY",
+    "QINIU_SECRET_KEY",
+    "QINIU_BUCKET",
+    "QINIU_DOMAIN",
+    "QINIU_UPLOAD_URL",
+    "QINIU_UPLOAD_PREFIX_SKU",
+    "QINIU_UPLOAD_TOKEN_EXPIRE",
+    "MP_PUBLIC_BASE_URL"
+) -SkipExisting
 
 $venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
 

@@ -2,6 +2,82 @@
 
 {% block title %}登录 - 宝宝周岁宴道具租赁系统{% endblock %}
 
+{% block extra_css %}
+<style>
+body.app-login {
+    margin: 0;
+    overflow: hidden;
+}
+
+body.app-login .login-container {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+}
+
+body.app-login .login-box {
+    position: relative;
+    z-index: 1;
+    width: min(460px, calc(100vw - 32px));
+    padding: 32px 28px 28px;
+    border-radius: 28px;
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.38);
+    box-shadow: 0 28px 56px rgba(10, 24, 36, 0.24);
+}
+
+body.app-login .login-header {
+    text-align: center;
+    margin-bottom: 24px;
+}
+
+body.app-login .login-logo {
+    display: block;
+    width: 72px;
+    height: 72px;
+    max-width: 72px;
+    max-height: 72px;
+    margin: 0 auto 14px;
+    padding: 8px;
+    object-fit: contain;
+    border-radius: 18px;
+    background: #fff7ed;
+    box-shadow: 0 14px 30px rgba(23, 50, 74, 0.14);
+}
+
+body.app-login .login-header h1 {
+    margin: 0 0 6px;
+    font-size: 1.55rem;
+    font-weight: 900;
+    color: #1f2937;
+}
+
+body.app-login .login-header p {
+    margin: 0;
+    color: #5b6574;
+}
+
+body.app-login .login-form .form-group + .form-group {
+    margin-top: 18px;
+}
+
+body.app-login .login-form .btn {
+    width: 100%;
+    margin-top: 22px;
+}
+
+@media (max-width: 640px) {
+    body.app-login .login-box {
+        padding: 26px 20px 22px;
+        border-radius: 22px;
+    }
+}
+</style>
+{% endblock %}
+
 {% block login_content %}
 <div class="login-container">
     <div class="login-box">

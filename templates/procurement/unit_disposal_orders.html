@@ -13,38 +13,72 @@
 {% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <div class="header-left">
-        <form method="get" class="d-flex flex-wrap gap-2 align-items-center">
-            <input type="text" name="keyword" class="form-control" style="max-width:280px;" value="{{ keyword }}" placeholder="工单号/单套号/SKU/部件/订单号">
-            <select name="action_type" class="form-select" style="max-width:180px;">
-                <option value="">全部动作</option>
-                {% for key, label in action_choices %}
-                <option value="{{ key }}" {% if action_filter == key %}selected{% endif %}>{{ label }}</option>
-                {% endfor %}
-            </select>
-            <select name="status" class="form-select" style="max-width:180px;">
-                <option value="">全部状态</option>
-                {% for key, label in status_choices %}
-                <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ label }}</option>
-                {% endfor %}
-            </select>
-            <button type="submit" class="btn btn-secondary">查询</button>
-            <a class="btn btn-sm" href="{% url 'unit_disposal_orders_list' %}">重置</a>
+    <div class="page-header">
+        <div class="page-title-group">
+            <p>追踪单套的最终处理结果，包括拆解回件、整体报废及状态变更历史</p>
+        </div>
+    </div>
+
+    <div class="filter-container mb-4">
+        <form method="get" class="d-flex flex-wrap gap-3 align-items-end w-100">
+            <div class="filter-group" style="min-width: 240px;">
+                <label>关键词</label>
+                <input type="text" name="keyword" class="form-control" value="{{ keyword|default:'' }}" placeholder="单号/单套/SKU/部件/订单">
+            </div>
+            <div class="filter-group" style="min-width: 140px;">
+                <label>处置动作</label>
+                <select name="action_type" class="form-select">
+                    <option value="">全部动作</option>
+                    {% for key, label in action_choices %}
+                    <option value="{{ key }}" {% if action_filter == key %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="filter-group" style="min-width: 140px;">
+                <label>状态</label>
+                <select name="status" class="form-select">
+                    <option value="">全部状态</option>
+                    {% for key, label in status_choices %}
+                    <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="d-flex gap-2">
+                <button type="submit" class="btn btn-primary">
+                    <i class="bi bi-search"></i>查询
+                </button>
+                <a class="btn btn-secondary" href="{% url 'unit_disposal_orders_list' %}">重置</a>
+            </div>
+            
+            <div class="ms-auto d-flex gap-2 align-items-end">
+                <a class="btn btn-outline-secondary" href="{% url 'unit_disposal_orders_export' %}?{{ request.GET.urlencode }}">
+                    <i class="bi bi-download"></i>导出 CSV
+                </a>
+                <a class="btn btn-success" href="{% url 'outbound_inventory_dashboard' %}">
+                    <i class="bi bi-box-arrow-right"></i>前往库存看板
+                </a>
+            </div>
         </form>
     </div>
-    <div class="header-right">
-        <a class="btn btn-secondary" href="{% url 'unit_disposal_orders_export' %}?{{ request.GET.urlencode }}">导出CSV</a>
-        <a class="btn btn-primary" href="{% url 'outbound_inventory_dashboard' %}">去在外库存看板操作</a>
-    </div>
-</div>
 
-<div class="summary-grid">
-    <div class="summary-card"><span>处置单总数</span><strong>{{ summary.total_count }}</strong></div>
-    <div class="summary-card"><span>拆解回件</span><strong>{{ summary.disassemble_count }}</strong></div>
-    <div class="summary-card"><span>报废停用</span><strong>{{ summary.scrap_count }}</strong></div>
-    <div class="summary-card"><span>已完成</span><strong>{{ summary.completed_count }}</strong></div>
-</div>
+    <div class="stats-grid mb-4">
+        <div class="stat-card">
+            <div class="stat-label">处置单总数</div>
+            <div class="stat-value">{{ summary.total_count }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">拆解回件</div>
+            <div class="stat-value text-info">{{ summary.disassemble_count }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">报废停用</div>
+            <div class="stat-value text-danger">{{ summary.scrap_count }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">已完成</div>
+            <div class="stat-value text-success">{{ summary.completed_count }}</div>
+        </div>
+    </div>
 
 <div class="table-container">
     <div class="table-responsive">

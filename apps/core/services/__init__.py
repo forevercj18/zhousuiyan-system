@@ -9,6 +9,7 @@ from .risk_event_service import RiskEventService
 from .approval_service import ApprovalService
 from .notification_service import NotificationService
 from .assembly_service import AssemblyService, MaintenanceService, UnitDisposalService
+from .order_import_service import OrderImportService
 
 __all__ = [
     'OrderService',
@@ -19,6 +20,7 @@ __all__ = [
     'RiskEventService',
     'ApprovalService',
     'NotificationService',
+    'OrderImportService',
     'AssemblyService',
     'MaintenanceService',
     'UnitDisposalService',

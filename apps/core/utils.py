@@ -570,7 +570,6 @@ def get_role_dashboard_payload(user, view_role=None, base_stats=None):
             {'label': '新建预定单', 'url_name': 'reservation_create', 'style': 'outline-secondary'},
             {'label': '订单中心', 'url_name': 'orders_list', 'style': 'outline-secondary'},
             {'label': '转寄中心', 'url_name': 'transfers_list', 'style': 'outline-secondary'},
-            {'label': '查看排期', 'url_name': 'calendar', 'style': 'outline-secondary'},
             {'label': '创建采购单', 'url_name': 'purchase_order_create', 'style': 'outline-secondary'},
         ]
         risk_entries.insert(0, {
@@ -683,7 +682,6 @@ def get_role_dashboard_payload(user, view_role=None, base_stats=None):
             {'label': '订单中心', 'url_name': 'orders_list', 'style': 'outline-secondary'},
             {'label': '预定管理', 'url_name': 'reservations_list', 'style': 'outline-secondary'},
             {'label': '转寄中心', 'url_name': 'transfers_list', 'style': 'outline-secondary'},
-            {'label': '查看排期', 'url_name': 'calendar', 'style': 'outline-secondary'},
         ]
         risk_entries.insert(0, {
             'key': 'pending_orders',

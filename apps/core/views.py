@@ -22,13 +22,14 @@ import json
 from .models import (
     Order, OrderItem, SKU, Part, PurchaseOrder, PurchaseOrderItem, PartsMovement,
     AuditLog, User, SystemSettings, Transfer, TransferAllocation, InventoryUnit, UnitMovement,
-    SKUComponent, InventoryUnitPart, RiskEvent, ApprovalTask, FinanceTransaction, DataConsistencyCheckRun,
+    InventoryUnitPart, RiskEvent, ApprovalTask, FinanceTransaction, DataConsistencyCheckRun,
     AssemblyOrder, MaintenanceWorkOrder, UnitDisposalOrder, PartRecoveryInspection, PermissionTemplate, Reservation,
-    TransferRecommendationLog,
+    TransferRecommendationLog, SKUImage, SKUComponent,
 )
 from .services import (
     OrderService, ProcurementService, PartsService, InventoryUnitService, AuditService,
-    RiskEventService, ApprovalService, NotificationService, AssemblyService, MaintenanceService, UnitDisposalService
+    RiskEventService, ApprovalService, NotificationService, AssemblyService, MaintenanceService, UnitDisposalService,
+    OrderImportService,
 )
 from .services.storage_service import StorageService
 from .permissions import (
@@ -42,7 +43,6 @@ from .permissions import (
     get_user_permission_preview,
 )
 from .utils import (
-    get_calendar_data,
     find_transfer_candidates,
     create_transfer_task,
     build_transfer_allocation_plan,
@@ -321,6 +321,172 @@ def _build_querystring(request, exclude_keys=None):
     for key in (exclude_keys or []):
         params.pop(key, None)
     return params.urlencode()
+
+
+def _build_orders_base_queryset(request):
+    today = timezone.localdate()
+    warning_end = today + timedelta(days=7)
+    shipped_condition = (
+        Q(status__in=['delivered', 'in_use', 'returned', 'completed']) |
+        Q(ship_tracking__isnull=False, ship_tracking__gt='')
+    )
+
+    orders = filter_queryset_by_permission(
+        Order.objects.select_related('created_by').prefetch_related(
+            'transfer_allocations_target__source_order',
+            'items__sku',
+        ).annotate(
+            expected_deposit=Sum(
+                ExpressionWrapper(
+                    F('items__deposit') * F('items__quantity'),
+                    output_field=DecimalField(max_digits=12, decimal_places=2),
+                )
+            ),
+            shipping_timeliness_priority=Case(
+                When(shipped_condition, then=Value(3)),
+                When(ship_date__isnull=True, then=Value(4)),
+                When(ship_date__lte=today, then=Value(0)),
+                When(ship_date__lte=warning_end, then=Value(1)),
+                default=Value(2),
+                output_field=IntegerField(),
+            ),
+        ),
+        request.user,
+        'Order'
+    )
+
+    status_filter = request.GET.get('status', '')
+    keyword = request.GET.get('keyword', '')
+    sla_filter = (request.GET.get('sla', '') or '').strip()
+    source_filter = (request.GET.get('source', '') or '').strip()
+    return_service_filter = (request.GET.get('return_service', '') or '').strip()
+    return_payment_filter = (request.GET.get('return_payment', '') or '').strip()
+    pickup_filter = (request.GET.get('pickup', '') or '').strip()
+
+    if status_filter:
+        orders = orders.filter(status=status_filter)
+
+    if keyword:
+        orders = orders.filter(
+            Q(order_no__icontains=keyword) |
+            Q(customer_name__icontains=keyword) |
+            Q(customer_phone__icontains=keyword) |
+            Q(customer_wechat__icontains=keyword) |
+            Q(xianyu_order_no__icontains=keyword) |
+            Q(source_order_no__icontains=keyword) |
+            Q(return_service_payment_reference__icontains=keyword)
+        )
+
+    if source_filter in dict(Order.ORDER_SOURCE_CHOICES):
+        orders = orders.filter(order_source=source_filter)
+    if return_service_filter in dict(Order.RETURN_SERVICE_TYPE_CHOICES):
+        orders = orders.filter(return_service_type=return_service_filter)
+    if return_payment_filter in dict(Order.RETURN_SERVICE_PAYMENT_STATUS_CHOICES):
+        orders = orders.filter(return_service_payment_status=return_payment_filter)
+    if pickup_filter in dict(Order.RETURN_PICKUP_STATUS_CHOICES):
+        orders = orders.filter(return_pickup_status=pickup_filter)
+
+    if sla_filter == 'overdue':
+        orders = orders.filter(ship_date__isnull=False, ship_date__lte=today).exclude(shipped_condition)
+    elif sla_filter == 'warning':
+        orders = orders.filter(ship_date__gt=today, ship_date__lte=warning_end).exclude(shipped_condition)
+    elif sla_filter == 'normal':
+        orders = orders.filter(ship_date__gt=warning_end).exclude(shipped_condition)
+    elif sla_filter == 'shipped':
+        orders = orders.filter(shipped_condition)
+    elif sla_filter == 'unknown':
+        orders = orders.filter(ship_date__isnull=True).exclude(shipped_condition)
+
+    return orders.order_by('shipping_timeliness_priority', 'ship_date', '-created_at'), {
+        'today': today,
+        'status_filter': status_filter,
+        'keyword': keyword,
+        'sla_filter': sla_filter,
+        'source_filter': source_filter,
+        'return_service_filter': return_service_filter,
+        'return_payment_filter': return_payment_filter,
+        'pickup_filter': pickup_filter,
+    }
+
+
+def _attach_orders_list_meta(order_list, today):
+    def _timeliness_for_order(order):
+        shipped = bool(order.ship_tracking) or order.status in ['delivered', 'in_use', 'returned', 'completed']
+        if order.ship_date:
+            remaining_days = 0 if (order.ship_date < today and shipped) else (order.ship_date - today).days
+        else:
+            remaining_days = None
+        if shipped:
+            return {
+                'remaining_days': remaining_days if remaining_days is not None else 0,
+                'code': 'shipped',
+                'label': '🔵 已发货',
+                'badge_class': 'text-bg-primary',
+                'priority': 3,
+            }
+        if remaining_days is None:
+            return {
+                'remaining_days': None,
+                'code': 'unknown',
+                'label': '⚪ 待补发货日期',
+                'badge_class': 'text-bg-secondary',
+                'priority': 4,
+            }
+        if remaining_days <= 0:
+            return {
+                'remaining_days': remaining_days,
+                'code': 'overdue',
+                'label': '🔴 已超时，请尽快发货',
+                'badge_class': 'text-bg-danger',
+                'priority': 0,
+            }
+        if remaining_days <= 7:
+            return {
+                'remaining_days': remaining_days,
+                'code': 'warning',
+                'label': '🟠 即将超时（7天内）',
+                'badge_class': 'text-bg-warning',
+                'priority': 1,
+            }
+        return {
+            'remaining_days': remaining_days,
+            'code': 'normal',
+            'label': '🟢 正常时效',
+            'badge_class': 'text-bg-success',
+            'priority': 2,
+        }
+
+    _attach_transfer_allocations_display(order_list)
+    current_ids = [o.id for o in order_list]
+    source_blocked_ids = set(
+        TransferAllocation.objects.filter(
+            source_order_id__in=current_ids,
+            status__in=['locked', 'consumed'],
+            target_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
+        ).values_list('source_order_id', flat=True)
+    )
+    source_usage_count_map = {
+        row['source_order_id']: row['cnt']
+        for row in TransferAllocation.objects.filter(
+            source_order_id__in=current_ids,
+            status__in=['locked', 'consumed'],
+            target_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
+        ).values('source_order_id').annotate(cnt=Count('id'))
+    }
+    for order in order_list:
+        t = _timeliness_for_order(order)
+        order.shipping_remaining_days = t['remaining_days']
+        order.shipping_timeliness_code = t['code']
+        order.shipping_timeliness_label = t['label']
+        order.shipping_timeliness_badge_class = t['badge_class']
+        order.shipping_timeliness_priority = t['priority']
+        order.order_source_label = dict(Order.ORDER_SOURCE_CHOICES).get(order.order_source, '-')
+        order.return_service_type_label = dict(Order.RETURN_SERVICE_TYPE_CHOICES).get(order.return_service_type, '-')
+        order.return_service_payment_status_label = dict(Order.RETURN_SERVICE_PAYMENT_STATUS_CHOICES).get(order.return_service_payment_status, '-')
+        order.return_pickup_status_label = dict(Order.RETURN_PICKUP_STATUS_CHOICES).get(order.return_pickup_status, '-')
+        order.can_mark_returned_in_orders_center = order.id not in source_blocked_ids
+        order.active_as_source_count = source_usage_count_map.get(order.id, 0)
+        order.expected_deposit = order.expected_deposit or Decimal('0.00')
 
 
 def _build_order_form_meta():
@@ -1571,174 +1737,20 @@ def reservation_detail(request, reservation_id):
 @require_permission('orders', 'view')
 def orders_list(request):
     """订单列表"""
-    today = timezone.localdate()
-    warning_end = today + timedelta(days=7)
-    shipped_condition = (
-        Q(status__in=['delivered', 'in_use', 'returned', 'completed']) |
-        Q(ship_tracking__isnull=False, ship_tracking__gt='')
-    )
-
-    # 根据权限过滤订单
-    orders = filter_queryset_by_permission(
-        Order.objects.select_related('created_by').prefetch_related(
-            'transfer_allocations_target__source_order',
-        ).annotate(
-            expected_deposit=Sum(
-                ExpressionWrapper(
-                    F('items__deposit') * F('items__quantity'),
-                    output_field=DecimalField(max_digits=12, decimal_places=2),
-                )
-            ),
-            shipping_timeliness_priority=Case(
-                When(shipped_condition, then=Value(3)),
-                When(ship_date__isnull=True, then=Value(4)),
-                When(ship_date__lte=today, then=Value(0)),
-                When(ship_date__lte=warning_end, then=Value(1)),
-                default=Value(2),
-                output_field=IntegerField(),
-            ),
-        ),
-        request.user,
-        'Order'
-    )
-
-    # 筛选
-    status_filter = request.GET.get('status', '')
-    keyword = request.GET.get('keyword', '')
-    sla_filter = (request.GET.get('sla', '') or '').strip()
-    source_filter = (request.GET.get('source', '') or '').strip()
-    return_service_filter = (request.GET.get('return_service', '') or '').strip()
-    return_payment_filter = (request.GET.get('return_payment', '') or '').strip()
-    pickup_filter = (request.GET.get('pickup', '') or '').strip()
-
-    if status_filter:
-        orders = orders.filter(status=status_filter)
-
-    if keyword:
-        orders = orders.filter(
-            Q(order_no__icontains=keyword) |
-            Q(customer_name__icontains=keyword) |
-            Q(customer_phone__icontains=keyword) |
-            Q(customer_wechat__icontains=keyword) |
-            Q(xianyu_order_no__icontains=keyword) |
-            Q(source_order_no__icontains=keyword) |
-            Q(return_service_payment_reference__icontains=keyword)
-        )
-
-    if source_filter in dict(Order.ORDER_SOURCE_CHOICES):
-        orders = orders.filter(order_source=source_filter)
-    if return_service_filter in dict(Order.RETURN_SERVICE_TYPE_CHOICES):
-        orders = orders.filter(return_service_type=return_service_filter)
-    if return_payment_filter in dict(Order.RETURN_SERVICE_PAYMENT_STATUS_CHOICES):
-        orders = orders.filter(return_service_payment_status=return_payment_filter)
-    if pickup_filter in dict(Order.RETURN_PICKUP_STATUS_CHOICES):
-        orders = orders.filter(return_pickup_status=pickup_filter)
-
-    def _timeliness_for_order(order):
-        shipped = bool(order.ship_tracking) or order.status in ['delivered', 'in_use', 'returned', 'completed']
-        if order.ship_date:
-            remaining_days = 0 if (order.ship_date < today and shipped) else (order.ship_date - today).days
-        else:
-            remaining_days = None
-        if shipped:
-            return {
-                'remaining_days': remaining_days if remaining_days is not None else 0,
-                'code': 'shipped',
-                'label': '🔵 已发货',
-                'badge_class': 'text-bg-primary',
-                'priority': 3,
-            }
-        if remaining_days is None:
-            return {
-                'remaining_days': None,
-                'code': 'unknown',
-                'label': '⚪ 待补发货日期',
-                'badge_class': 'text-bg-secondary',
-                'priority': 4,
-            }
-        if remaining_days <= 0:
-            return {
-                'remaining_days': remaining_days,
-                'code': 'overdue',
-                'label': '🔴 已超时，请尽快发货',
-                'badge_class': 'text-bg-danger',
-                'priority': 0,
-            }
-        if remaining_days <= 7:
-            return {
-                'remaining_days': remaining_days,
-                'code': 'warning',
-                'label': '🟠 即将超时（7天内）',
-                'badge_class': 'text-bg-warning',
-                'priority': 1,
-            }
-        return {
-            'remaining_days': remaining_days,
-            'code': 'normal',
-            'label': '🟢 正常时效',
-            'badge_class': 'text-bg-success',
-            'priority': 2,
-        }
-
-    if sla_filter == 'overdue':
-        orders = orders.filter(ship_date__isnull=False, ship_date__lte=today).exclude(shipped_condition)
-    elif sla_filter == 'warning':
-        orders = orders.filter(ship_date__gt=today, ship_date__lte=warning_end).exclude(shipped_condition)
-    elif sla_filter == 'normal':
-        orders = orders.filter(ship_date__gt=warning_end).exclude(shipped_condition)
-    elif sla_filter == 'shipped':
-        orders = orders.filter(shipped_condition)
-    elif sla_filter == 'unknown':
-        orders = orders.filter(ship_date__isnull=True).exclude(shipped_condition)
-
-    orders = orders.order_by('shipping_timeliness_priority', 'ship_date', '-created_at')
+    orders, filters = _build_orders_base_queryset(request)
     orders_page = Paginator(orders, _get_page_size('page_size_orders')).get_page(request.GET.get('page'))
-
-    enriched_orders = []
-    for order in orders_page.object_list:
-        t = _timeliness_for_order(order)
-        order.shipping_remaining_days = t['remaining_days']
-        order.shipping_timeliness_code = t['code']
-        order.shipping_timeliness_label = t['label']
-        order.shipping_timeliness_badge_class = t['badge_class']
-        order.shipping_timeliness_priority = t['priority']
-        order.order_source_label = dict(Order.ORDER_SOURCE_CHOICES).get(order.order_source, '-')
-        order.return_service_type_label = dict(Order.RETURN_SERVICE_TYPE_CHOICES).get(order.return_service_type, '-')
-        order.return_service_payment_status_label = dict(Order.RETURN_SERVICE_PAYMENT_STATUS_CHOICES).get(order.return_service_payment_status, '-')
-        order.return_pickup_status_label = dict(Order.RETURN_PICKUP_STATUS_CHOICES).get(order.return_pickup_status, '-')
-        enriched_orders.append(order)
-    _attach_transfer_allocations_display(orders_page.object_list)
-    current_ids = [o.id for o in orders_page.object_list]
-    source_blocked_ids = set(
-        TransferAllocation.objects.filter(
-            source_order_id__in=current_ids,
-            status__in=['locked', 'consumed'],
-            target_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
-        ).values_list('source_order_id', flat=True)
-    )
-    source_usage_count_map = {
-        row['source_order_id']: row['cnt']
-        for row in TransferAllocation.objects.filter(
-            source_order_id__in=current_ids,
-            status__in=['locked', 'consumed'],
-            target_order__status__in=['pending', 'confirmed', 'delivered', 'in_use'],
-        ).values('source_order_id').annotate(cnt=Count('id'))
-    }
-    for order in orders_page.object_list:
-        order.can_mark_returned_in_orders_center = order.id not in source_blocked_ids
-        order.active_as_source_count = source_usage_count_map.get(order.id, 0)
-        order.expected_deposit = order.expected_deposit or Decimal('0.00')
+    _attach_orders_list_meta(orders_page.object_list, filters['today'])
 
     context = {
         'orders': orders_page,
         'orders_page': orders_page,
-        'status_filter': status_filter,
-        'keyword': keyword,
-        'sla_filter': sla_filter,
-        'source_filter': source_filter,
-        'return_service_filter': return_service_filter,
-        'return_payment_filter': return_payment_filter,
-        'pickup_filter': pickup_filter,
+        'status_filter': filters['status_filter'],
+        'keyword': filters['keyword'],
+        'sla_filter': filters['sla_filter'],
+        'source_filter': filters['source_filter'],
+        'return_service_filter': filters['return_service_filter'],
+        'return_payment_filter': filters['return_payment_filter'],
+        'pickup_filter': filters['pickup_filter'],
         'pagination_query': _build_querystring(request, ['page']),
         'order_source_choices': Order.ORDER_SOURCE_CHOICES,
         'return_service_type_choices': Order.RETURN_SERVICE_TYPE_CHOICES,
@@ -1746,6 +1758,100 @@ def orders_list(request):
         'return_pickup_status_choices': Order.RETURN_PICKUP_STATUS_CHOICES,
     }
     return render(request, 'orders/list.html', context)
+
+
+@login_required
+@require_permission('orders', 'view')
+def orders_export(request):
+    orders, filters = _build_orders_base_queryset(request)
+    order_list = list(orders)
+    _attach_orders_list_meta(order_list, filters['today'])
+
+    response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+    response['Content-Disposition'] = 'attachment; filename="orders_export.csv"'
+    writer = csv.writer(response)
+    writer.writerow([
+        '订单号', '客户姓名', '手机号', '微信号', '收货地址', 'SKU', '数量', '来源平台', '平台单号',
+        '预定日期', '发货日期', '订单状态', '发货单号', '租金合计', '已收押金', '待收尾款', '备注'
+    ])
+    for order in order_list:
+        items_summary = '；'.join(
+            f'{item.sku.name} x{item.quantity}' for item in order.items.all()
+        )
+        writer.writerow([
+            order.order_no,
+            order.customer_name,
+            order.customer_phone,
+            order.customer_wechat,
+            order.delivery_address,
+            items_summary,
+            sum(item.quantity for item in order.items.all()),
+            dict(Order.ORDER_SOURCE_CHOICES).get(order.order_source, order.order_source),
+            order.source_order_no,
+            order.event_date,
+            order.ship_date or '',
+            order.get_status_display(),
+            order.ship_tracking,
+            order.total_amount,
+            order.deposit_paid,
+            order.balance,
+            order.notes,
+        ])
+    return response
+
+
+@login_required
+@require_permission('orders', 'view')
+def orders_import_template(request):
+    response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+    response['Content-Disposition'] = 'attachment; filename="orders_import_template.csv"'
+    writer = csv.writer(response)
+    writer.writerow(OrderImportService.TEMPLATE_HEADERS)
+    writer.writerow([
+        '示例客户', '13800000000', '广东省深圳市南山区示例路 1 号', '中国风',
+        '微信', '168', '微信', '200', '微信', '2026-03-20', '2026-03-15',
+        '0', '已发货', 'SF123456789', '柳奕霏', '2026-03-15', '示例备注'
+    ])
+    return response
+
+
+@login_required
+@require_permission('orders', 'create')
+def orders_import(request):
+    skus = SKU.objects.filter(is_active=True).order_by('category', 'name')
+    if request.method == 'POST':
+        uploaded_file = request.FILES.get('import_file')
+        default_sku_id = (request.POST.get('default_sku_id') or '').strip()
+        action = (request.POST.get('import_action') or 'preview').strip()
+        if not uploaded_file:
+            messages.error(request, '请选择要导入的 CSV 或 XLSX 文件')
+            return render(request, 'orders/import.html', {'skus': skus, 'default_sku_id': default_sku_id})
+        try:
+            if action == 'import':
+                summary = OrderImportService.import_file(uploaded_file, request.user, default_sku_id=default_sku_id or None)
+                if summary['created_count']:
+                    messages.success(request, f"订单导入完成：成功导入 {summary['created_count']} 条")
+                if summary['error_count']:
+                    messages.warning(request, f"有 {summary['error_count']} 条导入失败，请检查页面错误明细")
+                return render(request, 'orders/import.html', {
+                    'skus': skus,
+                    'default_sku_id': default_sku_id,
+                    'import_summary': summary,
+                })
+
+            preview = OrderImportService.preview_file(uploaded_file, default_sku_id=default_sku_id or None)
+            if preview['valid_count']:
+                messages.success(request, f"预检查完成：可导入 {preview['valid_count']} 条")
+            if preview['error_count']:
+                messages.warning(request, f"预检查发现 {preview['error_count']} 条问题，请先处理")
+            return render(request, 'orders/import.html', {
+                'skus': skus,
+                'default_sku_id': default_sku_id,
+                'preview_summary': preview,
+            })
+        except Exception as e:
+            messages.error(request, f'订单导入失败：{e}')
+    return render(request, 'orders/import.html', {'skus': skus})
 
 
 @login_required
@@ -2151,47 +2257,10 @@ def orders_bulk_delete(request):
 
 
 @login_required
-@require_permission('calendar', 'view')
 def calendar_view(request):
-    """排期看板"""
-    import json
-
-    # 获取年月参数
-    year = int(request.GET.get('year', datetime.now().year))
-    month = int(request.GET.get('month', datetime.now().month))
-
-    # 获取当月的订单
-    start_date = datetime(year, month, 1).date()
-    if month == 12:
-        end_date = datetime(year + 1, 1, 1).date()
-    else:
-        end_date = datetime(year, month + 1, 1).date()
-
-    orders = Order.objects.filter(
-        event_date__gte=start_date,
-        event_date__lt=end_date,
-        status__in=['confirmed', 'delivered']
-    ).select_related('created_by')
-
-    # 构建事件数据
-    events = []
-    for order in orders:
-        color = '#4CAF50' if order.status == 'confirmed' else '#2196F3'
-        events.append({
-            'id': order.id,
-            'order_no': order.order_no,
-            'title': f'{order.customer_name} - {order.order_no}',
-            'start': order.event_date.strftime('%Y-%m-%d'),
-            'color': color,
-            'status': order.status
-        })
-
-    context = {
-        'year': year,
-        'month': month,
-        'events': json.dumps(events),
-    }
-    return render(request, 'calendar.html', context)
+    """历史日历入口兼容：功能已下线，统一回工作台"""
+    messages.info(request, '日历排期功能已下线，请改用订单中心、预定管理和转寄中心处理业务。')
+    return redirect('dashboard')
 
 
 @login_required

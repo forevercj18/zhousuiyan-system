@@ -6,15 +6,24 @@
 {% block content %}
 <div class="audit-logs">
     <div class="page-header">
-        <div class="header-left">
-            <div class="filter-group">
-                <label>日期范围：</label>
-                <input type="date" id="startDate" class="form-control" value="{{ start_date|default:'' }}">
-                <span>至</span>
-                <input type="date" id="endDate" class="form-control" value="{{ end_date|default:'' }}">
+        <div class="page-title-group">
+            <p>追踪全系统的操作轨迹，审计核心业务变更及潜在风险动作</p>
+        </div>
+    </div>
+
+    <div class="filter-container mb-4 d-block">
+        <!-- 第一行：核心维度 -->
+        <div class="d-flex flex-wrap gap-3 align-items-end mb-3">
+            <div class="filter-group" style="min-width: 320px;">
+                <label>日期范围</label>
+                <div class="input-group">
+                    <input type="date" id="startDate" class="form-control" value="{{ start_date|default:'' }}">
+                    <span class="input-group-text">至</span>
+                    <input type="date" id="endDate" class="form-control" value="{{ end_date|default:'' }}">
+                </div>
             </div>
-            <div class="filter-group">
-                <label>操作类型：</label>
+            <div class="filter-group" style="min-width: 140px;">
+                <label>操作类型</label>
                 <select id="actionFilter" class="form-select">
                     <option value="">全部</option>
                     <option value="create" {% if action == 'create' %}selected{% endif %}>创建</option>
@@ -25,8 +34,8 @@
                     <option value="outbound" {% if action == 'outbound' %}selected{% endif %}>出库</option>
                 </select>
             </div>
-            <div class="filter-group">
-                <label>模块：</label>
+            <div class="filter-group" style="min-width: 160px;">
+                <label>所属模块</label>
                 <select id="moduleFilter" class="form-select">
                     <option value="">全部模块</option>
                     {% for module_name in modules %}
@@ -34,8 +43,8 @@
                     {% endfor %}
                 </select>
             </div>
-            <div class="filter-group">
-                <label>来源：</label>
+            <div class="filter-group" style="min-width: 140px;">
+                <label>日志来源</label>
                 <select id="sourceFilter" class="form-select">
                     <option value="">全部来源</option>
                     <option value="app" {% if source_filter == 'app' %}selected{% endif %}>应用服务</option>
@@ -44,45 +53,56 @@
                     <option value="plain" {% if source_filter == 'plain' %}selected{% endif %}>旧文本</option>
                 </select>
             </div>
-            <div class="filter-group">
-                <label>关键词：</label>
+        </div>
+
+        <!-- 第二行：搜索与辅助 -->
+        <div class="d-flex flex-wrap gap-3 align-items-center">
+            <div class="filter-group flex-grow-1" style="max-width: 320px;">
+                <label>关键词</label>
                 <input id="keywordInput" type="text" class="form-control" placeholder="对象/详情/操作人"
                        value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterLogs();}">
             </div>
-            <div class="filter-group form-check mb-0">
-                <input class="form-check-input" type="checkbox" id="structuredOnly" {% if structured_only %}checked{% endif %}>
-                <label class="form-check-label" for="structuredOnly">仅结构化</label>
-            </div>
-            <div class="filter-group form-check mb-0">
-                <input class="form-check-input" type="checkbox" id="changedOnly" {% if changed_only %}checked{% endif %}>
-                <label class="form-check-label" for="changedOnly">仅有字段变更</label>
-            </div>
-            <div class="filter-group form-check mb-0">
-                <input class="form-check-input" type="checkbox" id="riskOnly" {% if risk_only %}checked{% endif %}>
-                <label class="form-check-label" for="riskOnly">仅风险动作</label>
-            </div>
-            <div class="filter-group">
-                <label>排序：</label>
+            <div class="filter-group" style="min-width: 160px;">
+                <label>排序方式</label>
                 <select id="sortBy" class="form-select">
                     <option value="time_desc" {% if sort_by == 'time_desc' %}selected{% endif %}>时间倒序</option>
                     <option value="time_asc" {% if sort_by == 'time_asc' %}selected{% endif %}>时间正序</option>
-                    <option value="changed_desc" {% if sort_by == 'changed_desc' %}selected{% endif %}>变更字段数降序</option>
-                    <option value="changed_asc" {% if sort_by == 'changed_asc' %}selected{% endif %}>变更字段数升序</option>
+                    <option value="changed_desc" {% if sort_by == 'changed_desc' %}selected{% endif %}>变更数降序</option>
                 </select>
             </div>
-            <button class="btn btn-secondary" onclick="filterLogs()">筛选</button>
-            <a class="btn btn-sm" href="{% url 'audit_logs' %}">重置</a>
-        </div>
-        <div class="header-right">
-            <button class="btn btn-primary" onclick="exportLogs()">导出日志</button>
+            
+            <div class="d-flex gap-3 pt-4">
+                <div class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="structuredOnly" {% if structured_only %}checked{% endif %}>
+                    <label class="form-check-label" for="structuredOnly">仅结构化</label>
+                </div>
+                <div class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="changedOnly" {% if changed_only %}checked{% endif %}>
+                    <label class="form-check-label" for="changedOnly">有变更</label>
+                </div>
+                <div class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="riskOnly" {% if risk_only %}checked{% endif %}>
+                    <label class="form-check-label text-danger fw-bold" for="riskOnly">风险动作</label>
+                </div>
+            </div>
+
+            <div class="ms-auto d-flex gap-2 pt-4">
+                <button class="btn btn-primary" onclick="filterLogs()">
+                    <i class="bi bi-search"></i>查询
+                </button>
+                <a class="btn btn-secondary" href="{% url 'audit_logs' %}">重置</a>
+                <button class="btn btn-outline-secondary" onclick="exportLogs()">
+                    <i class="bi bi-download"></i>导出日志
+                </button>
+            </div>
         </div>
     </div>
 
     <div class="d-flex flex-wrap gap-2 mb-3">
-        <span class="badge text-bg-light border">总数：{{ summary_stats.total|default:0 }}</span>
-        <span class="badge text-bg-info">结构化：{{ summary_stats.structured|default:0 }}</span>
-        <span class="badge text-bg-warning">有变更：{{ summary_stats.changed|default:0 }}</span>
-        <span class="badge text-bg-danger">风险动作：{{ summary_stats.risk|default:0 }}</span>
+        <span class="badge rounded-pill text-bg-light border px-3">总数：{{ summary_stats.total|default:0 }}</span>
+        <span class="badge rounded-pill text-bg-info px-3">结构化：{{ summary_stats.structured|default:0 }}</span>
+        <span class="badge rounded-pill text-bg-warning px-3">有变更：{{ summary_stats.changed|default:0 }}</span>
+        <span class="badge rounded-pill text-bg-danger px-3">风险动作：{{ summary_stats.risk|default:0 }}</span>
     </div>
 
     <div class="table-container">

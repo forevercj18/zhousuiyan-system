@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+
+{% block title %}导入订单 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}导入订单{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div class="page-title-group">
+        <p>兼容历史表格导入。现在支持先预检查，再确认导入；文件可用 `CSV UTF-8`，安装 `openpyxl` 后也支持 `.xlsx`。</p>
+    </div>
+    <div class="d-flex gap-2">
+        <a class="btn btn-secondary" href="{% url 'orders_import_template' %}">
+            <i class="bi bi-file-earmark-arrow-down"></i> 下载导入模板
+        </a>
+        <a class="btn btn-secondary" href="{% url 'orders_list' %}">返回订单中心</a>
+    </div>
+</div>
+
+<div class="card">
+    <form method="post" enctype="multipart/form-data" class="row g-3 align-items-end">
+        {% csrf_token %}
+        <div class="col-md-5">
+            <label class="form-label">导入文件</label>
+            <input type="file" class="form-control" name="import_file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required>
+            <div class="form-text">支持 `.csv`；`.xlsx` 需要当前环境已安装 `openpyxl`。</div>
+        </div>
+        <div class="col-md-4">
+            <label class="form-label">默认 SKU（兜底）</label>
+            <select class="form-select" name="default_sku_id">
+                <option value="">不指定，按款式自动匹配</option>
+                {% for sku in skus %}
+                <option value="{{ sku.id }}" {% if default_sku_id == sku.id|stringformat:'s' %}selected{% endif %}>{{ sku.code }} / {{ sku.name }}</option>
+                {% endfor %}
+            </select>
+            <div class="form-text">老表“款式”无法唯一匹配现有 SKU 时，会使用这里的默认 SKU。</div>
+        </div>
+        <div class="col-md-3 d-flex gap-2">
+            <button class="btn btn-secondary w-100" type="submit" name="import_action" value="preview">
+                <i class="bi bi-search"></i> 预检查
+            </button>
+            <button class="btn btn-primary w-100" type="submit" name="import_action" value="import">
+                <i class="bi bi-upload"></i> 确认导入
+            </button>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h4 class="card-title">兼容规则</h4>
+    <div class="cell-sub">
+        <div>1. 结构化导入：客户昵称、手机号码、地址、款式、客订来源、租金、预收押金、预定时间、发货时间、状态、发货单号。</div>
+        <div>2. 兼容保留：租金渠道、押金渠道、经手人、操作时间及其它未识别列，会自动拼进订单备注，不会丢。</div>
+        <div>3. 当前导入不会反向补建财务流水；它主要用于把历史表格订单先落进系统。</div>
+        <div>4. 建议流程：先点“预检查”看匹配结果和错误行，再点“确认导入”。</div>
+    </div>
+</div>
+
+{% if preview_summary %}
+<div class="card">
+    <h4 class="card-title">预检查结果</h4>
+    <div class="row g-3 mb-3">
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="stat-label">总行数</div>
+                <div class="stat-value">{{ preview_summary.total_rows }}</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="stat-label">可导入</div>
+                <div class="stat-value">{{ preview_summary.valid_count }}</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="stat-label">错误行数</div>
+                <div class="stat-value">{{ preview_summary.error_count }}</div>
+            </div>
+        </div>
+    </div>
+
+    {% if preview_summary.preview_rows %}
+    <div class="table-responsive mb-3">
+        <table class="table table-hover align-middle mb-0">
+            <thead>
+                <tr>
+                    <th>行号</th>
+                    <th>客户</th>
+                    <th>手机号</th>
+                    <th>SKU</th>
+                    <th>预定日期</th>
+                    <th>状态</th>
+                    <th>租金</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in preview_summary.preview_rows %}
+                <tr>
+                    <td>{{ row.row_no }}</td>
+                    <td>{{ row.customer_name }}</td>
+                    <td>{{ row.customer_phone }}</td>
+                    <td>{{ row.sku_name }}</td>
+                    <td>{{ row.event_date }}</td>
+                    <td>{{ row.status_label }}</td>
+                    <td>￥{{ row.total_amount }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    {% if preview_summary.errors %}
+    <div class="alert alert-warning mb-0">
+        <strong>问题行：</strong>
+        <div class="mt-2">
+            {% for error in preview_summary.errors %}
+            <div>{{ error }}</div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if import_summary %}
+<div class="card">
+    <h4 class="card-title">导入结果</h4>
+    <div class="row g-3 mb-3">
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="stat-label">成功导入</div>
+                <div class="stat-value">{{ import_summary.created_count }}</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="stat-label">失败行数</div>
+                <div class="stat-value">{{ import_summary.error_count }}</div>
+            </div>
+        </div>
+    </div>
+
+    {% if import_summary.created_orders %}
+    <div class="table-responsive mb-3">
+        <table class="table table-hover align-middle mb-0">
+            <thead>
+                <tr>
+                    <th>订单号</th>
+                    <th>客户</th>
+                    <th>状态</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for order in import_summary.created_orders %}
+                <tr>
+                    <td>{{ order.order_no }}</td>
+                    <td>{{ order.customer_name }}</td>
+                    <td>{{ order.get_status_display }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    {% if import_summary.errors %}
+    <div class="alert alert-warning mb-0">
+        <strong>失败明细：</strong>
+        <div class="mt-2">
+            {% for error in import_summary.errors %}
+            <div>{{ error }}</div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

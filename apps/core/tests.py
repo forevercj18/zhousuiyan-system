@@ -1,10 +1,11 @@
 from datetime import date, timedelta
 from decimal import Decimal
 import json
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.db.models import Sum
 from django.http import HttpResponse
@@ -2100,7 +2101,7 @@ class CoreViewsFlowTestCase(TestCase):
             password='test123',
             role='customer_service',
             permission_mode='custom',
-            custom_modules=['dashboard', 'orders', 'reservations', 'calendar'],
+            custom_modules=['dashboard', 'orders', 'reservations'],
             custom_actions=['view', 'create', 'update'],
         )
         other_service = User.objects.create_user(
@@ -2196,7 +2197,7 @@ class CoreViewsFlowTestCase(TestCase):
             password='test123',
             role='customer_service',
             permission_mode='custom',
-            custom_modules=['dashboard', 'orders', 'reservations', 'calendar'],
+            custom_modules=['dashboard', 'orders', 'reservations'],
             custom_actions=['view', 'create', 'update'],
         )
         other_service = User.objects.create_user(
@@ -2345,7 +2346,7 @@ class CoreViewsFlowTestCase(TestCase):
             password='test123',
             role='customer_service',
             permission_mode='custom',
-            custom_modules=['dashboard', 'orders', 'reservations', 'calendar'],
+            custom_modules=['dashboard', 'orders', 'reservations'],
             custom_actions=['view', 'create', 'update'],
         )
         other_service = User.objects.create_user(
@@ -2966,6 +2967,134 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertContains(resp, target_order.order_no)
         self.assertContains(resp, '包回邮￥45.00')
 
+    def test_orders_export_should_follow_filters(self):
+        matched = Order.objects.create(
+            customer_name='导出客户',
+            customer_phone='18810000001',
+            delivery_address='导出地址A',
+            event_date=date.today() + timedelta(days=4),
+            rental_days=1,
+            status='confirmed',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=matched,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=self.sku.rental_price,
+        )
+        other = Order.objects.create(
+            customer_name='未导出客户',
+            customer_phone='18810000002',
+            delivery_address='导出地址B',
+            event_date=date.today() + timedelta(days=4),
+            rental_days=1,
+            status='cancelled',
+            created_by=self.user,
+        )
+        OrderItem.objects.create(
+            order=other,
+            sku=self.sku,
+            quantity=1,
+            rental_price=self.sku.rental_price,
+            deposit=self.sku.deposit,
+            subtotal=self.sku.rental_price,
+        )
+
+        resp = self.client.get(reverse('orders_export'), {'status': 'confirmed'})
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn('订单号,客户姓名', content)
+        self.assertIn(matched.order_no, content)
+        self.assertNotIn(other.order_no, content)
+
+    def test_orders_import_template_should_return_legacy_headers(self):
+        resp = self.client.get(reverse('orders_import_template'))
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn('客户昵称,手机号码,地址,款式,客订来源', content)
+
+    def test_orders_import_should_create_order_from_legacy_csv(self):
+        csv_content = (
+            '客户昵称,手机号码,地址,款式,客订来源,租金,租金渠道,预收押金,押金渠道,预定时间,发货时间,状态,发货单号,经手人,操作时间,备注\n'
+            '历史客户,13812345678,广东省深圳市南山区测试路1号,老表款式,微信,168,微信,200,微信,2026-03-20,2026-03-15,已发货,SF123456,柳奕霏,2026-03-15,历史备注\n'
+        )
+        upload = SimpleUploadedFile('orders.csv', csv_content.encode('utf-8-sig'), content_type='text/csv')
+        before_count = Order.objects.count()
+
+        resp = self.client.post(
+            reverse('orders_import'),
+            {'import_file': upload, 'default_sku_id': str(self.sku.id), 'import_action': 'import'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(Order.objects.count(), before_count + 1)
+        order = Order.objects.order_by('-id').first()
+        self.assertEqual(order.status, 'delivered')
+        self.assertEqual(order.order_source, 'wechat')
+        self.assertEqual(order.ship_tracking, 'SF123456')
+        self.assertEqual(order.total_amount, Decimal('168.00'))
+        self.assertEqual(order.deposit_paid, Decimal('200.00'))
+        self.assertIn('租金渠道：微信', order.notes)
+        self.assertIn('历史备注', order.notes)
+        self.assertEqual(order.items.count(), 1)
+        item = order.items.first()
+        self.assertEqual(item.sku_id, self.sku.id)
+        self.assertEqual(item.rental_price, Decimal('168.00'))
+
+    def test_orders_import_preview_should_show_valid_and_error_rows(self):
+        csv_content = (
+            '客户昵称,手机号码,地址,款式,客订来源,租金,预收押金,预定时间,状态\n'
+            '预检查客户,13812340000,广东省深圳市南山区检查路1号,老表款式,微信,168,200,2026-03-20,已发货\n'
+            '坏数据客户,,地址缺手机号,老表款式,微信,168,200,2026-03-21,已发货\n'
+        )
+        upload = SimpleUploadedFile('orders_preview.csv', csv_content.encode('utf-8-sig'), content_type='text/csv')
+
+        resp = self.client.post(
+            reverse('orders_import'),
+            {'import_file': upload, 'default_sku_id': str(self.sku.id), 'import_action': 'preview'},
+            follow=True,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '预检查结果')
+        self.assertContains(resp, '可导入')
+        self.assertContains(resp, '错误行数')
+        self.assertContains(resp, '第 3 行')
+        self.assertFalse(Order.objects.filter(customer_name='预检查客户').exists())
+
+    def test_orders_import_should_create_order_from_legacy_xlsx(self):
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(['客户昵称', '手机号码', '地址', '款式', '客订来源', '租金', '预收押金', '预定时间', '状态'])
+        sheet.append(['Excel客户', '13900001111', '广东省深圳市南山区Excel路9号', '老表款式', '微信', 188, 300, '2026-03-26', '待发货'])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        upload = SimpleUploadedFile(
+            'orders.xlsx',
+            buffer.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+
+        before_count = Order.objects.count()
+        resp = self.client.post(
+            reverse('orders_import'),
+            {'import_file': upload, 'default_sku_id': str(self.sku.id), 'import_action': 'import'},
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(Order.objects.count(), before_count + 1)
+        order = Order.objects.order_by('-id').first()
+        self.assertEqual(order.customer_name, 'Excel客户')
+        self.assertEqual(order.status, 'confirmed')
+        self.assertEqual(order.total_amount, Decimal('188.00'))
+        self.assertEqual(order.deposit_paid, Decimal('300.00'))
+        self.assertEqual(order.items.count(), 1)
+
     def test_purchase_orders_nav_should_not_activate_orders_menu(self):
         resp = self.client.get(reverse('purchase_orders_list'))
         self.assertEqual(resp.status_code, 200)
@@ -2979,6 +3108,13 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertContains(resp, 'id="pageMessagesData"')
         self.assertContains(resp, 'page-message-item')
         self.assertNotContains(resp, '<div class="messages">', html=False)
+
+    def test_calendar_view_should_redirect_to_dashboard_after_feature_removed(self):
+        resp = self.client.get(reverse('calendar'), follow=True)
+
+        self.assertEqual(resp.redirect_chain[-1][0], reverse('dashboard'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '日历排期功能已下线')
 
     def test_user_edit_should_update_basic_fields(self):
         target = User.objects.create_user(
@@ -2997,7 +3133,7 @@ class CoreViewsFlowTestCase(TestCase):
                 'full_name': '新姓名',
                 'role': 'manager',
                 'permission_mode': 'custom',
-                'custom_modules': ['orders', 'calendar', 'users'],
+                'custom_modules': ['orders', 'transfers', 'users'],
                 'custom_actions': ['view', 'update'],
                 'custom_action_permissions': ['transfer.complete_task', 'finance.manual_adjust'],
                 'email': 'new@example.com',
@@ -3013,7 +3149,7 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(target.full_name, '新姓名')
         self.assertEqual(target.role, 'manager')
         self.assertEqual(target.permission_mode, 'custom')
-        self.assertEqual(target.custom_modules, ['orders', 'calendar', 'users'])
+        self.assertEqual(target.custom_modules, ['orders', 'transfers', 'users'])
         self.assertEqual(target.custom_actions, ['view', 'update'])
         self.assertEqual(target.custom_action_permissions, ['transfer.complete_task', 'finance.manual_adjust'])
         self.assertEqual(target.email, 'new@example.com')
@@ -3035,7 +3171,7 @@ class CoreViewsFlowTestCase(TestCase):
                 'full_name': '新增用户',
                 'role': 'customer_service',
                 'permission_mode': 'custom',
-                'custom_modules': ['orders', 'calendar', 'finance'],
+                'custom_modules': ['orders', 'transfers', 'finance'],
                 'custom_actions': ['view', 'create'],
                 'custom_action_permissions': ['order.confirm_delivery'],
                 'email': 'new_user@example.com',
@@ -3050,7 +3186,7 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(created.full_name, '新增用户')
         self.assertEqual(created.role, 'customer_service')
         self.assertEqual(created.permission_mode, 'custom')
-        self.assertEqual(created.custom_modules, ['orders', 'calendar', 'finance'])
+        self.assertEqual(created.custom_modules, ['orders', 'transfers', 'finance'])
         self.assertEqual(created.custom_actions, ['view', 'create'])
         self.assertEqual(created.custom_action_permissions, ['order.confirm_delivery'])
         self.assertEqual(created.email, 'new_user@example.com')
@@ -3137,7 +3273,7 @@ class CoreViewsFlowTestCase(TestCase):
                 'name': '客服扩展模板',
                 'base_role': 'customer_service',
                 'description': '客服可看财务',
-                'modules': ['orders', 'calendar', 'finance'],
+                'modules': ['orders', 'transfers', 'finance'],
                 'actions': ['view', 'update'],
                 'action_permissions': ['finance.manual_adjust'],
             },
@@ -3147,7 +3283,7 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(resp.status_code, 200)
         template = PermissionTemplate.objects.get(name='客服扩展模板')
         self.assertEqual(template.base_role, 'customer_service')
-        self.assertEqual(template.modules, ['orders', 'calendar', 'finance'])
+        self.assertEqual(template.modules, ['orders', 'transfers', 'finance'])
         self.assertEqual(template.actions, ['view', 'update'])
         self.assertEqual(template.action_permissions, ['finance.manual_adjust'])
         log = AuditLog.objects.filter(module='权限模板', target='模板:客服扩展模板', action='create').order_by('-created_at').first()

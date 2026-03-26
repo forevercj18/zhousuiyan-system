@@ -26,46 +26,91 @@
 {% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <div class="header-left">
-        <form method="get" class="d-flex flex-wrap gap-2 align-items-center">
-            <label class="mb-0">统计周期：</label>
-            <select name="range" class="form-select" style="max-width:180px;" onchange="this.form.submit()">
-                <option value="7" {% if range_days == 7 %}selected{% endif %}>最近7天</option>
-                <option value="30" {% if range_days == 30 %}selected{% endif %}>最近30天</option>
-            </select>
-            <select name="sku_id" class="form-select" style="max-width:240px;" onchange="this.form.submit()">
-                <option value="">全部SKU</option>
-                {% for sku in sku_choices %}
-                <option value="{{ sku.id }}" {% if sku_filter == sku.id|stringformat:"s" %}selected{% endif %}>{{ sku.code }} - {{ sku.name }}</option>
-                {% endfor %}
-            </select>
-            <select name="part_id" class="form-select" style="max-width:220px;" onchange="this.form.submit()">
-                <option value="">全部部件</option>
-                {% for part in part_choices %}
-                <option value="{{ part.id }}" {% if part_filter == part.id|stringformat:"s" %}selected{% endif %}>{{ part.name }}</option>
-                {% endfor %}
-            </select>
-            <a class="btn btn-sm" href="{% url 'warehouse_reports' %}">重置</a>
+    <div class="page-header">
+        <div class="page-title-group">
+            <p>分析仓储作业趋势，监控部件损耗、维修及质检效率</p>
+        </div>
+    </div>
+
+    <div class="filter-container mb-4">
+        <form method="get" class="d-flex flex-wrap gap-3 align-items-end w-100">
+            <div class="filter-group" style="min-width: 140px;">
+                <label>统计周期</label>
+                <select name="range" class="form-select" onchange="this.form.submit()">
+                    <option value="7" {% if range_days == 7 %}selected{% endif %}>最近 7 天</option>
+                    <option value="30" {% if range_days == 30 %}selected{% endif %}>最近 30 天</option>
+                </select>
+            </div>
+            <div class="filter-group" style="min-width: 200px;">
+                <label>产品 (SKU)</label>
+                <select name="sku_id" class="form-select" onchange="this.form.submit()">
+                    <option value="">全部 SKU</option>
+                    {% for sku in sku_choices %}
+                    <option value="{{ sku.id }}" {% if sku_filter == sku.id|stringformat:"s" %}selected{% endif %}>{{ sku.code }} - {{ sku.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="filter-group" style="min-width: 180px;">
+                <label>部件</label>
+                <select name="part_id" class="form-select" onchange="this.form.submit()">
+                    <option value="">全部部件</option>
+                    {% for part in part_choices %}
+                    <option value="{{ part.id }}" {% if part_filter == part.id|stringformat:"s" %}selected{% endif %}>{{ part.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="d-flex gap-2">
+                <a class="btn btn-secondary" href="{% url 'warehouse_reports' %}">重置</a>
+            </div>
+            
+            <div class="ms-auto d-flex gap-2 align-items-end">
+                <a class="btn btn-outline-secondary" href="{% url 'warehouse_reports_export' %}{% if export_query %}?{{ export_query }}{% endif %}">
+                    <i class="bi bi-download"></i>导出 CSV
+                </a>
+                <div class="btn-group">
+                    <a class="btn btn-outline-secondary" href="{% url 'assembly_orders_list' %}" title="查看装配单">
+                        <i class="bi bi-hammer"></i>
+                    </a>
+                    <a class="btn btn-outline-secondary" href="{% url 'maintenance_work_orders_list' %}" title="查看维修工单">
+                        <i class="bi bi-wrench"></i>
+                    </a>
+                    <a class="btn btn-outline-secondary" href="{% url 'unit_disposal_orders_list' %}" title="查看单套处置单">
+                        <i class="bi bi-recycle"></i>
+                    </a>
+                </div>
+                <a class="btn btn-success" href="{% url 'part_recovery_inspections_list' %}">
+                    <i class="bi bi-clipboard-check"></i>质检池
+                </a>
+            </div>
         </form>
     </div>
-    <div class="header-right">
-        <a class="btn btn-secondary" href="{% url 'warehouse_reports_export' %}{% if export_query %}?{{ export_query }}{% endif %}">导出CSV</a>
-        <a class="btn btn-outline-secondary" href="{% url 'assembly_orders_list' %}">查看装配单</a>
-        <a class="btn btn-outline-secondary" href="{% url 'maintenance_work_orders_list' %}">查看维修工单</a>
-        <a class="btn btn-outline-secondary" href="{% url 'unit_disposal_orders_list' %}">查看单套处置单</a>
-        <a class="btn btn-primary" href="{% url 'part_recovery_inspections_list' %}">查看回件质检池</a>
-    </div>
-</div>
 
-<div class="summary-grid">
-    <div class="summary-card"><span>累计完成装配</span><strong>{{ summary.assembly_completed }}</strong></div>
-    <div class="summary-card"><span>待执行维修单</span><strong>{{ summary.maintenance_draft }}</strong></div>
-    <div class="summary-card"><span>已完成维修单</span><strong>{{ summary.maintenance_completed }}</strong></div>
-    <div class="summary-card"><span>已完成单套处置</span><strong>{{ summary.disposal_completed }}</strong></div>
-    <div class="summary-card"><span>待质检回件</span><strong>{{ summary.recovery_pending }}</strong></div>
-    <div class="summary-card"><span>待维修回件</span><strong>{{ summary.recovery_repair }}</strong></div>
-</div>
+    <div class="stats-grid mb-4">
+        <div class="stat-card">
+            <div class="stat-label">完成装配</div>
+            <div class="stat-value">{{ summary.assembly_completed }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">待执行维修</div>
+            <div class="stat-value text-warning">{{ summary.maintenance_draft }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">已完成维修</div>
+            <div class="stat-value text-success">{{ summary.maintenance_completed }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">完成处置</div>
+            <div class="stat-value">{{ summary.disposal_completed }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">待质检回件</div>
+            <div class="stat-value text-warning">{{ summary.recovery_pending }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">待维修回件</div>
+            <div class="stat-value text-info">{{ summary.recovery_repair }}</div>
+        </div>
+    </div>
 
 <div class="report-grid">
     <div class="report-card">

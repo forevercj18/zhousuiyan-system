@@ -10,74 +10,83 @@
     <a class="btn btn-sm btn-outline-primary" href="{% url 'warehouse_reports' %}{% if report_back_query %}?{{ report_back_query }}{% endif %}">返回仓储报表</a>
 </div>
 {% endif %}
-<div class="page-header">
-    <div class="header-left">
-        <form method="get" class="d-flex flex-wrap gap-2 align-items-center">
-            <input type="text" name="keyword" class="form-control" style="max-width:240px;" value="{{ keyword }}" placeholder="单套号/SKU/部件/订单号">
-            <select name="sku_id" class="form-select" style="max-width:220px;">
-                <option value="">全部SKU</option>
-                {% for sku in sku_choices %}
-                <option value="{{ sku.id }}" {% if sku_filter == sku.id|stringformat:"s" %}selected{% endif %}>{{ sku.code }} - {{ sku.name }}</option>
-                {% endfor %}
-            </select>
-            <select name="part_id" class="form-select" style="max-width:220px;">
-                <option value="">全部部件</option>
-                {% for part in part_choices %}
-                <option value="{{ part.id }}" {% if part_filter == part.id|stringformat:"s" %}selected{% endif %}>{{ part.name }}</option>
-                {% endfor %}
-            </select>
-            <select name="status" class="form-select" style="max-width:180px;">
-                <option value="">全部异常状态</option>
-                {% for key, label in status_choices %}
-                    {% if key != 'normal' %}
-                    <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ label }}</option>
-                    {% endif %}
-                {% endfor %}
-            </select>
-            <button type="submit" class="btn btn-secondary">查询</button>
-            <a class="btn btn-sm" href="{% url 'part_issue_pool' %}">重置</a>
+    <div class="page-header">
+        <div class="page-title-group">
+            <p>追踪流转中的异常部件（缺件、损坏、丢失），管理修复建议与维修进度</p>
+        </div>
+    </div>
+
+    <div class="filter-container mb-4">
+        <form method="get" class="d-flex flex-wrap gap-3 align-items-end w-100">
+            <div class="filter-group" style="min-width: 220px;">
+                <label>关键词</label>
+                <input type="text" name="keyword" class="form-control" value="{{ keyword|default:'' }}" placeholder="单套号/SKU/部件/订单号">
+            </div>
+            <div class="filter-group" style="min-width: 180px;">
+                <label>产品 (SKU)</label>
+                <select name="sku_id" class="form-select">
+                    <option value="">全部 SKU</option>
+                    {% for sku in sku_choices %}
+                    <option value="{{ sku.id }}" {% if sku_filter == sku.id|stringformat:"s" %}selected{% endif %}>{{ sku.code }} - {{ sku.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="filter-group" style="min-width: 160px;">
+                <label>部件</label>
+                <select name="part_id" class="form-select">
+                    <option value="">全部部件</option>
+                    {% for part in part_choices %}
+                    <option value="{{ part.id }}" {% if part_filter == part.id|stringformat:"s" %}selected{% endif %}>{{ part.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="filter-group" style="min-width: 140px;">
+                <label>异常类型</label>
+                <select name="status" class="form-select">
+                    <option value="">全部类型</option>
+                    {% for key, label in status_choices %}
+                        {% if key != 'normal' %}
+                        <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ label }}</option>
+                        {% endif %}
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="d-flex gap-2">
+                <button type="submit" class="btn btn-primary">
+                    <i class="bi bi-search"></i>查询
+                </button>
+                <a class="btn btn-secondary" href="{% url 'part_issue_pool' %}">重置</a>
+            </div>
+            
+            <div class="ms-auto d-flex gap-2 align-items-end">
+                <a class="btn btn-outline-secondary" href="{% url 'maintenance_work_orders_list' %}">
+                    <i class="bi bi-wrench-adjustable"></i>查看维修工单
+                </a>
+                <a class="btn btn-success" href="{% url 'outbound_inventory_dashboard' %}">
+                    <i class="bi bi-box-arrow-right"></i>前往单套明细
+                </a>
+            </div>
         </form>
     </div>
-    <div class="header-right d-flex gap-2 flex-wrap">
-        <a class="btn btn-outline-secondary" href="{% url 'maintenance_work_orders_list' %}">查看维修工单</a>
-        <a class="btn btn-primary" href="{% url 'outbound_inventory_dashboard' %}">去单套明细处理</a>
-    </div>
-</div>
 
-<div class="row g-3 mb-3">
-    <div class="col-md-3">
-        <div class="card shadow-sm border-0 h-100">
-            <div class="card-body">
-                <div class="text-muted small mb-1">异常单套数</div>
-                <div class="fs-4 fw-semibold">{{ summary.issue_units }}</div>
-            </div>
+    <div class="stats-grid mb-4">
+        <div class="stat-card">
+            <div class="stat-label">异常单套数</div>
+            <div class="stat-value">{{ summary.issue_units }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">异常部件记录</div>
+            <div class="stat-value">{{ summary.issue_rows }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">损坏件数</div>
+            <div class="stat-value text-warning">{{ summary.damaged_count }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">待处理维修工单</div>
+            <div class="stat-value text-primary">{{ summary.draft_maintenance }}</div>
         </div>
     </div>
-    <div class="col-md-3">
-        <div class="card shadow-sm border-0 h-100">
-            <div class="card-body">
-                <div class="text-muted small mb-1">异常部件记录</div>
-                <div class="fs-4 fw-semibold">{{ summary.issue_rows }}</div>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card shadow-sm border-0 h-100">
-            <div class="card-body">
-                <div class="text-muted small mb-1">损坏件数</div>
-                <div class="fs-4 fw-semibold text-warning">{{ summary.damaged_count }}</div>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card shadow-sm border-0 h-100">
-            <div class="card-body">
-                <div class="text-muted small mb-1">待处理维修工单</div>
-                <div class="fs-4 fw-semibold text-primary">{{ summary.draft_maintenance }}</div>
-            </div>
-        </div>
-    </div>
-</div>
 
 <div class="card shadow-sm border-0 mb-4">
     <div class="card-header bg-white border-0 pb-0">

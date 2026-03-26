@@ -13,38 +13,72 @@
 {% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <div class="header-left">
-        <form method="get" class="d-flex flex-wrap gap-2 align-items-center">
-            <input type="text" name="keyword" class="form-control" style="max-width:260px;" value="{{ keyword }}" placeholder="装配单号/SKU/部件/创建人">
-            <select name="sku_id" class="form-select" style="max-width:240px;">
-                <option value="">全部SKU</option>
-                {% for sku in skus %}
-                <option value="{{ sku.id }}" {% if sku_filter == sku.id|stringformat:"s" %}selected{% endif %}>{{ sku.code }} - {{ sku.name }}</option>
-                {% endfor %}
-            </select>
-            <select name="status" class="form-select" style="max-width:180px;">
-                <option value="">全部状态</option>
-                {% for key, label in status_choices %}
-                <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ label }}</option>
-                {% endfor %}
-            </select>
-            <button type="submit" class="btn btn-secondary">查询</button>
-            <a class="btn btn-sm" href="{% url 'assembly_orders_list' %}">重置</a>
+    <div class="page-header">
+        <div class="page-title-group">
+            <p>追踪 SKU 的装配历史，管理单套生成的部件扣减记录</p>
+        </div>
+    </div>
+
+    <div class="filter-container mb-4">
+        <form method="get" class="d-flex flex-wrap gap-3 align-items-end w-100">
+            <div class="filter-group" style="min-width: 240px;">
+                <label>关键词</label>
+                <input type="text" name="keyword" class="form-control" value="{{ keyword|default:'' }}" placeholder="装配单号/SKU/部件/创建人">
+            </div>
+            <div class="filter-group" style="min-width: 200px;">
+                <label>产品 (SKU)</label>
+                <select name="sku_id" class="form-select">
+                    <option value="">全部 SKU</option>
+                    {% for sku in skus %}
+                    <option value="{{ sku.id }}" {% if sku_filter == sku.id|stringformat:"s" %}selected{% endif %}>{{ sku.code }} - {{ sku.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="filter-group" style="min-width: 140px;">
+                <label>状态</label>
+                <select name="status" class="form-select">
+                    <option value="">全部状态</option>
+                    {% for key, label in status_choices %}
+                    <option value="{{ key }}" {% if status_filter == key %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="d-flex gap-2">
+                <button type="submit" class="btn btn-primary">
+                    <i class="bi bi-search"></i>查询
+                </button>
+                <a class="btn btn-secondary" href="{% url 'assembly_orders_list' %}">重置</a>
+            </div>
+            
+            <div class="ms-auto d-flex gap-2 align-items-end">
+                <a class="btn btn-outline-secondary" href="{% url 'assembly_orders_export' %}?{{ request.GET.urlencode }}">
+                    <i class="bi bi-download"></i>导出 CSV
+                </a>
+                <a class="btn btn-success" href="{% url 'skus_list' %}">
+                    <i class="bi bi-plus-lg"></i>前往装配
+                </a>
+            </div>
         </form>
     </div>
-    <div class="header-right">
-        <a class="btn btn-secondary" href="{% url 'assembly_orders_export' %}?{{ request.GET.urlencode }}">导出CSV</a>
-        <a class="btn btn-primary" href="{% url 'skus_list' %}">去产品管理装配</a>
-    </div>
-</div>
 
-<div class="summary-grid">
-    <div class="summary-card"><span>装配单总数</span><strong>{{ summary.total_count }}</strong></div>
-    <div class="summary-card"><span>已完成</span><strong>{{ summary.completed_count }}</strong></div>
-    <div class="summary-card"><span>已取消</span><strong>{{ summary.cancelled_count }}</strong></div>
-    <div class="summary-card"><span>累计装配套数</span><strong>{{ summary.assembled_sets }}</strong></div>
-</div>
+    <div class="stats-grid mb-4">
+        <div class="stat-card">
+            <div class="stat-label">装配单总数</div>
+            <div class="stat-value">{{ summary.total_count }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">已完成</div>
+            <div class="stat-value">{{ summary.completed_count }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">已取消</div>
+            <div class="stat-value text-danger">{{ summary.cancelled_count }}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">累计装配套数</div>
+            <div class="stat-value text-success">{{ summary.assembled_sets }}</div>
+        </div>
+    </div>
 
 <div class="table-container">
     <div class="table-responsive">

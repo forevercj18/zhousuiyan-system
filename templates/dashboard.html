@@ -1,74 +1,22 @@
-﻿{% extends "base.html" %}
+{% extends "base.html" %}
 
 {% block title %}工作台 - 宝宝周岁宴道具租赁系统{% endblock %}
-{% block page_title %}工作台{% endblock %}
+{% block page_title %}工作台概览{% endblock %}
 
 {% block content %}
     <div class="dashboard">
-        <!-- 统计卡片 -->
+        <!-- 核心数据指标：紧凑型 -->
         <div class="stats-grid">
         {% for card in role_dashboard.focus_cards %}
         {% if card.url_name %}
-        <a class="stat-card text-decoration-none" href="{% url card.url_name %}{% if card.query %}?{{ card.query }}{% endif %}">
+        <a class="stat-card" href="{% url card.url_name %}{% if card.query %}?{{ card.query }}{% endif %}">
         {% else %}
         <div class="stat-card">
         {% endif %}
-            {% if card.key == 'pending_orders' %}
-            <div class="stat-icon" style="background: #ff9800;">&#128203;</div>
-            {% elif card.key == 'overdue_orders_count' %}
-            <div class="stat-icon" style="background: #ef4444;">&#9888;</div>
-            {% elif card.key == 'delivered_orders' %}
-            <div class="stat-icon" style="background: #2196f3;">&#128666;</div>
-            {% elif card.key == 'completed_orders' %}
-            <div class="stat-icon" style="background: #10b981;">&#9989;</div>
-            {% elif card.key == 'due_within_7_days_count' %}
-            <div class="stat-icon" style="background: #f59e0b;">&#9200;</div>
-            {% elif card.key == 'ready_reservations_count' %}
-            <div class="stat-icon" style="background: #ec4899;">&#128197;</div>
-            {% elif card.key == 'converted_pending_shipment_reservations_count' %}
-            <div class="stat-icon" style="background: #2563eb;">&#128230;</div>
-            {% elif card.key == 'converted_overdue_shipment_reservations_count' %}
-            <div class="stat-icon" style="background: #dc2626;">&#128230;</div>
-            {% elif card.key == 'converted_balance_due_reservations_count' %}
-            <div class="stat-icon" style="background: #0ea5e9;">&#128179;</div>
-            {% elif card.key == 'today_followup_reservations_count' %}
-            <div class="stat-icon" style="background: #f59e0b;">&#9742;</div>
-            {% elif card.key == 'overdue_followup_reservations_count' %}
-            <div class="stat-icon" style="background: #dc2626;">&#9888;</div>
-            {% elif card.key == 'warehouse_available_stock' %}
-            <div class="stat-icon" style="background: #4caf50;">&#9989;</div>
-            {% elif card.key == 'low_stock_parts' %}
-            <div class="stat-icon" style="background: #f44336;">&#9888;</div>
-            {% elif card.key == 'pending_recovery_inspections' %}
-            <div class="stat-icon" style="background: #8b5cf6;">&#129514;</div>
-            {% elif card.key == 'repair_recovery_inspections' %}
-            <div class="stat-icon" style="background: #f97316;">&#128736;</div>
-            {% elif card.key == 'draft_maintenance_work_orders' %}
-            <div class="stat-icon" style="background: #14b8a6;">&#128295;</div>
-            {% elif card.key == 'total_revenue' %}
-            <div class="stat-icon" style="background: #9c27b0;">&#128176;</div>
-            {% elif card.key == 'pending_revenue' %}
-            <div class="stat-icon" style="background: #00bcd4;">&#128181;</div>
-            {% elif card.key == 'pending_transfer_tasks' %}
-            <div class="stat-icon" style="background: #3b82f6;">&#128260;</div>
-            {% elif card.key == 'transfer_available_count' %}
-            <div class="stat-icon" style="background: #64748b;">&#10227;</div>
-            {% elif card.key == 'total_orders' %}
-            <div class="stat-icon" style="background: #7c3aed;">&#128221;</div>
-            {% else %}
-            <div class="stat-icon" style="background: #64748b;">&#128200;</div>
-            {% endif %}
-            <div class="stat-info">
-                <div class="stat-label">{{ card.label }}</div>
-                {% if card.key == 'total_revenue' or card.key == 'pending_revenue' %}
-                <div class="stat-value">￥{{ card.value }}</div>
-                {% else %}
-                <div class="stat-value">{{ card.value }}</div>
-                {% endif %}
+            <div class="stat-label">{{ card.label }}</div>
+            <div class="stat-value">
+                {% if card.key == 'total_revenue' or card.key == 'pending_revenue' %}￥{% endif %}{{ card.value }}
             </div>
-            {% if card.url_name %}
-            <span class="small text-primary ms-auto align-self-end">查看详情</span>
-            {% endif %}
         {% if card.url_name %}
         </a>
         {% else %}
@@ -77,344 +25,146 @@
         {% endfor %}
         </div>
 
-        {% if dashboard_followup_reminder %}
-        <div class="alert {% if dashboard_followup_reminder.severity == 'danger' %}alert-danger{% else %}alert-warning{% endif %} border-0 shadow-sm d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3 dashboard-followup-banner"
-             id="dashboardFollowupBanner">
-            <div>
-                <div class="fw-bold mb-1">{{ dashboard_followup_reminder.title }}</div>
-                <div>{{ dashboard_followup_reminder.message }}</div>
-                <div class="small mt-2">
-                    今日需联系 <span class="fw-semibold">{{ dashboard_followup_reminder.today_count }}</span> 张，
-                    逾期未联系 <span class="fw-semibold">{{ dashboard_followup_reminder.overdue_count }}</span> 张
-                </div>
-            </div>
-            <div class="d-flex flex-wrap gap-2">
-                <a class="btn btn-sm btn-outline-dark" href="{% url 'reservations_list' %}?{{ dashboard_followup_reminder.detail_query }}">查看待办</a>
-                <button type="button" class="btn btn-sm btn-light border" id="dashboardFollowupDismissBannerBtn">今天不再提醒</button>
-            </div>
-        </div>
+        <!-- 状态与视角：扁平化 -->
+        <div class="dashboard-status-bar">
+            <span class="badge" style="background: #eef2ff; color: #4f46e5;">{{ request.user.permission_profile_display }}</span>
+            <span class="badge" style="background: #f8fafc; color: #64748b; border: 1px solid #e2e8f0;">{{ role_dashboard.view_type }}</span>
+            
+            {% if role_view_options %}
+            <form method="get" class="ms-auto d-flex align-items-center gap-2">
+                <select name="view_role" class="form-select form-select-sm" style="width: 130px; border-radius: 6px;" onchange="this.form.submit()">
+                    <option value="">默认视角</option>
+                    {% for role_opt in role_view_options %}
+                    <option value="{{ role_opt.value }}" {% if view_role == role_opt.value %}selected{% endif %}>{{ role_opt.label }}</option>
+                    {% endfor %}
+                </select>
+            </form>
+            {% endif %}
 
-        <div class="modal fade" id="dashboardFollowupModal" tabindex="-1" aria-hidden="true" data-dismiss-key="{{ dashboard_followup_reminder.dismiss_key }}">
-            <div class="modal-dialog modal-dialog-centered">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <h5 class="modal-title">{{ dashboard_followup_reminder.title }}</h5>
-                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                    </div>
-                    <div class="modal-body">
-                        <div>{{ dashboard_followup_reminder.message }}</div>
-                        <div class="small text-muted mt-2">
-                            今日需联系 {{ dashboard_followup_reminder.today_count }} 张，逾期未联系 {{ dashboard_followup_reminder.overdue_count }} 张。
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-outline-secondary" id="dashboardFollowupDismissTodayBtn">今天不再提醒</button>
-                        <a href="{% url 'reservations_list' %}?{{ dashboard_followup_reminder.detail_query }}" class="btn btn-primary">查看待办</a>
-                    </div>
-                </div>
-            </div>
-        </div>
-        {% endif %}
-
-        <div class="mb-3 d-flex flex-wrap gap-2 align-items-center">
-            <span class="badge text-bg-light border">当前角色：{{ request.user.permission_profile_display }}</span>
-        <span class="badge text-bg-info">看板类型：{{ role_dashboard.view_type }}</span>
-        {% if role_view_options %}
-        <form method="get" class="d-flex align-items-center gap-2">
-            <label for="view_role" class="small text-muted mb-0">角色视图</label>
-            <select id="view_role" name="view_role" class="form-select form-select-sm" style="width: 170px;">
-                <option value="">默认（当前角色）</option>
-                {% for role_opt in role_view_options %}
-                <option value="{{ role_opt.value }}" {% if view_role == role_opt.value %}selected{% endif %}>{{ role_opt.label }}</option>
+            <div class="d-flex gap-2 ms-2">
+                {% for risk in role_dashboard.risk_entries %}
+                <a href="{% url risk.url_name %}{% if risk.query %}?{{ risk.query }}{% endif %}"
+                   class="badge text-decoration-none"
+                   style="background: {% if risk.severity == 'danger' %}#fee2e2{% else %}#fef3c7{% endif %}; 
+                          color: {% if risk.severity == 'danger' %}#dc2626{% else %}#d97706{% endif %};">
+                    {{ risk.label }}: {{ risk.value }}
+                </a>
                 {% endfor %}
-            </select>
-            <button type="submit" class="btn btn-outline-secondary btn-sm">切换</button>
-        </form>
+            </div>
+        </div>
+
+        {% if dashboard_followup_reminder %}
+        <div class="card p-3 mb-4" style="background: linear-gradient(to right, #ffffff, #f5f3ff); border-left: 4px solid #4f46e5;">
+            <div class="d-flex align-items-center justify-content-between">
+                <div class="d-flex align-items-center gap-3">
+                    <div style="font-size: 24px;">🔔</div>
+                    <div>
+                        <div class="fw-bold">{{ dashboard_followup_reminder.title }}</div>
+                        <div class="small text-muted">{{ dashboard_followup_reminder.message }}</div>
+                    </div>
+                </div>
+                <a class="btn btn-sm btn-primary" href="{% url 'reservations_list' %}?{{ dashboard_followup_reminder.detail_query }}">处理</a>
+            </div>
+        </div>
         {% endif %}
-        {% for risk in role_dashboard.risk_entries %}
-            <a href="{% url risk.url_name %}{% if risk.query %}?{{ risk.query }}{% endif %}"
-               class="badge text-decoration-none
-               {% if risk.severity == 'danger' %}text-bg-danger{% elif risk.severity == 'warning' %}text-bg-warning{% elif risk.severity == 'info' %}text-bg-info{% else %}text-bg-secondary{% endif %}">
-                {{ risk.label }}：{{ risk.value }}
-            </a>
-        {% endfor %}
-    </div>
 
-    {% if role_dashboard.kpi_entries %}
-    <div class="mb-3 d-flex flex-wrap gap-2">
-        {% for kpi in role_dashboard.kpi_entries %}
-        <a href="{% url kpi.url_name %}{% if kpi.query %}?{{ kpi.query }}{% endif %}" class="badge text-bg-light border text-decoration-none px-3 py-2">
-            {{ kpi.label }}：<span class="fw-semibold">{{ kpi.value }}</span>
-        </a>
-        {% endfor %}
-    </div>
-    {% endif %}
+        <div class="row g-4 mb-4">
+            <!-- 快捷入口 -->
+            <div class="col-md-4">
+                <div class="card h-100">
+                    <div class="card-title" style="font-size: 14px; color: var(--text-muted);">快捷入口</div>
+                    <div class="d-flex flex-wrap gap-2">
+                        {% for action in role_dashboard.quick_actions %}
+                        <a href="{% url action.url_name %}" class="btn btn-sm {% if action.style == 'primary' %}btn-primary{% else %}btn-secondary{% endif %}" style="padding: 8px 16px;">
+                            {{ action.label }}
+                        </a>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 关键指标 KPI -->
+            {% if role_dashboard.kpi_entries %}
+            <div class="col-md-8">
+                <div class="card h-100">
+                    <div class="card-title" style="font-size: 14px; color: var(--text-muted);">绩效摘要</div>
+                    <div class="d-flex flex-wrap gap-4">
+                        {% for kpi in role_dashboard.kpi_entries %}
+                        <div>
+                            <div class="small text-muted">{{ kpi.label }}</div>
+                            <div class="fw-bold" style="font-size: 18px;">{{ kpi.value }}</div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
 
-    {% if role_dashboard.warehouse_insights %}
-    <div class="row g-3 mb-3">
-        {% for panel in role_dashboard.warehouse_insights %}
-        <div class="col-12 col-xl-6">
-            <div class="card border-0 shadow-sm h-100">
-                <div class="card-body">
-                    <h3 class="h6 mb-3">{{ panel.title }}</h3>
+        {% if role_dashboard.warehouse_insights %}
+        <div class="row g-4 mb-4">
+            {% for panel in role_dashboard.warehouse_insights %}
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-title" style="font-size: 15px;">{{ panel.title }}</div>
                     <div class="d-flex flex-column gap-2">
                         {% for item in panel.items %}
-                        <div class="d-flex justify-content-between align-items-center border rounded-3 px-3 py-2 gap-3">
-                            <a href="{% url item.url_name %}{% if item.query %}?{{ item.query }}{% endif %}"
-                               class="flex-grow-1 d-flex justify-content-between align-items-center text-decoration-none">
-                                <span class="text-body">{{ item.label }}</span>
-                                <span class="text-muted small">{{ item.value }}</span>
+                        <div class="d-flex justify-content-between align-items-center py-2 border-bottom border-light">
+                            <a href="{% url item.url_name %}{% if item.query %}?{{ item.query }}{% endif %}" class="text-decoration-none text-main">
+                                <span class="fw-medium">{{ item.label }}</span>
+                                <span class="ms-2 text-primary fw-bold">{{ item.value }}</span>
                             </a>
                             {% if item.detail_url_name %}
-                            <a href="{% url item.detail_url_name %}{% if item.detail_query %}?{{ item.detail_query }}{% endif %}"
-                               class="btn btn-sm btn-outline-secondary flex-shrink-0">明细</a>
+                            <a href="{% url item.detail_url_name %}{% if item.detail_query %}?{{ item.detail_query }}{% endif %}" class="small text-muted">明细 ></a>
                             {% endif %}
                         </div>
                         {% endfor %}
                     </div>
                 </div>
             </div>
-        </div>
-        {% endfor %}
-    </div>
-    {% endif %}
-
-    {% if role_dashboard.reservation_owner_panels %}
-    <div class="row g-3 mb-3">
-        <div class="col-12">
-            <div class="card border-0 shadow-sm">
-                <div class="card-body">
-                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-                        <h3 class="h6 mb-0">预定跟进负责人分布</h3>
-                        <span class="text-muted small">按负责人聚合今日需联系、逾期未联系、待发货超时、待收尾款</span>
-                    </div>
-                    <div class="table-responsive">
-                        <table class="table table-hover align-middle mb-0">
-                            <thead>
-                                <tr>
-                                    <th>负责人</th>
-                                    <th>今日需联系</th>
-                                    <th>逾期未联系</th>
-                                    <th>待发货超时</th>
-                                    <th>待收尾款</th>
-                                    <th>操作</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for owner_panel in role_dashboard.reservation_owner_panels %}
-                                <tr>
-                                    <td class="fw-semibold">{{ owner_panel.owner_name }}</td>
-                                    <td>
-                                        <a class="badge text-bg-warning text-decoration-none" href="{% url 'reservations_list' %}?owner={{ owner_panel.owner_id }}&contact=today">
-                                            {{ owner_panel.today_count }}
-                                        </a>
-                                    </td>
-                                    <td>
-                                        <a class="badge text-bg-danger text-decoration-none" href="{% url 'reservations_list' %}?owner={{ owner_panel.owner_id }}&contact=overdue">
-                                            {{ owner_panel.overdue_count }}
-                                        </a>
-                                    </td>
-                                    <td>
-                                        <a class="badge text-bg-primary text-decoration-none" href="{% url 'reservations_list' %}?owner={{ owner_panel.owner_id }}&journey=awaiting_shipment_overdue">
-                                            {{ owner_panel.overdue_shipment_count }}
-                                        </a>
-                                    </td>
-                                    <td>
-                                        <a class="badge text-bg-info text-decoration-none" href="{% url 'reservations_list' %}?owner={{ owner_panel.owner_id }}&journey=balance_due">
-                                            {{ owner_panel.balance_due_count }}
-                                        </a>
-                                    </td>
-                                    <td>
-                                        <a class="btn btn-sm btn-outline-secondary" href="{% url 'reservations_list' %}?owner={{ owner_panel.owner_id }}">查看全部</a>
-                                    </td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endif %}
-
-    {% if role_dashboard.reservation_owner_transfer_suggestions %}
-    <div class="row g-3 mb-3">
-        <div class="col-12">
-            <div class="card border-0 shadow-sm">
-                <div class="card-body">
-                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-                        <h3 class="h6 mb-0">负责人移交建议</h3>
-                        <span class="text-muted small">根据当前跟进负载，建议优先转交高压客服手上的重点预定单</span>
-                    </div>
-                    <div class="d-flex flex-column gap-3">
-                        {% for suggestion in role_dashboard.reservation_owner_transfer_suggestions %}
-                        <div class="border rounded-3 p-3 bg-light-subtle">
-                            <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
-                                <div>
-                                    <div class="fw-semibold">{{ suggestion.source_owner_name }} -> {{ suggestion.target_owner_name }}</div>
-                                    <div class="text-muted small mt-1">
-                                        当前负载 {{ suggestion.source_total }} 单，目标负责人 {{ suggestion.target_total }} 单，建议先转交 {{ suggestion.suggest_count }} 单
-                                    </div>
-                                    <div class="small mt-2">
-                                        建议优先处理：{{ suggestion.reservation_samples|join:"、" }}
-                                    </div>
-                                </div>
-                                <a class="btn btn-sm btn-outline-secondary" href="{% url 'reservations_list' %}?{{ suggestion.source_query }}">查看来源预定单</a>
-                            </div>
-                        </div>
-                        {% endfor %}
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endif %}
-
-    <!-- 快捷操作 -->
-    <div class="quick-actions">
-        <h3>快捷操作</h3>
-        <div class="action-buttons">
-            {% for action in role_dashboard.quick_actions %}
-            <a href="{% url action.url_name %}" class="btn btn-{{ action.style }}">{{ action.label }}</a>
             {% endfor %}
         </div>
-    </div>
+        {% endif %}
 
-    <!-- 最近订单 -->
-    <div class="recent-orders">
-        <h3>最近订单</h3>
-        <div class="table-container">
+        <!-- 最近活跃 -->
+        <div class="card">
+            <div class="card-title" style="font-size: 15px;">最近活跃订单</div>
             <div class="table-responsive">
-            <table class="table table-hover table-striped align-middle data-table mb-0">
-                <thead>
-                    <tr>
-                        <th>订单号</th>
-                        <th>客户</th>
-                        <th>预定日期</th>
-                        <th>状态</th>
-                        <th>转寄挂靠</th>
-                        <th>金额</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for order in recent_orders %}
-                    <tr>
-                        <td>{{ order.order_no }}</td>
-                        <td>{{ order.customer_name }}</td>
-                        <td>{{ order.event_date }}</td>
-                        <td>
-                            {% if order.status == 'pending' %}
-                            <span class="badge text-bg-warning">待处理</span>
-                            {% elif order.status == 'confirmed' %}
-                            <span class="badge text-bg-info">待发货</span>
-                            {% elif order.status == 'delivered' %}
-                            <span class="badge text-bg-primary">已发货</span>
-                            {% elif order.status == 'returned' %}
-                            <span class="badge text-bg-info">已归还</span>
-                            {% elif order.status == 'completed' %}
-                            <span class="badge text-bg-success">已完成</span>
-                            {% else %}
-                            <span class="badge text-bg-secondary">{{ order.get_status_display }}</span>
-                            {% endif %}
-                        </td>
-                        <td>
-                            {% with allocs=order.transfer_allocations_display %}
-                                {% if allocs %}
-                                    {% for alloc in allocs %}
-                                    <div>{{ alloc.order_no }}（{{ alloc.quantity }}套）</div>
-                                    {% endfor %}
-                                {% else %}
-                                    <span class="text-muted">仓库发货</span>
-                                {% endif %}
-                            {% endwith %}
-                        </td>
-                        <td>￥{{ order.total_amount }}</td>
-                        <td>
-                            <a href="{% url 'order_detail' order.id %}" class="btn btn-outline-secondary btn-sm">查看</a>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>订单号</th>
+                            <th>客户</th>
+                            <th>日期</th>
+                            <th>状态</th>
+                            <th>金额</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for order in recent_orders %}
+                        <tr>
+                            <td class="fw-bold">{{ order.order_no }}</td>
+                            <td>{{ order.customer_name }}</td>
+                            <td class="text-muted">{{ order.event_date }}</td>
+                            <td><span class="badge" style="background: #f1f5f9; color: #475569;">{{ order.get_status_display }}</span></td>
+                            <td class="fw-bold">￥{{ order.total_amount }}</td>
+                            <td><a href="{% url 'order_detail' order.id %}" class="btn btn-sm btn-secondary" style="padding: 4px 12px;">详情</a></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
             </div>
         </div>
-    </div>
-
-    <!-- 低库存预警 -->
-    {% if low_stock_parts %}
-    <div class="low-stock-alert">
-        <h3>低库存预警</h3>
-        <div class="table-container">
-            <div class="table-responsive">
-            <table class="table table-hover table-striped align-middle data-table mb-0">
-                <thead>
-                    <tr>
-                        <th>部件编号</th>
-                        <th>部件名称</th>
-                        <th>类别</th>
-                        <th>当前库存</th>
-                        <th>最低库存</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for part in low_stock_parts %}
-                    <tr>
-                        <td>{{ part.code }}</td>
-                        <td>{{ part.name }}</td>
-                        <td>{{ part.category }}</td>
-                        <td class="text-danger">{{ part.available }}</td>
-                        <td>{{ part.min_stock }}</td>
-                        <td>
-                            <a href="{% url 'purchase_order_create' %}" class="btn btn-warning btn-sm">采购</a>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            </div>
-        </div>
-    </div>
-    {% endif %}
     </div>
 {% endblock %}
 
 {% block extra_js %}
 {{ block.super }}
-{% if dashboard_followup_reminder %}
 <script>
-document.addEventListener('DOMContentLoaded', function () {
-    const modalEl = document.getElementById('dashboardFollowupModal');
-    const bannerEl = document.getElementById('dashboardFollowupBanner');
-    if (!modalEl || !bannerEl || !window.bootstrap) return;
-
-    const dismissKey = modalEl.dataset.dismissKey;
-    const modal = new bootstrap.Modal(modalEl);
-    const dismissToday = () => {
-        try {
-            localStorage.setItem(dismissKey, '1');
-        } catch (err) {
-            console.warn('无法写入今日提醒忽略标记', err);
-        }
-        bannerEl.classList.add('opacity-75');
-        modal.hide();
-    };
-
-    document.getElementById('dashboardFollowupDismissTodayBtn')?.addEventListener('click', dismissToday);
-    document.getElementById('dashboardFollowupDismissBannerBtn')?.addEventListener('click', dismissToday);
-
-    let dismissedToday = false;
-    try {
-        dismissedToday = localStorage.getItem(dismissKey) === '1';
-    } catch (err) {
-        dismissedToday = false;
-    }
-    if (!dismissedToday) {
-        modal.show();
-    }
-});
+    // 强制清除旧的样式残留
+    document.addEventListener('DOMContentLoaded', () => {
+        document.querySelectorAll('.stat-icon').forEach(e => e.remove());
+    });
 </script>
-{% endif %}
 {% endblock %}

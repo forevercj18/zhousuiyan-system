@@ -7,27 +7,44 @@
 {% block content %}
 <div class="transfers-center">
     <div class="page-header">
-        <div class="header-left">
-            <div class="filter-group">
-                <label>候选筛选：</label>
-                <select id="candidateActionInput" class="form-select">
-                    <option value="all" {% if candidate_action_filter == 'all' %}selected{% endif %}>全部候选</option>
-                    <option value="generatable" {% if candidate_action_filter == 'generatable' %}selected{% endif %}>仅可生成任务</option>
-                </select>
-            </div>
-            <div class="filter-group">
-                <label>关键词：</label>
-                <input id="keywordInput" type="text" class="form-control" placeholder="订单号/SKU"
-                       value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterTransfers();}">
-            </div>
-            <button class="btn btn-secondary" type="button" onclick="filterTransfers()">查询</button>
-            <a class="btn btn-sm" href="{% url 'transfers_list' %}">重置</a>
-            <a class="btn btn-sm btn-outline-secondary" href="{% url 'transfer_recommendation_logs' %}">推荐回放</a>
+        <div class="page-title-group">
+            <p>管理并调度跨订单的转寄资源与任务</p>
+        </div>
+    </div>
+
+    <div class="filter-container mb-4">
+        <div class="filter-group" style="min-width: 160px;">
+            <label>候选筛选</label>
+            <select id="candidateActionInput" class="form-select">
+                <option value="all" {% if candidate_action_filter == 'all' %}selected{% endif %}>全部候选</option>
+                <option value="generatable" {% if candidate_action_filter == 'generatable' %}selected{% endif %}>仅可生成任务</option>
+            </select>
+        </div>
+        <div class="filter-group" style="min-width: 240px;">
+            <label>关键词</label>
+            <input id="keywordInput" type="text" class="form-control" placeholder="订单号/SKU/客户姓名"
+                   value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterTransfers();}">
+        </div>
+        <div class="d-flex gap-2">
+            <button class="btn btn-primary" type="button" onclick="filterTransfers()">
+                <i class="bi bi-search"></i>查询
+            </button>
+            <a class="btn btn-secondary" href="{% url 'transfers_list' %}">重置</a>
+        </div>
+        
+        <div class="ms-auto d-flex gap-2 align-items-end">
+            <a class="btn btn-outline-secondary" href="{% url 'transfer_recommendation_logs' %}">
+                <i class="bi bi-clock-history"></i>推荐回放
+            </a>
             {% if request.user|has_action_perm:'transfer.recommend' %}
-            <button class="btn btn-sm btn-primary" type="button" onclick="recommendSelected()">重新推荐（多选）</button>
+            <button class="btn btn-warning" type="button" onclick="recommendSelected()">
+                <i class="bi bi-magic"></i>重新推荐
+            </button>
             {% endif %}
             {% if request.user|has_action_perm:'transfer.create_task' %}
-            <button class="btn btn-sm btn-success" type="button" onclick="generateTasksSelected()">生成转寄任务（多选）</button>
+            <button class="btn btn-success" type="button" onclick="generateTasksSelected()">
+                <i class="bi bi-plus-circle"></i>生成任务
+            </button>
             {% endif %}
         </div>
     </div>

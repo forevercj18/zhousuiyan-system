@@ -16,6 +16,9 @@ urlpatterns = [
 
     # 订单管理
     path('orders/', views.orders_list, name='orders_list'),
+    path('orders/export/', views.orders_export, name='orders_export'),
+    path('orders/import/', views.orders_import, name='orders_import'),
+    path('orders/import-template/', views.orders_import_template, name='orders_import_template'),
     path('reservations/', views.reservations_list, name='reservations_list'),
     path('reservations/create/', views.reservation_create, name='reservation_create'),
     path('reservations/bulk-status/', views.reservations_bulk_update_status, name='reservations_bulk_update_status'),
@@ -37,7 +40,7 @@ urlpatterns = [
     path('orders/<int:order_id>/return-service/update/', views.order_return_service_update, name='order_return_service_update'),
     path('orders/<int:order_id>/', views.order_detail, name='order_detail'),
 
-    # 日历排期
+    # 历史日历入口兼容跳转
     path('calendar/', views.calendar_view, name='calendar'),
 
     # 转寄中心

@@ -29,24 +29,41 @@
     </div>
     {% endif %}
     <div class="page-header">
-        <div class="header-left">
-            <div class="filter-group">
-                <label>关键词：</label>
-                <input id="keywordInput" type="text" class="form-control" placeholder="编号/名称/类别"
-                       value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterSkus();}">
-            </div>
-            <div class="filter-group">
-                <label>类别：</label>
-                <input id="categoryInput" type="text" class="form-control" placeholder="类别关键字"
-                       value="{{ category|default:'' }}" onkeydown="if(event.key==='Enter'){filterSkus();}">
-            </div>
-            <button class="btn btn-secondary" type="button" onclick="filterSkus()">查询</button>
-            <a class="btn btn-sm" href="{% url 'skus_list' %}">重置</a>
-            <button class="btn btn-sm btn-danger" type="button" onclick="bulkDeleteSkus()">批量删除</button>
-            <a class="btn btn-sm" href="{% url 'assembly_orders_list' %}">查看装配单</a>
+        <div class="page-title-group">
+            <p>定义产品套餐 (SKU)、管理 BOM 组成及小程序展示</p>
         </div>
-        <div class="header-right">
-            <button class="btn btn-primary" onclick="showCreateModal()">新建产品</button>
+    </div>
+
+    <div class="filter-container mb-4">
+        <div class="filter-group" style="min-width: 200px;">
+            <label>关键词</label>
+            <input id="keywordInput" type="text" class="form-control" placeholder="编号/名称"
+                   value="{{ keyword|default:'' }}" onkeydown="if(event.key==='Enter'){filterSkus();}">
+        </div>
+        <div class="filter-group" style="min-width: 160px;">
+            <label>类别</label>
+            <input id="categoryInput" type="text" class="form-control" placeholder="类别关键字"
+                   value="{{ category|default:'' }}" onkeydown="if(event.key==='Enter'){filterSkus();}">
+        </div>
+        <div class="d-flex gap-2">
+            <button class="btn btn-primary" type="button" onclick="filterSkus()">
+                <i class="bi bi-search"></i>查询
+            </button>
+            <a class="btn btn-secondary" href="{% url 'skus_list' %}">重置</a>
+        </div>
+        
+        <div class="ms-auto d-flex gap-2 align-items-end">
+            <div class="btn-group me-2">
+                <button class="btn btn-outline-danger" type="button" onclick="bulkDeleteSkus()">
+                    <i class="bi bi-trash"></i>批量删除
+                </button>
+                <a class="btn btn-outline-secondary" href="{% url 'assembly_orders_list' %}">
+                    <i class="bi bi-list-task"></i>查看装配单
+                </a>
+            </div>
+            <button class="btn btn-success" onclick="showCreateModal()">
+                <i class="bi bi-plus-lg"></i>新建产品
+            </button>
         </div>
     </div>
 
