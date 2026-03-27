@@ -25,7 +25,7 @@ from apps.core.models import SKU, SKUImage, SKUComponent, Reservation, WechatCus
 from apps.core.permissions import has_permission, has_action_permission
 from apps.core.services.order_service import OrderService
 from apps.core.services.storage_service import StorageService
-from apps.core.services.wechat_auth_service import code_to_session, generate_token
+from apps.core.services.wechat_auth_service import code_to_session, generate_token, get_phone_number_by_code
 from apps.core.services.audit_service import AuditService
 from .mp_auth import mp_login_required, mp_login_optional, mp_staff_required
 
@@ -64,10 +64,26 @@ def mp_login(request):
             openid=openid,
             defaults={
                 'unionid': wx_data.get('unionid', ''),
+                'nickname': (body.get('nickname') or '').strip(),
+                'avatar_url': (body.get('avatar_url') or '').strip(),
             }
         )
         if not created:
-            customer.save(update_fields=['updated_at'])
+            changed_fields = []
+            unionid = (wx_data.get('unionid') or '').strip()
+            nickname = (body.get('nickname') or '').strip()
+            avatar_url = (body.get('avatar_url') or '').strip()
+            if unionid and customer.unionid != unionid:
+                customer.unionid = unionid
+                changed_fields.append('unionid')
+            if nickname and customer.nickname != nickname:
+                customer.nickname = nickname
+                changed_fields.append('nickname')
+            if avatar_url and customer.avatar_url != avatar_url:
+                customer.avatar_url = avatar_url
+                changed_fields.append('avatar_url')
+            changed_fields.append('updated_at')
+            customer.save(update_fields=changed_fields)
 
         # 生成 Token
         token = generate_token(customer.id, openid)
@@ -77,7 +93,9 @@ def mp_login(request):
             'customer': {
                 'id': customer.id,
                 'nickname': customer.nickname,
+                'avatar_url': customer.avatar_url,
                 'phone': customer.phone,
+                'wechat_id': customer.wechat_id,
                 'is_new': created,
             }
             ,
@@ -90,6 +108,38 @@ def mp_login(request):
     except Exception:
         logger.exception('小程序登录异常')
         return JsonResponse({'error': '登录失败，请稍后重试'}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@mp_login_required
+def mp_sync_phone(request):
+    """微信手机号授权：前端 getPhoneNumber 返回 code，后端换取手机号并回写客户档案。"""
+    try:
+        body = json.loads(request.body)
+        phone_code = (body.get('phone_code') or '').strip()
+        if not phone_code:
+            return JsonResponse({'error': 'phone_code 不能为空'}, status=400)
+        phone_data = get_phone_number_by_code(phone_code)
+        phone_number = phone_data['phone_number']
+        changed_fields = []
+        if request.mp_customer.phone != phone_number:
+            request.mp_customer.phone = phone_number
+            changed_fields.append('phone')
+        if changed_fields:
+            changed_fields.append('updated_at')
+            request.mp_customer.save(update_fields=changed_fields)
+        return JsonResponse({
+            'phone': request.mp_customer.phone,
+            'message': '手机号已同步',
+        })
+    except ValueError as e:
+        return JsonResponse({'error': str(e)}, status=400)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': '请求格式错误'}, status=400)
+    except Exception:
+        logger.exception('小程序手机号同步异常')
+        return JsonResponse({'error': '手机号同步失败，请稍后重试'}, status=500)
 
 
 # ============================================================
@@ -245,6 +295,19 @@ def mp_create_reservation(request):
             # owner 留空（由后台客服手动分配）
         )
         reservation.save()
+
+        customer_changed_fields = []
+        customer_name = (body.get('customer_name') or '').strip()
+        customer_phone = (body.get('customer_phone') or '').strip()
+        if customer_phone and request.mp_customer.phone != customer_phone:
+            request.mp_customer.phone = customer_phone
+            customer_changed_fields.append('phone')
+        if customer_wechat and request.mp_customer.wechat_id != customer_wechat:
+            request.mp_customer.wechat_id = customer_wechat
+            customer_changed_fields.append('wechat_id')
+        if customer_changed_fields:
+            customer_changed_fields.append('updated_at')
+            request.mp_customer.save(update_fields=customer_changed_fields)
 
         return JsonResponse({
             'reservation_no': reservation.reservation_no,

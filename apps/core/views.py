@@ -24,6 +24,7 @@ from .models import (
     AuditLog, User, SystemSettings, Transfer, TransferAllocation, InventoryUnit, UnitMovement,
     InventoryUnitPart, RiskEvent, ApprovalTask, FinanceTransaction, DataConsistencyCheckRun,
     AssemblyOrder, MaintenanceWorkOrder, UnitDisposalOrder, PartRecoveryInspection, PermissionTemplate, Reservation,
+    WechatCustomer,
     TransferRecommendationLog, SKUImage, SKUComponent,
 )
 from .services import (
@@ -78,6 +79,58 @@ def _snapshot_user_audit(user_obj):
         'phone': user_obj.phone,
         'is_active': user_obj.is_active,
     }
+
+
+def _snapshot_wechat_customer_audit(customer):
+    return {
+        'id': customer.id,
+        'openid': customer.openid,
+        'unionid': customer.unionid,
+        'nickname': customer.nickname,
+        'avatar_url': customer.avatar_url,
+        'phone': customer.phone,
+        'wechat_id': customer.wechat_id,
+        'is_active': customer.is_active,
+        'staff_binding_user_id': customer.staff_binding.user_id if hasattr(customer, 'staff_binding') and customer.staff_binding else None,
+    }
+
+
+def _build_wechat_customers_queryset(request):
+    customers = WechatCustomer.objects.select_related('staff_binding__user').all().order_by('-updated_at', '-id')
+    keyword = (request.GET.get('keyword', '') or '').strip()
+    profile_status = (request.GET.get('profile_status', '') or '').strip()
+    bind_status = (request.GET.get('bind_status', '') or '').strip()
+
+    if keyword:
+        customers = customers.filter(
+            Q(openid__icontains=keyword) |
+            Q(unionid__icontains=keyword) |
+            Q(nickname__icontains=keyword) |
+            Q(phone__icontains=keyword) |
+            Q(wechat_id__icontains=keyword)
+        )
+
+    if profile_status == 'complete':
+        customers = customers.filter(
+            nickname__gt='',
+            avatar_url__gt='',
+            phone__gt='',
+            wechat_id__gt='',
+        )
+    elif profile_status == 'partial':
+        customers = customers.exclude(
+            nickname__gt='',
+            avatar_url__gt='',
+            phone__gt='',
+            wechat_id__gt='',
+        )
+
+    if bind_status == 'bound':
+        customers = customers.filter(staff_binding__isnull=False)
+    elif bind_status == 'unbound':
+        customers = customers.filter(staff_binding__isnull=True)
+
+    return customers, keyword, profile_status, bind_status
 
 
 def _snapshot_permission_template_audit(template):
@@ -6321,6 +6374,197 @@ def users_list(request):
         'recent_permission_audits': recent_permission_audits,
     }
     return render(request, 'users.html', context)
+
+
+@login_required
+@require_permission('users', 'view')
+def wechat_customers_list(request):
+    """微信客户档案列表"""
+    customers, keyword, profile_status, bind_status = _build_wechat_customers_queryset(request)
+
+    customers_page = Paginator(customers, _get_page_size('page_size_wechat_customers', 20)).get_page(request.GET.get('page'))
+
+    summary = {
+        'total_count': WechatCustomer.objects.count(),
+        'with_nickname_count': WechatCustomer.objects.exclude(nickname='').count(),
+        'with_phone_count': WechatCustomer.objects.exclude(phone='').count(),
+        'staff_bound_count': WechatCustomer.objects.filter(staff_binding__isnull=False).count(),
+    }
+
+    for customer in customers_page.object_list:
+        profile_fields = [
+            bool((customer.nickname or '').strip()),
+            bool((customer.avatar_url or '').strip()),
+            bool((customer.phone or '').strip()),
+            bool((customer.wechat_id or '').strip()),
+        ]
+        customer.profile_completion_count = sum(1 for item in profile_fields if item)
+        customer.profile_completion_label = f'{customer.profile_completion_count}/4'
+        customer.profile_completion_class = 'success' if customer.profile_completion_count == 4 else 'warning' if customer.profile_completion_count >= 2 else 'secondary'
+
+    context = {
+        'customers_page': customers_page,
+        'customers': customers_page,
+        'keyword': keyword,
+        'profile_status': profile_status,
+        'bind_status': bind_status,
+        'summary': summary,
+        'pagination_query': _build_querystring(request, ['page']),
+    }
+    return render(request, 'wechat_customers.html', context)
+
+
+def _get_selected_wechat_customers(request):
+    selected_ids = [item for item in request.POST.getlist('selected_ids') if str(item).isdigit()]
+    return WechatCustomer.objects.select_related('staff_binding__user').filter(id__in=selected_ids), selected_ids
+
+
+@login_required
+@require_permission('users', 'update')
+def wechat_customer_edit(request, customer_id):
+    if request.method != 'POST':
+        return redirect('wechat_customers_list')
+    customer = get_object_or_404(WechatCustomer.objects.select_related('staff_binding__user'), id=customer_id)
+    before_snapshot = _snapshot_wechat_customer_audit(customer)
+    try:
+        customer.nickname = (request.POST.get('nickname') or '').strip()
+        customer.avatar_url = (request.POST.get('avatar_url') or '').strip()
+        customer.phone = (request.POST.get('phone') or '').strip()
+        customer.wechat_id = (request.POST.get('wechat_id') or '').strip()
+        customer.is_active = (request.POST.get('is_active') or '').strip() in {'1', 'true', 'True', 'on'}
+        customer.save(update_fields=['nickname', 'avatar_url', 'phone', 'wechat_id', 'is_active', 'updated_at'])
+        AuditService.log_with_diff(
+            user=request.user,
+            action='update',
+            module='微信客户',
+            target=f'微信客户:{customer.id}',
+            summary='编辑微信客户',
+            before=before_snapshot,
+            after=_snapshot_wechat_customer_audit(customer),
+            extra={'source': 'app', 'entity': 'wechat_customer', 'wechat_customer_id': customer.id},
+        )
+        messages.success(request, f'微信客户 #{customer.id} 更新成功')
+    except Exception as exc:
+        messages.error(request, f'微信客户更新失败：{exc}')
+    return redirect('wechat_customers_list')
+
+
+@login_required
+@require_permission('users', 'update')
+def wechat_customer_delete(request, customer_id):
+    if request.method != 'POST':
+        return redirect('wechat_customers_list')
+    customer = get_object_or_404(WechatCustomer.objects.select_related('staff_binding__user'), id=customer_id)
+    before_snapshot = _snapshot_wechat_customer_audit(customer)
+    binding_user = customer.staff_binding.user if hasattr(customer, 'staff_binding') else None
+    try:
+        customer.delete()
+        AuditService.log_with_diff(
+            user=request.user,
+            action='delete',
+            module='微信客户',
+            target=f'微信客户:{before_snapshot["id"]}',
+            summary='删除微信客户',
+            before=before_snapshot,
+            after={},
+            extra={'source': 'app', 'entity': 'wechat_customer', 'wechat_customer_id': before_snapshot['id']},
+        )
+        if binding_user:
+            messages.success(request, f'微信客户 #{before_snapshot["id"]} 已删除，并解除员工账号 {binding_user.username} 的微信绑定')
+        else:
+            messages.success(request, f'微信客户 #{before_snapshot["id"]} 已删除')
+    except Exception as exc:
+        messages.error(request, f'微信客户删除失败：{exc}')
+    return redirect('wechat_customers_list')
+
+
+@login_required
+@require_permission('users', 'update')
+def wechat_customers_bulk_delete(request):
+    if request.method != 'POST':
+        return redirect('wechat_customers_list')
+    customers, selected_ids = _get_selected_wechat_customers(request)
+    if not selected_ids:
+        messages.error(request, '请先选择要删除的微信客户')
+        return redirect('wechat_customers_list')
+    snapshots = [_snapshot_wechat_customer_audit(customer) for customer in customers]
+    try:
+        deleted_count = len(snapshots)
+        customers.delete()
+        AuditService.log_with_diff(
+            user=request.user,
+            action='delete',
+            module='微信客户',
+            target='批量删除',
+            summary='批量删除微信客户',
+            before={'customers': snapshots},
+            after={},
+            extra={'source': 'app', 'entity': 'wechat_customer', 'count': deleted_count},
+        )
+        messages.success(request, f'已批量删除 {deleted_count} 个微信客户')
+    except Exception as exc:
+        messages.error(request, f'批量删除微信客户失败：{exc}')
+    return redirect('wechat_customers_list')
+
+
+@login_required
+@require_permission('users', 'update')
+def wechat_customers_bulk_deactivate(request):
+    if request.method != 'POST':
+        return redirect('wechat_customers_list')
+    customers, selected_ids = _get_selected_wechat_customers(request)
+    if not selected_ids:
+        messages.error(request, '请先选择要停用的微信客户')
+        return redirect('wechat_customers_list')
+    snapshots = [_snapshot_wechat_customer_audit(customer) for customer in customers]
+    try:
+        updated_count = customers.update(is_active=False, updated_at=timezone.now())
+        AuditService.log_with_diff(
+            user=request.user,
+            action='status_change',
+            module='微信客户',
+            target='批量停用',
+            summary='批量停用微信客户',
+            before={'customers': snapshots},
+            after={'is_active': False},
+            extra={'source': 'app', 'entity': 'wechat_customer', 'count': updated_count},
+        )
+        messages.success(request, f'已批量停用 {updated_count} 个微信客户')
+    except Exception as exc:
+        messages.error(request, f'批量停用微信客户失败：{exc}')
+    return redirect('wechat_customers_list')
+
+
+@login_required
+@require_permission('users', 'view')
+def wechat_customers_export(request):
+    if request.method != 'POST':
+        return redirect('wechat_customers_list')
+    customers, selected_ids = _get_selected_wechat_customers(request)
+    if not selected_ids:
+        messages.error(request, '请先选择要导出的微信客户')
+        return redirect('wechat_customers_list')
+
+    response = HttpResponse(content_type='text/csv; charset=utf-8-sig')
+    response['Content-Disposition'] = 'attachment; filename="wechat_customers.csv"'
+    response.write('\ufeff')
+    writer = csv.writer(response)
+    writer.writerow(['ID', '昵称', '头像地址', '手机号', '微信号', '是否启用', '员工绑定', 'OpenID', 'UnionID', '最近访问'])
+    for customer in customers.order_by('id'):
+        binding_user = customer.staff_binding.user if hasattr(customer, 'staff_binding') else None
+        writer.writerow([
+            customer.id,
+            customer.nickname,
+            customer.avatar_url,
+            customer.phone,
+            customer.wechat_id,
+            '是' if customer.is_active else '否',
+            binding_user.full_name if binding_user and binding_user.full_name else (binding_user.username if binding_user else ''),
+            customer.openid,
+            customer.unionid,
+            timezone.localtime(customer.updated_at).strftime('%Y-%m-%d %H:%M:%S') if customer.updated_at else '',
+        ])
+    return response
 
 
 @login_required

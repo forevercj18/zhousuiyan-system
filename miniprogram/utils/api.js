@@ -51,7 +51,7 @@ function request(path, options = {}) {
 /**
  * 微信登录
  */
-function login() {
+function login(profile = null) {
   return new Promise((resolve, reject) => {
     wx.login({
       success(loginRes) {
@@ -61,7 +61,11 @@ function login() {
         }
         request('/api/mp/login/', {
           method: 'POST',
-          data: { code: loginRes.code }
+          data: {
+            code: loginRes.code,
+            nickname: profile && profile.nickname ? profile.nickname : '',
+            avatar_url: profile && profile.avatarUrl ? profile.avatarUrl : ''
+          }
         }).then(data => {
           // 保存 token
           app.globalData.token = data.token;
@@ -77,6 +81,39 @@ function login() {
         reject({ error: '微信登录失败' });
       }
     });
+  });
+}
+
+function getUserProfile() {
+  return new Promise((resolve, reject) => {
+    if (!wx.getUserProfile) {
+      resolve(null);
+      return;
+    }
+    wx.getUserProfile({
+      desc: '用于完善会员资料',
+      success(res) {
+        resolve(res.userInfo || null);
+      },
+      fail(err) {
+        reject({ error: '未授权获取微信资料' });
+      }
+    });
+  });
+}
+
+function syncPhoneNumber(phoneCode) {
+  return request('/api/mp/phone/', {
+    method: 'POST',
+    data: { phone_code: phoneCode },
+    needLogin: true
+  }).then(data => {
+    app.globalData.userInfo = {
+      ...(app.globalData.userInfo || {}),
+      phone: data.phone || ''
+    };
+    wx.setStorageSync('userInfo', app.globalData.userInfo);
+    return data;
   });
 }
 
@@ -122,6 +159,8 @@ function getPreferredMode() {
 module.exports = {
   request,
   login,
+  getUserProfile,
+  syncPhoneNumber,
   ensureLogin,
   getStaffProfile,
   bindStaffAccount,

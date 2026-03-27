@@ -3,6 +3,7 @@ from decimal import Decimal
 import json
 from io import BytesIO, StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -3019,14 +3020,14 @@ class CoreViewsFlowTestCase(TestCase):
     def test_orders_import_should_create_order_from_legacy_csv(self):
         csv_content = (
             '客户昵称,手机号码,地址,款式,客订来源,租金,租金渠道,预收押金,押金渠道,预定时间,发货时间,状态,发货单号,经手人,操作时间,备注\n'
-            '历史客户,13812345678,广东省深圳市南山区测试路1号,老表款式,微信,168,微信,200,微信,2026-03-20,2026-03-15,已发货,SF123456,柳奕霏,2026-03-15,历史备注\n'
+            f'历史客户,13812345678,广东省深圳市南山区测试路1号,{self.sku.name},微信,168,微信,200,微信,2026-03-20,2026-03-15,已发货,SF123456,柳奕霏,2026-03-15,历史备注\n'
         )
         upload = SimpleUploadedFile('orders.csv', csv_content.encode('utf-8-sig'), content_type='text/csv')
         before_count = Order.objects.count()
 
         resp = self.client.post(
             reverse('orders_import'),
-            {'import_file': upload, 'default_sku_id': str(self.sku.id), 'import_action': 'import'},
+            {'import_file': upload, 'import_action': 'import'},
             follow=True,
         )
         self.assertEqual(resp.status_code, 200)
@@ -3047,14 +3048,14 @@ class CoreViewsFlowTestCase(TestCase):
     def test_orders_import_preview_should_show_valid_and_error_rows(self):
         csv_content = (
             '客户昵称,手机号码,地址,款式,客订来源,租金,预收押金,预定时间,状态\n'
-            '预检查客户,13812340000,广东省深圳市南山区检查路1号,老表款式,微信,168,200,2026-03-20,已发货\n'
-            '坏数据客户,,地址缺手机号,老表款式,微信,168,200,2026-03-21,已发货\n'
+            f'预检查客户,13812340000,广东省深圳市南山区检查路1号,{self.sku.name},微信,168,200,2026-03-20,已发货\n'
+            f'坏数据客户,,地址缺手机号,{self.sku.name},微信,168,200,2026-03-21,已发货\n'
         )
         upload = SimpleUploadedFile('orders_preview.csv', csv_content.encode('utf-8-sig'), content_type='text/csv')
 
         resp = self.client.post(
             reverse('orders_import'),
-            {'import_file': upload, 'default_sku_id': str(self.sku.id), 'import_action': 'preview'},
+            {'import_file': upload, 'import_action': 'preview'},
             follow=True,
         )
         self.assertEqual(resp.status_code, 200)
@@ -3070,7 +3071,7 @@ class CoreViewsFlowTestCase(TestCase):
         workbook = Workbook()
         sheet = workbook.active
         sheet.append(['客户昵称', '手机号码', '地址', '款式', '客订来源', '租金', '预收押金', '预定时间', '状态'])
-        sheet.append(['Excel客户', '13900001111', '广东省深圳市南山区Excel路9号', '老表款式', '微信', 188, 300, '2026-03-26', '待发货'])
+        sheet.append(['Excel客户', '13900001111', '广东省深圳市南山区Excel路9号', self.sku.name, '微信', 188, 300, '2026-03-26', '待发货'])
         buffer = BytesIO()
         workbook.save(buffer)
         upload = SimpleUploadedFile(
@@ -3082,7 +3083,7 @@ class CoreViewsFlowTestCase(TestCase):
         before_count = Order.objects.count()
         resp = self.client.post(
             reverse('orders_import'),
-            {'import_file': upload, 'default_sku_id': str(self.sku.id), 'import_action': 'import'},
+            {'import_file': upload, 'import_action': 'import'},
             follow=True,
         )
 
@@ -3094,6 +3095,46 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertEqual(order.total_amount, Decimal('188.00'))
         self.assertEqual(order.deposit_paid, Decimal('300.00'))
         self.assertEqual(order.items.count(), 1)
+
+    def test_orders_import_should_reject_unknown_product_name(self):
+        csv_content = (
+            '客户昵称,手机号码,地址,款式,客订来源,租金,预收押金,预定时间,状态\n'
+            '未知产品客户,13812349999,广东省深圳市南山区未知路1号,系统里没有的产品,微信,168,200,2026-03-20,待发货\n'
+        )
+        upload = SimpleUploadedFile('orders_unknown_product.csv', csv_content.encode('utf-8-sig'), content_type='text/csv')
+
+        resp = self.client.post(
+            reverse('orders_import'),
+            {'import_file': upload, 'import_action': 'preview'},
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '产品管理中不存在名称为“系统里没有的产品”')
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_orders_import_should_auto_route_reservation_rows(self):
+        csv_content = (
+            '客户昵称,手机号码,地址,款式,客订来源,预收押金,预定时间,状态,订单类型,备注\n'
+            f'预定客户,13812347777,广东省深圳市南山区预定路8号,{self.sku.name},微信,88,2026-03-28,待补信息,预定单,历史预订单\n'
+        )
+        upload = SimpleUploadedFile('reservations.csv', csv_content.encode('utf-8-sig'), content_type='text/csv')
+
+        resp = self.client.post(
+            reverse('orders_import'),
+            {'import_file': upload, 'import_action': 'import'},
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(Order.objects.count(), 0)
+        self.assertEqual(Reservation.objects.count(), 1)
+        reservation = Reservation.objects.get(customer_name='预定客户')
+        self.assertEqual(reservation.status, 'pending_info')
+        self.assertEqual(reservation.deposit_amount, Decimal('88.00'))
+        self.assertEqual(reservation.sku_id, self.sku.id)
+        self.assertEqual(reservation.owner_id, self.user.id)
+        self.assertContains(resp, '预定单')
 
     def test_purchase_orders_nav_should_not_activate_orders_menu(self):
         resp = self.client.get(reverse('purchase_orders_list'))
@@ -3417,6 +3458,134 @@ class CoreViewsFlowTestCase(TestCase):
         self.assertContains(resp, '用户:audit_target')
         self.assertContains(resp, '编辑用户')
         self.assertContains(resp, 'role')
+
+    def test_wechat_customers_list_should_render_customers_and_backfill_tip(self):
+        WechatCustomer.objects.create(
+            openid='wx_customer_001',
+            nickname='微信客户A',
+            avatar_url='https://example.com/a.jpg',
+            phone='13812345678',
+            wechat_id='wechat_a',
+        )
+
+        resp = self.client.get(reverse('wechat_customers_list'))
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '微信客户档案')
+        self.assertContains(resp, '微信客户A')
+        self.assertContains(resp, '历史已登录用户补全方式')
+        self.assertContains(resp, '下次点击“微信授权登录”')
+
+    def test_wechat_customers_list_should_support_profile_filter(self):
+        WechatCustomer.objects.create(openid='wx_partial_001', nickname='半档案客户')
+        WechatCustomer.objects.create(
+            openid='wx_full_001',
+            nickname='完整客户',
+            avatar_url='https://example.com/full.jpg',
+            phone='13900001111',
+            wechat_id='wechat_full',
+        )
+
+        resp = self.client.get(reverse('wechat_customers_list'), {'profile_status': 'complete'})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '完整客户')
+        self.assertNotContains(resp, '半档案客户')
+
+    def test_wechat_customer_edit_should_update_fields(self):
+        customer = WechatCustomer.objects.create(
+            openid='wx_edit_001',
+            nickname='原昵称',
+            phone='13800000000',
+            wechat_id='old_wechat',
+        )
+
+        resp = self.client.post(
+            reverse('wechat_customer_edit', kwargs={'customer_id': customer.id}),
+            {
+                'nickname': '新昵称',
+                'avatar_url': 'https://example.com/new-avatar.jpg',
+                'phone': '13900000000',
+                'wechat_id': 'new_wechat',
+                'is_active': '1',
+            },
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        customer.refresh_from_db()
+        self.assertEqual(customer.nickname, '新昵称')
+        self.assertEqual(customer.avatar_url, 'https://example.com/new-avatar.jpg')
+        self.assertEqual(customer.phone, '13900000000')
+        self.assertEqual(customer.wechat_id, 'new_wechat')
+        self.assertContains(resp, '更新成功')
+
+    def test_wechat_customer_delete_should_remove_customer_and_binding(self):
+        customer = WechatCustomer.objects.create(openid='wx_delete_001', nickname='待删客户')
+        bound_user = User.objects.create_user(
+            username='wechat_bound_user',
+            password='test123',
+            role='customer_service',
+            is_staff=True,
+        )
+        WechatStaffBinding.objects.create(customer=customer, user=bound_user)
+
+        resp = self.client.post(
+            reverse('wechat_customer_delete', kwargs={'customer_id': customer.id}),
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(WechatCustomer.objects.filter(id=customer.id).exists())
+        self.assertFalse(WechatStaffBinding.objects.filter(user=bound_user).exists())
+        self.assertContains(resp, '解除员工账号')
+
+    def test_wechat_customers_bulk_deactivate_should_disable_selected_customers(self):
+        first = WechatCustomer.objects.create(openid='wx_bulk_disable_001', nickname='客户1', is_active=True)
+        second = WechatCustomer.objects.create(openid='wx_bulk_disable_002', nickname='客户2', is_active=True)
+
+        resp = self.client.post(
+            reverse('wechat_customers_bulk_deactivate'),
+            {'selected_ids': [str(first.id), str(second.id)]},
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertFalse(first.is_active)
+        self.assertFalse(second.is_active)
+        self.assertContains(resp, '已批量停用 2 个微信客户')
+
+    def test_wechat_customers_bulk_delete_should_remove_selected_customers(self):
+        first = WechatCustomer.objects.create(openid='wx_bulk_delete_001', nickname='删1')
+        second = WechatCustomer.objects.create(openid='wx_bulk_delete_002', nickname='删2')
+
+        resp = self.client.post(
+            reverse('wechat_customers_bulk_delete'),
+            {'selected_ids': [str(first.id), str(second.id)]},
+            follow=True,
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(WechatCustomer.objects.filter(id__in=[first.id, second.id]).exists())
+        self.assertContains(resp, '已批量删除 2 个微信客户')
+
+    def test_wechat_customers_export_should_return_selected_customers_csv(self):
+        first = WechatCustomer.objects.create(openid='wx_export_001', nickname='导出客户1', phone='13800000001', wechat_id='wx_a')
+        second = WechatCustomer.objects.create(openid='wx_export_002', nickname='导出客户2', phone='13800000002', wechat_id='wx_b')
+
+        resp = self.client.post(
+            reverse('wechat_customers_export'),
+            {'selected_ids': [str(first.id), str(second.id)]},
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('attachment; filename="wechat_customers.csv"', resp['Content-Disposition'])
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn('ID,昵称,头像地址,手机号,微信号,是否启用,员工绑定,OpenID,UnionID,最近访问', content)
+        self.assertIn('导出客户1', content)
+        self.assertIn('导出客户2', content)
 
     def test_customer_service_should_not_confirm_order_without_action_permission(self):
         cs = User.objects.create_user(
@@ -8467,6 +8636,40 @@ class MiniProgramAPITestCase(TestCase):
     def _auth_header(self):
         return {'HTTP_AUTHORIZATION': f'Bearer {self.token}'}
 
+    @patch('apps.api.mp_views.code_to_session')
+    def test_mp_login_should_store_profile_fields(self, mock_code_to_session):
+        mock_code_to_session.return_value = {
+            'openid': 'wx_login_profile_001',
+            'unionid': 'union_profile_001',
+        }
+        resp = self.client.post('/api/mp/login/', data=json.dumps({
+            'code': 'mock-code',
+            'nickname': '小程序昵称',
+            'avatar_url': 'https://example.com/avatar.jpg',
+        }), content_type='application/json')
+        self.assertEqual(resp.status_code, 200)
+        customer = WechatCustomer.objects.get(openid='wx_login_profile_001')
+        self.assertEqual(customer.nickname, '小程序昵称')
+        self.assertEqual(customer.avatar_url, 'https://example.com/avatar.jpg')
+        self.assertEqual(customer.unionid, 'union_profile_001')
+        payload = resp.json()
+        self.assertEqual(payload['customer']['nickname'], '小程序昵称')
+        self.assertEqual(payload['customer']['avatar_url'], 'https://example.com/avatar.jpg')
+
+    @patch('apps.api.mp_views.get_phone_number_by_code')
+    def test_mp_sync_phone_should_update_customer_phone(self, mock_get_phone_number_by_code):
+        mock_get_phone_number_by_code.return_value = {
+            'phone_number': '13911112222',
+            'country_code': '86',
+        }
+        resp = self.client.post('/api/mp/phone/', data=json.dumps({
+            'phone_code': 'phone-code-001',
+        }), content_type='application/json', **self._auth_header())
+        self.assertEqual(resp.status_code, 200)
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.phone, '13911112222')
+        self.assertEqual(resp.json()['phone'], '13911112222')
+
     # --- 产品列表 ---
     def test_sku_list_only_visible(self):
         """只返回 mp_visible=True 的产品"""
@@ -8577,6 +8780,23 @@ class MiniProgramAPITestCase(TestCase):
         self.assertEqual(r.wechat_customer, self.customer)
         self.assertEqual(r.customer_wechat, 'test_wx_user')
         self.assertEqual(r.sku, self.sku_visible)
+
+    def test_create_reservation_should_sync_customer_contact_profile(self):
+        self.customer.phone = ''
+        self.customer.wechat_id = ''
+        self.customer.save(update_fields=['phone', 'wechat_id'])
+        resp = self.client.post('/api/mp/reservations/', data=json.dumps({
+            'sku_id': self.sku_visible.id,
+            'event_date': str(date.today() + timedelta(days=30)),
+            'customer_wechat': 'wx_profile_sync',
+            'customer_name': '李四',
+            'customer_phone': '13912345678',
+            'city': '深圳',
+        }), content_type='application/json', **self._auth_header())
+        self.assertEqual(resp.status_code, 201)
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.phone, '13912345678')
+        self.assertEqual(self.customer.wechat_id, 'wx_profile_sync')
 
     def test_create_reservation_requires_login(self):
         """未登录不能提交"""

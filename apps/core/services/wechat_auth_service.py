@@ -8,8 +8,10 @@ import hmac
 import json
 import time
 import urllib.request
+from urllib.error import HTTPError
 
 from django.conf import settings
+from django.core.cache import cache
 
 
 def code_to_session(code):
@@ -42,6 +44,40 @@ def code_to_session(code):
         'openid': data['openid'],
         'session_key': data.get('session_key', ''),
         'unionid': data.get('unionid', ''),
+    }
+
+
+def get_phone_number_by_code(phone_code):
+    """调用微信手机号接口，将前端 getPhoneNumber 返回的 code 换成手机号。"""
+    if not phone_code:
+        raise ValueError('手机号授权码不能为空')
+
+    access_token = _get_access_token()
+    payload = json.dumps({'code': phone_code}).encode('utf-8')
+    request = urllib.request.Request(
+        url=f'https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token={access_token}',
+        data=payload,
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except HTTPError as exc:
+        raise ValueError(f'调用微信手机号接口失败: HTTP {exc.code}') from exc
+    except Exception as exc:
+        raise ValueError(f'调用微信手机号接口失败: {exc}') from exc
+
+    if data.get('errcode') not in [None, 0]:
+        raise ValueError(f"微信手机号获取失败: {data.get('errmsg', '未知错误')}")
+
+    phone_info = data.get('phone_info') or {}
+    pure_phone = phone_info.get('purePhoneNumber') or phone_info.get('phoneNumber') or ''
+    if not pure_phone:
+        raise ValueError('微信未返回手机号')
+    return {
+        'phone_number': pure_phone,
+        'country_code': phone_info.get('countryCode', ''),
     }
 
 
@@ -99,3 +135,35 @@ def _get_config(env_key, settings_key):
         return get_system_settings().get(settings_key, '')
     except Exception:
         return ''
+
+
+def _get_access_token():
+    cache_key = 'wechat_mp_access_token'
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    appid = _get_config('MP_APPID', 'mp_appid')
+    secret = _get_config('MP_SECRET', 'mp_secret')
+    if not appid or not secret:
+        raise ValueError('微信小程序 AppID/Secret 未配置')
+
+    url = (
+        'https://api.weixin.qq.com/cgi-bin/token'
+        f'?grant_type=client_credential&appid={appid}&secret={secret}'
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except Exception as exc:
+        raise ValueError(f'获取微信 access_token 失败: {exc}') from exc
+
+    if data.get('errcode') not in [None, 0]:
+        raise ValueError(f"获取微信 access_token 失败: {data.get('errmsg', '未知错误')}")
+
+    access_token = data.get('access_token', '')
+    expires_in = int(data.get('expires_in') or 7200)
+    if not access_token:
+        raise ValueError('微信 access_token 获取失败')
+    cache.set(cache_key, access_token, max(60, expires_in - 300))
+    return access_token

@@ -225,6 +225,11 @@ zhousuiyan-system/
 - `start.bat`
 - `start.ps1`
 
+注意：
+
+- `start.ps1` 现在默认不会自动执行 `scripts/init_data.py`
+- 如确需初始化演示数据，需显式传 `-InitDemoData`
+
 常用命令：
 
 ```powershell

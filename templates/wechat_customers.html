@@ -1,0 +1,419 @@
+{% extends "base.html" %}
+
+{% block title %}微信客户档案 - 宝宝周岁宴道具租赁系统{% endblock %}
+{% block page_title %}微信客户档案{% endblock %}
+
+{% block content %}
+<style>
+.wechat-actions {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.wechat-action-btn {
+    min-width: 168px;
+    height: 42px;
+    padding: 0 18px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+    transition: transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
+}
+
+.wechat-action-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 14px 28px rgba(15, 23, 42, 0.12);
+}
+
+.wechat-action-btn:active {
+    transform: translateY(0);
+}
+
+.wechat-action-btn-danger {
+    background: linear-gradient(135deg, #ff7a7a 0%, #ea4d66 100%);
+    color: #fff;
+}
+
+.wechat-action-btn-warning {
+    background: linear-gradient(135deg, #ffcf66 0%, #ff9f1a 100%);
+    color: #6a3d00;
+}
+
+.wechat-action-btn-success {
+    background: linear-gradient(135deg, #4fd1a1 0%, #179c73 100%);
+    color: #fff;
+}
+
+.wechat-row-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.wechat-row-actions .btn {
+    min-width: 72px;
+    font-weight: 600;
+}
+</style>
+<div class="page-header">
+    <div class="page-title-group">
+        <p>查看微信小程序授权登录客户、资料完整度和员工绑定情况。历史已登录用户不需要手工删号重来，后续会按登录/授权/下单动作自动补齐。</p>
+    </div>
+    <div class="d-flex gap-2">
+        <a class="btn btn-secondary" href="{% url 'users_list' %}">返回用户管理</a>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-md-3">
+        <div class="stat-card">
+            <div class="stat-label">微信客户总数</div>
+            <div class="stat-value">{{ summary.total_count }}</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card">
+            <div class="stat-label">已保存昵称</div>
+            <div class="stat-value">{{ summary.with_nickname_count }}</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card">
+            <div class="stat-label">已保存手机号</div>
+            <div class="stat-value">{{ summary.with_phone_count }}</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="stat-card">
+            <div class="stat-label">已绑定员工账号</div>
+            <div class="stat-value">{{ summary.staff_bound_count }}</div>
+        </div>
+    </div>
+</div>
+
+<div class="card mb-3">
+    <form method="get" class="row g-3 align-items-end">
+        <div class="col-md-4">
+            <label class="form-label">关键词</label>
+            <input type="text" class="form-control" name="keyword" value="{{ keyword }}" placeholder="昵称 / 手机号 / 微信号 / OpenID">
+        </div>
+        <div class="col-md-3">
+            <label class="form-label">资料完整度</label>
+            <select class="form-select" name="profile_status">
+                <option value="">全部</option>
+                <option value="complete" {% if profile_status == 'complete' %}selected{% endif %}>已完整</option>
+                <option value="partial" {% if profile_status == 'partial' %}selected{% endif %}>待补全</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label">员工绑定</label>
+            <select class="form-select" name="bind_status">
+                <option value="">全部</option>
+                <option value="bound" {% if bind_status == 'bound' %}selected{% endif %}>已绑定</option>
+                <option value="unbound" {% if bind_status == 'unbound' %}selected{% endif %}>未绑定</option>
+            </select>
+        </div>
+        <div class="col-md-2 d-flex gap-2">
+            <button class="btn btn-primary w-100" type="submit">查询</button>
+            <a class="btn btn-secondary w-100" href="{% url 'wechat_customers_list' %}">重置</a>
+        </div>
+    </form>
+</div>
+
+<div class="card mb-3">
+    <h4 class="card-title">历史已登录用户补全方式</h4>
+    <div class="cell-sub">
+        <div>1. 下次点击“微信授权登录”时，会自动补齐昵称、头像。</div>
+        <div>2. 下次在小程序下单时，填写或一键授权手机号后，会自动补齐手机号。</div>
+        <div>3. 下次提交意向订单时，如果填写了微信号，也会自动补齐微信号字段。</div>
+        <div>4. 不需要删除旧客户记录重来，系统会在原有 `WechatCustomer` 档案上持续补全。</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-body border-bottom">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div class="text-muted small">已选择 <strong id="selectedWechatCustomersCount" class="text-primary fs-6">0</strong> 个微信客户</div>
+            <div class="wechat-actions">
+                <button class="wechat-action-btn wechat-action-btn-danger" type="button" onclick="bulkDeleteWechatCustomers()">批量删除空档案</button>
+                <button class="wechat-action-btn wechat-action-btn-warning" type="button" onclick="bulkDeactivateWechatCustomers()">批量停用无效微信客户</button>
+                <button class="wechat-action-btn wechat-action-btn-success" type="button" onclick="bulkExportWechatCustomers()">批量导出微信客户资料</button>
+            </div>
+        </div>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead>
+                <tr>
+                    <th style="width: 44px;"><input class="form-check-input" type="checkbox" id="selectAllWechatCustomers"></th>
+                    <th>ID</th>
+                    <th>昵称/头像</th>
+                    <th>手机号</th>
+                    <th>微信号</th>
+                    <th>资料完整度</th>
+                    <th>员工绑定</th>
+                    <th>OpenID</th>
+                    <th>最近访问</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for customer in customers %}
+                <tr>
+                    <td><input class="form-check-input wechat-customer-checkbox" type="checkbox" value="{{ customer.id }}"></td>
+                    <td>{{ customer.id }}</td>
+                    <td>
+                        <div class="d-flex align-items-center gap-2">
+                            {% if customer.avatar_url %}
+                            <img src="{{ customer.avatar_url }}" alt="{{ customer.nickname|default:'头像' }}" style="width:40px;height:40px;border-radius:999px;object-fit:cover;">
+                            {% else %}
+                            <div class="rounded-circle d-flex align-items-center justify-content-center bg-light text-muted" style="width:40px;height:40px;">微</div>
+                            {% endif %}
+                            <div>
+                                <div class="fw-semibold">{{ customer.nickname|default:'未授权昵称' }}</div>
+                                <div class="cell-sub">{{ customer.unionid|default:'无 UnionID' }}</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td>{{ customer.phone|default:'-' }}</td>
+                    <td>{{ customer.wechat_id|default:'-' }}</td>
+                    <td><span class="badge text-bg-{{ customer.profile_completion_class }}">{{ customer.profile_completion_label }}</span></td>
+                    <td>
+                        {% if customer.staff_binding %}
+                        <span class="badge text-bg-success">{{ customer.staff_binding.user.full_name|default:customer.staff_binding.user.username }}</span>
+                        {% else %}
+                        <span class="badge text-bg-secondary">未绑定</span>
+                        {% endif %}
+                    </td>
+                    <td><code>{{ customer.openid }}</code></td>
+                    <td>{{ customer.updated_at|date:"Y-m-d H:i" }}</td>
+                    <td>
+                        <div class="wechat-row-actions">
+                            <button
+                                type="button"
+                                class="btn btn-sm btn-outline-primary"
+                                onclick="openWechatCustomerEdit(this)"
+                                data-id="{{ customer.id }}"
+                                data-nickname="{{ customer.nickname }}"
+                                data-avatar-url="{{ customer.avatar_url }}"
+                                data-phone="{{ customer.phone }}"
+                                data-wechat-id="{{ customer.wechat_id }}"
+                                data-is-active="{% if customer.is_active %}1{% else %}0{% endif %}"
+                                data-binding-user="{% if customer.staff_binding %}{{ customer.staff_binding.user.full_name|default:customer.staff_binding.user.username }}{% endif %}"
+                            >
+                                编辑
+                            </button>
+                            <button
+                                type="button"
+                                class="btn btn-sm btn-outline-danger"
+                                onclick="deleteWechatCustomer(this)"
+                                data-id="{{ customer.id }}"
+                                data-nickname="{{ customer.nickname|default:'未授权昵称' }}"
+                                data-binding-user="{% if customer.staff_binding %}{{ customer.staff_binding.user.full_name|default:customer.staff_binding.user.username }}{% endif %}"
+                            >
+                                删除
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="10" class="text-center py-5 text-muted">暂无微信客户数据</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if customers.has_other_pages %}
+    <div class="card-footer bg-white border-0 pt-3">
+        <nav>
+            <ul class="pagination mb-0">
+                {% if customers.has_previous %}
+                <li class="page-item"><a class="page-link" href="?{{ pagination_query }}{% if pagination_query %}&{% endif %}page={{ customers.previous_page_number }}">上一页</a></li>
+                {% else %}
+                <li class="page-item disabled"><span class="page-link">上一页</span></li>
+                {% endif %}
+                <li class="page-item disabled"><span class="page-link">第 {{ customers.number }} / {{ customers.paginator.num_pages }} 页</span></li>
+                {% if customers.has_next %}
+                <li class="page-item"><a class="page-link" href="?{{ pagination_query }}{% if pagination_query %}&{% endif %}page={{ customers.next_page_number }}">下一页</a></li>
+                {% else %}
+                <li class="page-item disabled"><span class="page-link">下一页</span></li>
+                {% endif %}
+            </ul>
+        </nav>
+    </div>
+    {% endif %}
+</div>
+
+<div class="modal fade" id="wechatCustomerModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <form id="wechatCustomerForm" method="post">
+                {% csrf_token %}
+                <div class="modal-header">
+                    <h5 class="modal-title">编辑微信客户</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">昵称</label>
+                        <input class="form-control" type="text" name="nickname">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">头像地址</label>
+                        <input class="form-control" type="url" name="avatar_url">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">手机号</label>
+                        <input class="form-control" type="text" name="phone" maxlength="20">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">微信号</label>
+                        <input class="form-control" type="text" name="wechat_id" maxlength="100">
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" role="switch" id="wechatCustomerIsActive" name="is_active" value="1">
+                        <label class="form-check-label" for="wechatCustomerIsActive">启用该微信客户档案</label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+let wechatCustomerModalInstance = null;
+function getWechatCustomerModal() {
+    if (!wechatCustomerModalInstance) {
+        wechatCustomerModalInstance = new bootstrap.Modal(document.getElementById('wechatCustomerModal'));
+    }
+    return wechatCustomerModalInstance;
+}
+
+function openWechatCustomerEdit(button) {
+    const form = document.getElementById('wechatCustomerForm');
+    form.action = `/users/wechat-customers/${button.getAttribute('data-id')}/edit/`;
+    form.querySelector('input[name="nickname"]').value = button.getAttribute('data-nickname') || '';
+    form.querySelector('input[name="avatar_url"]').value = button.getAttribute('data-avatar-url') || '';
+    form.querySelector('input[name="phone"]').value = button.getAttribute('data-phone') || '';
+    form.querySelector('input[name="wechat_id"]').value = button.getAttribute('data-wechat-id') || '';
+    form.querySelector('input[name="is_active"]').checked = (button.getAttribute('data-is-active') || '') === '1';
+    getWechatCustomerModal().show();
+}
+
+function deleteWechatCustomer(button) {
+    const customerId = button.getAttribute('data-id');
+    const nickname = button.getAttribute('data-nickname') || '未授权昵称';
+    const bindingUser = button.getAttribute('data-binding-user') || '';
+    const extra = bindingUser ? `\n该客户当前绑定员工账号：${bindingUser}，删除后会一并解除绑定。` : '';
+    const run = async () => {
+        const ok = window.AppUI
+            ? await window.AppUI.confirm(`确定删除微信客户“${nickname}”吗？${extra}`, '删除微信客户')
+            : confirm(`确定删除微信客户“${nickname}”吗？${extra}`);
+        if (!ok) return;
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = `/users/wechat-customers/${customerId}/delete/`;
+        const csrf = document.createElement('input');
+        csrf.type = 'hidden';
+        csrf.name = 'csrfmiddlewaretoken';
+        csrf.value = '{{ csrf_token }}';
+        form.appendChild(csrf);
+        document.body.appendChild(form);
+        form.submit();
+    };
+    run();
+}
+
+function getSelectedWechatCustomers() {
+    return Array.from(document.querySelectorAll('.wechat-customer-checkbox:checked')).map(el => el.value);
+}
+
+function updateWechatCustomerSelectionCount() {
+    const node = document.getElementById('selectedWechatCustomersCount');
+    if (node) node.textContent = String(getSelectedWechatCustomers().length);
+}
+
+function submitWechatCustomerBulkAction(actionUrl) {
+    const selected = getSelectedWechatCustomers();
+    if (!selected.length) {
+        if (window.AppUI) {
+            window.AppUI.alert('请先选择微信客户', '批量操作');
+        } else {
+            alert('请先选择微信客户');
+        }
+        return;
+    }
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = actionUrl;
+    const csrf = document.createElement('input');
+    csrf.type = 'hidden';
+    csrf.name = 'csrfmiddlewaretoken';
+    csrf.value = '{{ csrf_token }}';
+    form.appendChild(csrf);
+    selected.forEach(id => {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'selected_ids';
+        input.value = id;
+        form.appendChild(input);
+    });
+    document.body.appendChild(form);
+    form.submit();
+}
+
+function bulkDeleteWechatCustomers() {
+    const run = async () => {
+        const selected = getSelectedWechatCustomers();
+        if (!selected.length) return submitWechatCustomerBulkAction('{% url "wechat_customers_bulk_delete" %}');
+        const ok = window.AppUI
+            ? await window.AppUI.confirm(`确定批量删除这 ${selected.length} 个微信客户吗？`, '批量删除微信客户')
+            : confirm(`确定批量删除这 ${selected.length} 个微信客户吗？`);
+        if (!ok) return;
+        submitWechatCustomerBulkAction('{% url "wechat_customers_bulk_delete" %}');
+    };
+    run();
+}
+
+function bulkDeactivateWechatCustomers() {
+    const run = async () => {
+        const selected = getSelectedWechatCustomers();
+        if (!selected.length) return submitWechatCustomerBulkAction('{% url "wechat_customers_bulk_deactivate" %}');
+        const ok = window.AppUI
+            ? await window.AppUI.confirm(`确定批量停用这 ${selected.length} 个微信客户吗？`, '批量停用微信客户')
+            : confirm(`确定批量停用这 ${selected.length} 个微信客户吗？`);
+        if (!ok) return;
+        submitWechatCustomerBulkAction('{% url "wechat_customers_bulk_deactivate" %}');
+    };
+    run();
+}
+
+function bulkExportWechatCustomers() {
+    submitWechatCustomerBulkAction('{% url "wechat_customers_export" %}');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const selectAll = document.getElementById('selectAllWechatCustomers');
+    const checkboxes = Array.from(document.querySelectorAll('.wechat-customer-checkbox'));
+    selectAll?.addEventListener('change', () => {
+        checkboxes.forEach(box => { box.checked = selectAll.checked; });
+        updateWechatCustomerSelectionCount();
+    });
+    checkboxes.forEach(box => box.addEventListener('change', updateWechatCustomerSelectionCount));
+    updateWechatCustomerSelectionCount();
+});
+</script>
+{% endblock %}

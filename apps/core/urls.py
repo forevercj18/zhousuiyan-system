@@ -121,6 +121,12 @@ urlpatterns = [
 
     # 用户管理
     path('users/', views.users_list, name='users_list'),
+    path('users/wechat-customers/', views.wechat_customers_list, name='wechat_customers_list'),
+    path('users/wechat-customers/<int:customer_id>/edit/', views.wechat_customer_edit, name='wechat_customer_edit'),
+    path('users/wechat-customers/<int:customer_id>/delete/', views.wechat_customer_delete, name='wechat_customer_delete'),
+    path('users/wechat-customers/bulk-delete/', views.wechat_customers_bulk_delete, name='wechat_customers_bulk_delete'),
+    path('users/wechat-customers/bulk-deactivate/', views.wechat_customers_bulk_deactivate, name='wechat_customers_bulk_deactivate'),
+    path('users/wechat-customers/export/', views.wechat_customers_export, name='wechat_customers_export'),
     path('users/create/', views.user_create, name='user_create'),
     path('users/<int:user_id>/edit/', views.user_edit, name='user_edit'),
     path('users/<int:user_id>/toggle-status/', views.user_toggle_status, name='user_toggle_status'),

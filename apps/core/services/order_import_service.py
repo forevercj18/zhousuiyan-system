@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation
 from dateutil import parser as date_parser
 from django.db import transaction
 
-from ..models import Order, OrderItem, SKU
+from ..models import FinanceTransaction, Order, OrderItem, Reservation, SKU
 
 
 class OrderImportService:
@@ -51,6 +51,7 @@ class OrderImportService:
         'xianyu_order_no': ['闲鱼订单号'],
         'quantity': ['数量', '套数'],
         'return_tracking': ['回寄单号', '回收单号'],
+        'record_type': ['订单类型', '单据类型', '记录类型', '类型'],
     }
 
     SOURCE_MAP = {
@@ -67,7 +68,7 @@ class OrderImportService:
         'other': 'other',
     }
 
-    STATUS_MAP = {
+    ORDER_STATUS_MAP = {
         '待处理': 'pending',
         '待发货': 'confirmed',
         '已发货': 'delivered',
@@ -84,7 +85,34 @@ class OrderImportService:
         'cancelled': 'cancelled',
     }
 
+    RESERVATION_STATUS_MAP = {
+        '待补信息': 'pending_info',
+        '待确认': 'pending_info',
+        '待跟进': 'pending_info',
+        '待联系': 'pending_info',
+        '可转正式订单': 'ready_to_convert',
+        '可转单': 'ready_to_convert',
+        '待转单': 'ready_to_convert',
+        '可下正式单': 'ready_to_convert',
+        '已转订单': 'converted',
+        '已转单': 'converted',
+        'converted': 'converted',
+        '已取消': 'cancelled',
+        '取消预定': 'cancelled',
+        'reservation_cancelled': 'cancelled',
+        '已退款': 'refunded',
+        '已退订金': 'refunded',
+        'refunded': 'refunded',
+        'pending_info': 'pending_info',
+        'ready_to_convert': 'ready_to_convert',
+        'cancelled': 'cancelled',
+    }
+
     NOTE_FIELDS = ['rental_channel', 'deposit_channel', 'operator', 'operation_time']
+
+    @staticmethod
+    def _normalize_text(value):
+        return str(value or '').strip()
 
     @staticmethod
     def _decode_bytes(content):
@@ -177,30 +205,28 @@ class OrderImportService:
             raise ValueError(f'{field_label}格式不正确：{value}') from exc
 
     @staticmethod
-    def _resolve_sku(style_value, default_sku):
-        style = (style_value or '').strip()
+    def _resolve_sku(style_value):
+        style = OrderImportService._normalize_text(style_value)
         if not style:
-            if default_sku:
-                return default_sku
-            raise ValueError('缺少款式/SKU 信息')
+            raise ValueError('缺少产品名称')
 
-        exact = SKU.objects.filter(is_active=True).filter(code__iexact=style).first()
-        if exact:
-            return exact
         exact = SKU.objects.filter(is_active=True).filter(name__iexact=style).first()
         if exact:
             return exact
-        exact = SKU.objects.filter(is_active=True).filter(category__iexact=style).order_by('id').first()
-        if exact:
-            return exact
+        raise ValueError(f'产品管理中不存在名称为“{style}”的产品')
 
-        contains = list(SKU.objects.filter(is_active=True, name__icontains=style)[:2])
-        if len(contains) == 1:
-            return contains[0]
+    @staticmethod
+    def _resolve_record_type(row, header_map):
+        record_type = OrderImportService._normalize_text(OrderImportService._get_value(row, header_map, 'record_type')).lower()
+        if record_type in {'预定单', '预订单', '预定', '预约', '意向单', 'reservation'}:
+            return 'reservation'
+        if record_type in {'订单', '正式订单', 'order'}:
+            return 'order'
 
-        if default_sku:
-            return default_sku
-        raise ValueError(f'未找到匹配 SKU：{style}')
+        status_raw = OrderImportService._normalize_text(OrderImportService._get_value(row, header_map, 'status'))
+        if status_raw in OrderImportService.RESERVATION_STATUS_MAP:
+            return 'reservation'
+        return 'order'
 
     @staticmethod
     def _build_notes(row, header_map):
@@ -229,11 +255,9 @@ class OrderImportService:
         return '\n'.join(notes)
 
     @staticmethod
-    def _normalize_row(row, header_map, default_sku):
-        sku = OrderImportService._resolve_sku(
-            OrderImportService._get_value(row, header_map, 'style'),
-            default_sku,
-        )
+    def _normalize_row(row, header_map):
+        record_type = OrderImportService._resolve_record_type(row, header_map)
+        sku = OrderImportService._resolve_sku(OrderImportService._get_value(row, header_map, 'style'))
         customer_name = OrderImportService._get_value(row, header_map, 'customer_name')
         customer_phone = OrderImportService._get_value(row, header_map, 'customer_phone')
         delivery_address = OrderImportService._get_value(row, header_map, 'delivery_address')
@@ -266,15 +290,24 @@ class OrderImportService:
         source_raw = OrderImportService._get_value(row, header_map, 'order_source')
         order_source = OrderImportService.SOURCE_MAP.get(source_raw, 'wechat')
         status_raw = OrderImportService._get_value(row, header_map, 'status')
-        status = OrderImportService.STATUS_MAP.get(status_raw, 'pending')
         notes = OrderImportService._build_notes(row, header_map)
         total_amount = rental_amount * quantity
-        balance = Decimal('0.00') if status in ['delivered', 'in_use', 'returned', 'completed'] else total_amount
+        customer_wechat = OrderImportService._get_value(row, header_map, 'customer_wechat')
+        if not customer_wechat and record_type == 'reservation':
+            customer_wechat = customer_phone
+
+        if record_type == 'reservation':
+            status = OrderImportService.RESERVATION_STATUS_MAP.get(status_raw, 'pending_info')
+            balance = Decimal('0.00')
+        else:
+            status = OrderImportService.ORDER_STATUS_MAP.get(status_raw, 'pending')
+            balance = Decimal('0.00') if status in ['delivered', 'in_use', 'returned', 'completed'] else total_amount
 
         return {
+            'record_type': record_type,
             'customer_name': customer_name,
             'customer_phone': customer_phone,
-            'customer_wechat': OrderImportService._get_value(row, header_map, 'customer_wechat'),
+            'customer_wechat': customer_wechat,
             'xianyu_order_no': OrderImportService._get_value(row, header_map, 'xianyu_order_no'),
             'order_source': order_source,
             'source_order_no': OrderImportService._get_value(row, header_map, 'source_order_no'),
@@ -294,18 +327,18 @@ class OrderImportService:
             'quantity': quantity,
             'rental_price': rental_amount,
             'deposit_per_item': deposit_paid if quantity == 1 else (deposit_paid / quantity if deposit_paid else Decimal('0.00')),
+            'deposit_amount': deposit_paid,
+            'city': '',
         }
 
     @staticmethod
     def preview_file(uploaded_file, default_sku_id=None, preview_limit=20):
         rows, headers = OrderImportService._load_rows(uploaded_file)
         header_map = OrderImportService._normalize_header_map(headers)
-        required_keys = ['customer_name', 'customer_phone', 'delivery_address', 'event_date']
+        required_keys = ['customer_name', 'customer_phone', 'delivery_address', 'style', 'event_date']
         missing = [OrderImportService.HEADER_ALIASES[key][0] for key in required_keys if key not in header_map]
         if missing:
             raise ValueError(f'导入文件缺少必要列：{"、".join(missing)}')
-
-        default_sku = SKU.objects.filter(id=default_sku_id, is_active=True).first() if default_sku_id else None
         preview_rows = []
         errors = []
         valid_count = 0
@@ -314,16 +347,21 @@ class OrderImportService:
             if not any(str(value or '').strip() for value in row.values()):
                 continue
             try:
-                normalized = OrderImportService._normalize_row(row, header_map, default_sku)
+                normalized = OrderImportService._normalize_row(row, header_map)
                 valid_count += 1
                 if len(preview_rows) < preview_limit:
                     preview_rows.append({
                         'row_no': index,
+                        'record_type_label': '预定单' if normalized['record_type'] == 'reservation' else '正式订单',
                         'customer_name': normalized['customer_name'],
                         'customer_phone': normalized['customer_phone'],
                         'sku_name': normalized['sku'].name,
                         'event_date': str(normalized['event_date']),
-                        'status_label': dict(Order.STATUS_CHOICES).get(normalized['status'], normalized['status']),
+                        'status_label': (
+                            dict(Reservation.STATUS_CHOICES).get(normalized['status'], normalized['status'])
+                            if normalized['record_type'] == 'reservation'
+                            else dict(Order.STATUS_CHOICES).get(normalized['status'], normalized['status'])
+                        ),
                         'total_amount': normalized['total_amount'],
                     })
             except Exception as exc:
@@ -347,50 +385,75 @@ class OrderImportService:
     def import_file(uploaded_file, user, default_sku_id=None):
         rows, headers = OrderImportService._load_rows(uploaded_file)
         header_map = OrderImportService._normalize_header_map(headers)
-        required_keys = ['customer_name', 'customer_phone', 'delivery_address', 'event_date']
+        required_keys = ['customer_name', 'customer_phone', 'delivery_address', 'style', 'event_date']
         missing = [OrderImportService.HEADER_ALIASES[key][0] for key in required_keys if key not in header_map]
         if missing:
             raise ValueError(f'导入文件缺少必要列：{"、".join(missing)}')
-
-        default_sku = SKU.objects.filter(id=default_sku_id, is_active=True).first() if default_sku_id else None
         created_orders = []
+        created_reservations = []
         errors = []
 
         for index, row in enumerate(rows, start=2):
             if not any(str(value or '').strip() for value in row.values()):
                 continue
             try:
-                normalized = OrderImportService._normalize_row(row, header_map, default_sku)
-                order = Order.objects.create(
-                    customer_name=normalized['customer_name'],
-                    customer_phone=normalized['customer_phone'],
-                    customer_wechat=normalized['customer_wechat'],
-                    xianyu_order_no=normalized['xianyu_order_no'],
-                    order_source=normalized['order_source'],
-                    source_order_no=normalized['source_order_no'],
-                    delivery_address=normalized['delivery_address'],
-                    return_address=normalized['return_address'],
-                    event_date=normalized['event_date'],
-                    rental_days=normalized['rental_days'],
-                    ship_date=normalized['ship_date'],
-                    ship_tracking=normalized['ship_tracking'],
-                    return_tracking=normalized['return_tracking'],
-                    total_amount=normalized['total_amount'],
-                    deposit_paid=normalized['deposit_paid'],
-                    balance=normalized['balance'],
-                    status=normalized['status'],
-                    notes=normalized['notes'],
-                    created_by=user,
-                )
-                OrderItem.objects.create(
-                    order=order,
-                    sku=normalized['sku'],
-                    quantity=normalized['quantity'],
-                    rental_price=normalized['rental_price'],
-                    deposit=normalized['deposit_per_item'],
-                    subtotal=normalized['total_amount'],
-                )
-                created_orders.append(order)
+                normalized = OrderImportService._normalize_row(row, header_map)
+                if normalized['record_type'] == 'reservation':
+                    reservation = Reservation.objects.create(
+                        customer_wechat=normalized['customer_wechat'],
+                        customer_name=normalized['customer_name'],
+                        customer_phone=normalized['customer_phone'],
+                        city=normalized['city'],
+                        delivery_address=normalized['delivery_address'],
+                        sku=normalized['sku'],
+                        quantity=normalized['quantity'],
+                        event_date=normalized['event_date'],
+                        deposit_amount=normalized['deposit_amount'],
+                        status=normalized['status'],
+                        notes=normalized['notes'],
+                        created_by=user,
+                        owner=user,
+                    )
+                    if normalized['deposit_amount'] > Decimal('0.00'):
+                        FinanceTransaction.objects.create(
+                            reservation=reservation,
+                            transaction_type='reservation_deposit_received',
+                            amount=normalized['deposit_amount'],
+                            notes='导入预定单收取订金',
+                            created_by=user,
+                        )
+                    created_reservations.append(reservation)
+                else:
+                    order = Order.objects.create(
+                        customer_name=normalized['customer_name'],
+                        customer_phone=normalized['customer_phone'],
+                        customer_wechat=normalized['customer_wechat'],
+                        xianyu_order_no=normalized['xianyu_order_no'],
+                        order_source=normalized['order_source'],
+                        source_order_no=normalized['source_order_no'],
+                        delivery_address=normalized['delivery_address'],
+                        return_address=normalized['return_address'],
+                        event_date=normalized['event_date'],
+                        rental_days=normalized['rental_days'],
+                        ship_date=normalized['ship_date'],
+                        ship_tracking=normalized['ship_tracking'],
+                        return_tracking=normalized['return_tracking'],
+                        total_amount=normalized['total_amount'],
+                        deposit_paid=normalized['deposit_paid'],
+                        balance=normalized['balance'],
+                        status=normalized['status'],
+                        notes=normalized['notes'],
+                        created_by=user,
+                    )
+                    OrderItem.objects.create(
+                        order=order,
+                        sku=normalized['sku'],
+                        quantity=normalized['quantity'],
+                        rental_price=normalized['rental_price'],
+                        deposit=normalized['deposit_per_item'],
+                        subtotal=normalized['total_amount'],
+                    )
+                    created_orders.append(order)
             except Exception as exc:
                 row_hint = ' / '.join([
                     str(row.get(header_map.get('customer_name', ''), '') or '').strip(),
@@ -400,7 +463,10 @@ class OrderImportService:
 
         return {
             'created_orders': created_orders,
+            'created_reservations': created_reservations,
             'errors': errors,
-            'created_count': len(created_orders),
+            'created_count': len(created_orders) + len(created_reservations),
+            'created_order_count': len(created_orders),
+            'created_reservation_count': len(created_reservations),
             'error_count': len(errors),
         }

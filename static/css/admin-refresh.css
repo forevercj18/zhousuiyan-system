@@ -60,10 +60,17 @@ body.app-authenticated::before {
 }
 
 .layout,
-.modal,
 .toast-container {
     position: relative;
     z-index: 1;
+}
+
+.modal {
+    z-index: 1060;
+}
+
+.modal-backdrop {
+    z-index: 1050;
 }
 
 .layout {

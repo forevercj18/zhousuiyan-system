@@ -108,6 +108,14 @@ python manage.py runserver
 .\start.bat
 ```
 
+默认只做依赖安装、迁移和启动服务，不再自动初始化演示数据。
+
+如需显式初始化演示数据：
+
+```powershell
+.\start.bat -InitDemoData
+```
+
 可仅做环境准备不启动服务：
 
 ```powershell

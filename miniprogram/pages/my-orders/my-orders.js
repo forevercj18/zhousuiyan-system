@@ -53,11 +53,14 @@ Page({
 
   /** 登录 */
   doLogin() {
-    api.login().then(() => {
-      this.loadOrders();
-    }).catch(err => {
-      wx.showToast({ title: err.error || '登录失败', icon: 'none' });
-    });
+    api.getUserProfile()
+      .catch(() => null)
+      .then(profile => api.login(profile))
+      .then(() => {
+        this.loadOrders();
+      }).catch(err => {
+        wx.showToast({ title: err.error || '登录失败', icon: 'none' });
+      });
   },
 
   /** 跳转订单详情 */

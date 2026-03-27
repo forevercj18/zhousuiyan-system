@@ -124,6 +124,10 @@
                         <span class="icon"><i class="bi bi-people"></i></span>
                         <span>用户管理</span>
                     </a>
+                    <a href="{% url 'wechat_customers_list' %}" class="nav-item {% if request.resolver_match.url_name == 'wechat_customers_list' %}active{% endif %}">
+                        <span class="icon"><i class="bi bi-wechat"></i></span>
+                        <span>微信客户</span>
+                    </a>
                     <a href="{% url 'settings' %}" class="nav-item {% if request.resolver_match.url_name == 'settings' %}active{% endif %}">
                         <span class="icon"><i class="bi bi-gear"></i></span>
                         <span>系统设置</span>

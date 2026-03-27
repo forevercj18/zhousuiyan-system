@@ -61,6 +61,24 @@
   background: #f9f9f9;
   border-radius: 8rpx;
 }
+.phone-input-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+}
+.phone-btn {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0 22rpx;
+  height: 64rpx;
+  line-height: 64rpx;
+  border-radius: 8rpx;
+  background: rgba(255, 107, 129, 0.12);
+  color: #ff6b81;
+  font-size: 24rpx;
+  border: none;
+}
 .form-picker {
   flex: 1;
   font-size: 28rpx;

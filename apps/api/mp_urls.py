@@ -4,6 +4,7 @@ from . import mp_views
 
 urlpatterns = [
     path('login/', mp_views.mp_login, name='mp_login'),
+    path('phone/', mp_views.mp_sync_phone, name='mp_sync_phone'),
     path('staff/bind/', mp_views.mp_staff_bind, name='mp_staff_bind'),
     path('staff/profile/', mp_views.mp_staff_profile, name='mp_staff_profile'),
     path('staff/dashboard/', mp_views.mp_staff_dashboard, name='mp_staff_dashboard'),

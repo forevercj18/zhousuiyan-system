@@ -50,6 +50,23 @@ Page({
   onInputAddress(e) { this.setData({ deliveryAddress: e.detail.value }); },
   onInputNotes(e)   { this.setData({ notes: e.detail.value }); },
 
+  onGetPhoneNumber(e) {
+    const detail = e.detail || {};
+    if (!detail.code) {
+      wx.showToast({ title: '未获取到手机号授权', icon: 'none' });
+      return;
+    }
+    api.ensureLogin()
+      .then(() => api.syncPhoneNumber(detail.code))
+      .then(data => {
+        this.setData({ customerPhone: data.phone || '' });
+        wx.showToast({ title: '手机号已获取', icon: 'success' });
+      })
+      .catch(err => {
+        wx.showToast({ title: err.error || '手机号获取失败', icon: 'none' });
+      });
+  },
+
   onDateChange(e) {
     this.setData({ eventDate: e.detail.value });
   },

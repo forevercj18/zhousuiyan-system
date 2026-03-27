@@ -25,14 +25,9 @@
             <div class="form-text">支持 `.csv`；`.xlsx` 需要当前环境已安装 `openpyxl`。</div>
         </div>
         <div class="col-md-4">
-            <label class="form-label">默认 SKU（兜底）</label>
-            <select class="form-select" name="default_sku_id">
-                <option value="">不指定，按款式自动匹配</option>
-                {% for sku in skus %}
-                <option value="{{ sku.id }}" {% if default_sku_id == sku.id|stringformat:'s' %}selected{% endif %}>{{ sku.code }} / {{ sku.name }}</option>
-                {% endfor %}
-            </select>
-            <div class="form-text">老表“款式”无法唯一匹配现有 SKU 时，会使用这里的默认 SKU。</div>
+            <label class="form-label">匹配规则</label>
+            <div class="form-control bg-light">按“款式 / 产品名称”精确匹配产品管理中的产品名称</div>
+            <div class="form-text">产品管理里不存在的产品，不允许导入。</div>
         </div>
         <div class="col-md-3 d-flex gap-2">
             <button class="btn btn-secondary w-100" type="submit" name="import_action" value="preview">
@@ -49,9 +44,12 @@
     <h4 class="card-title">兼容规则</h4>
     <div class="cell-sub">
         <div>1. 结构化导入：客户昵称、手机号码、地址、款式、客订来源、租金、预收押金、预定时间、发货时间、状态、发货单号。</div>
-        <div>2. 兼容保留：租金渠道、押金渠道、经手人、操作时间及其它未识别列，会自动拼进订单备注，不会丢。</div>
-        <div>3. 当前导入不会反向补建财务流水；它主要用于把历史表格订单先落进系统。</div>
-        <div>4. 建议流程：先点“预检查”看匹配结果和错误行，再点“确认导入”。</div>
+        <div>2. “款式”列现在必须精确匹配产品管理中的产品名称；不存在的产品会直接报错，不会导入。</div>
+        <div>3. 兼容保留：租金渠道、押金渠道、经手人、操作时间及其它未识别列，会自动拼进订单备注，不会丢。</div>
+        <div>4. 同一份表里如果混有预定单，会优先按“订单类型/单据类型”分流；如果没有该列，则按状态自动识别预定单与正式订单。</div>
+        <div>5. 自动识别时，`待补信息 / 待确认 / 待跟进 / 待联系 / 可转正式订单 / 可转单 / 待转单 / 已转订单 / 已取消 / 已退款` 会按预定单导入；`待处理 / 待发货 / 已发货 / 使用中 / 已归还 / 已完成 / 已取消` 会按正式订单导入。</div>
+        <div>6. 识别为预定单的行会创建到预定管理，并把“预收押金”作为订金写入。</div>
+        <div>7. 建议流程：先点“预检查”看匹配结果和错误行，再点“确认导入”。</div>
     </div>
 </div>
 
@@ -87,6 +85,7 @@
                     <th>行号</th>
                     <th>客户</th>
                     <th>手机号</th>
+                    <th>单据类型</th>
                     <th>SKU</th>
                     <th>预定日期</th>
                     <th>状态</th>
@@ -99,6 +98,7 @@
                     <td>{{ row.row_no }}</td>
                     <td>{{ row.customer_name }}</td>
                     <td>{{ row.customer_phone }}</td>
+                    <td>{{ row.record_type_label }}</td>
                     <td>{{ row.sku_name }}</td>
                     <td>{{ row.event_date }}</td>
                     <td>{{ row.status_label }}</td>
@@ -135,6 +135,18 @@
         </div>
         <div class="col-md-3">
             <div class="stat-card">
+                <div class="stat-label">正式订单</div>
+                <div class="stat-value">{{ import_summary.created_order_count }}</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="stat-label">预定单</div>
+                <div class="stat-value">{{ import_summary.created_reservation_count }}</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stat-card">
                 <div class="stat-label">失败行数</div>
                 <div class="stat-value">{{ import_summary.error_count }}</div>
             </div>
@@ -157,6 +169,29 @@
                     <td>{{ order.order_no }}</td>
                     <td>{{ order.customer_name }}</td>
                     <td>{{ order.get_status_display }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    {% if import_summary.created_reservations %}
+    <div class="table-responsive mb-3">
+        <table class="table table-hover align-middle mb-0">
+            <thead>
+                <tr>
+                    <th>预定单号</th>
+                    <th>客户</th>
+                    <th>状态</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for reservation in import_summary.created_reservations %}
+                <tr>
+                    <td>{{ reservation.reservation_no }}</td>
+                    <td>{{ reservation.customer_name }}</td>
+                    <td>{{ reservation.get_status_display }}</td>
                 </tr>
                 {% endfor %}
             </tbody>

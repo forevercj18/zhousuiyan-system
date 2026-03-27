@@ -1,6 +1,7 @@
 Param(
     [switch]$NoRunServer,
     [switch]$Acceptance,
+    [switch]$InitDemoData,
     [int]$Port = 8000
 )
 
@@ -123,9 +124,13 @@ Write-Step "Run migrations"
 Invoke-Checked -File $venvPython -Arguments @("manage.py", "migrate")
 Write-Ok "Migrations done"
 
-Write-Step "Init demo data"
-Invoke-Checked -File $venvPython -Arguments @("scripts/init_data.py")
-Write-Ok "Init data done"
+if ($InitDemoData) {
+    Write-Step "Init demo data"
+    Invoke-Checked -File $venvPython -Arguments @("scripts/init_data.py")
+    Write-Ok "Init data done"
+} else {
+    Write-Ok "Skip demo data init by default"
+}
 
 if ($Acceptance) {
     Write-Step "Generate acceptance report"
